@@ -18,6 +18,9 @@ import csv
 import warnings
 import yaml
 
+# Import format detection and conversion classes
+from formats import CSVFormatDetector
+
 warnings.filterwarnings('ignore')
 
 
@@ -117,29 +120,50 @@ class GlucoseMLPreprocessor:
         return None
     
     def process_csv_file(self, file_path: Path) -> List[Dict[str, Any]]:
-        """Process a single CSV file and extract required fields."""
+        """Process a single CSV file and extract required fields using format detection."""
         data = []
         
         try:
+            # Detect the format of the CSV file
+            format_detector = CSVFormatDetector()
+            converter = format_detector.detect_format(file_path)
+            
+            if converter is None:
+                print(f"Warning: Could not detect format for {file_path}, skipping file")
+                return data
+            
+            print(f"Detected format: {converter.get_format_name()} for {file_path.name}")
+            
             with open(file_path, 'r', encoding='utf-8') as file:
-                reader = csv.DictReader(file)
+                lines = file.readlines()
+                
+                # Find the line with headers
+                header_line_num = None
+                for line_num in range(min(3, len(lines))):
+                    line = lines[line_num].strip()
+                    if not line:
+                        continue
+                    headers = [col.strip() for col in line.split(',')]
+                    if converter.can_handle(headers):
+                        header_line_num = line_num
+                        break
+                
+                if header_line_num is None:
+                    print(f"Could not find headers for {file_path}")
+                    return data
+                
+                # Create a new file-like object starting from the header line
+                from io import StringIO
+                csv_content = ''.join(lines[header_line_num:])
+                csv_file = StringIO(csv_content)
+                
+                reader = csv.DictReader(csv_file)
                 
                 for row in reader:
-                    # Skip rows without timestamp
-                    timestamp = row.get('Timestamp (YYYY-MM-DDThh:mm:ss)', '').strip()
-                    if not timestamp:
-                        continue
-                    
-                    # Extract required fields
-                    record = {
-                        'Timestamp (YYYY-MM-DDThh:mm:ss)': timestamp,
-                        'Event Type': row.get('Event Type', '').strip(),
-                        'Glucose Value (mg/dL)': row.get('Glucose Value (mg/dL)', '').strip(),
-                        'Insulin Value (u)': row.get('Insulin Value (u)', '').strip(),
-                        'Carb Value (grams)': row.get('Carb Value (grams)', '').strip()
-                    }
-                    
-                    data.append(record)
+                    # Use the appropriate converter to process the row
+                    converted_record = converter.convert_row(row)
+                    if converted_record is not None:
+                        data.append(converted_record)
                     
         except Exception as e:
             print(f"Error processing {file_path}: {e}")
@@ -184,6 +208,9 @@ class GlucoseMLPreprocessor:
         
         if not all_data:
             raise ValueError("No valid data found in CSV files!")
+        
+        # Store original record count for statistics
+        self._original_record_count = len(all_data)
         
         # Convert to DataFrame for easier sorting
         df = pl.DataFrame(all_data)
@@ -319,8 +346,8 @@ class GlucoseMLPreprocessor:
                     pl.col('is_gap').cum_sum().alias('sequence_id')
                 ])
             else:
-                # No calibration periods found, remove the temporary removal flag column
-                df = df.drop('remove_after_calibration')
+                # No calibration periods found, no removal flag column was created
+                pass
         else:
             # Calibration period detection disabled, no removal flag needed
             pass
@@ -749,7 +776,8 @@ class GlucoseMLPreprocessor:
             'dataset_overview': {
                 'total_records': len(df),
                 'total_sequences': df['sequence_id'].n_unique(),
-                'date_range': date_range
+                'date_range': date_range,
+                'original_records': getattr(self, '_original_record_count', len(df))
             },
             'sequence_analysis': {
                 'sequence_lengths': {
@@ -940,6 +968,12 @@ def print_statistics(stats: Dict[str, Any], preprocessor: 'GlucoseMLPreprocessor
     print(f"   Total Records: {overview['total_records']:,}")
     print(f"   Total Sequences: {overview['total_sequences']:,}")
     print(f"   Date Range: {overview['date_range']['start']} to {overview['date_range']['end']}")
+    
+    # Show data preservation percentage
+    original_records = overview.get('original_records', overview['total_records'])
+    final_records = overview['total_records']
+    preservation_percentage = (final_records / original_records * 100) if original_records > 0 else 100
+    print(f"   Data Preservation: {preservation_percentage:.1f}% ({final_records:,}/{original_records:,} records)")
     
     # Sequence Analysis
     seq_analysis = stats['sequence_analysis']

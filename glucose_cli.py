@@ -186,6 +186,12 @@ def main(
                 typer.echo(f"   📏 Longest sequence: {seq_analysis['longest_sequence']:,} records")
                 typer.echo(f"   📊 Average sequence: {seq_analysis['sequence_lengths']['mean']:.1f} records")
                 
+                # Show data preservation percentage
+                original_records = overview.get('original_records', overview['total_records'])
+                final_records = overview['total_records']
+                preservation_percentage = (final_records / original_records * 100) if original_records > 0 else 100
+                typer.echo(f"   💾 Data preserved: {preservation_percentage:.1f}% ({final_records:,}/{original_records:,} records)")
+                
                 # Show replacement summary
                 if 'replacement_analysis' in statistics:
                     replacement_analysis = statistics['replacement_analysis']
