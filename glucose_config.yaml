@@ -32,6 +32,12 @@ min_sequence_len: 200
 # Default: false
 save_intermediate_files: false
 
+# Create fixed-frequency data with consistent intervals
+# When true, aligns all sequences to round minutes and ensures exact intervals
+# Glucose values are interpolated, carbs/insulin are shifted to closest points
+# Default: true (recommended for ML time series models)
+create_fixed_frequency: true
+
 # =============================================================================
 # CALIBRATION PERIOD DETECTION
 # =============================================================================

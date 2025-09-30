@@ -6,11 +6,13 @@ This script processes glucose monitoring data for ML training by:
 1. Detecting time gaps in the data
 2. Interpolating missing values for gaps <= 10 minutes
 3. Creating sequence IDs for continuous data segments
-4. Providing statistics about the processed data
+4. Creating fixed-frequency data with consistent intervals
+5. Providing statistics about the processed data
 """
 
 import polars as pl
 import numpy as np
+import pandas as pd
 from typing import Tuple, Dict, Any, List, Optional
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -27,6 +29,17 @@ warnings.filterwarnings('ignore')
 class GlucoseMLPreprocessor:
     """
     Preprocessor for glucose monitoring data to prepare it for machine learning.
+    
+    This preprocessor performs the following steps:
+    1. Consolidates multiple CSV files
+    2. Replaces High/Low glucose values with numeric equivalents
+    3. Removes calibration events
+    4. Detects gaps and creates sequence IDs
+    5. Interpolates missing values for small gaps
+    6. Filters sequences by minimum length
+    7. Creates fixed-frequency data with consistent intervals (optional)
+    8. Optionally filters to glucose-only data
+    9. Prepares final ML-ready dataset
     """
     
     @classmethod
@@ -61,10 +74,11 @@ class GlucoseMLPreprocessor:
             high_glucose_value=cli_overrides.get('high_glucose_value', high_value),
             low_glucose_value=cli_overrides.get('low_glucose_value', low_value),
             glucose_only=cli_overrides.get('glucose_only', config.get('glucose_only', False)),
+            create_fixed_frequency=cli_overrides.get('create_fixed_frequency', config.get('create_fixed_frequency', True)),
             config=config
         )
     
-    def __init__(self, expected_interval_minutes: int = 5, small_gap_max_minutes: int = 15, remove_calibration: bool = True, min_sequence_len: int = 200, save_intermediate_files: bool = False, calibration_period_minutes: int = 60*2 + 45, remove_after_calibration_hours: int = 24, high_glucose_value: int = 401, low_glucose_value: int = 39, glucose_only: bool = False, config: Optional[Dict] = None):
+    def __init__(self, expected_interval_minutes: int = 5, small_gap_max_minutes: int = 15, remove_calibration: bool = True, min_sequence_len: int = 200, save_intermediate_files: bool = False, calibration_period_minutes: int = 60*2 + 45, remove_after_calibration_hours: int = 24, high_glucose_value: int = 401, low_glucose_value: int = 39, glucose_only: bool = False, create_fixed_frequency: bool = True, config: Optional[Dict] = None):
         """
         Initialize the preprocessor.
         
@@ -79,6 +93,7 @@ class GlucoseMLPreprocessor:
             high_glucose_value: Numeric value to replace 'High' glucose readings (default: 401 mg/dL)
             low_glucose_value: Numeric value to replace 'Low' glucose readings (default: 39 mg/dL)
             glucose_only: If True, output only glucose data with simplified fields (default: False)
+            create_fixed_frequency: If True, create fixed-frequency data with consistent intervals (default: True)
             config: Optional configuration dictionary from YAML file
         """
         self.expected_interval_minutes = expected_interval_minutes
@@ -91,6 +106,7 @@ class GlucoseMLPreprocessor:
         self.high_glucose_value = high_glucose_value
         self.low_glucose_value = low_glucose_value
         self.glucose_only = glucose_only
+        self.create_fixed_frequency = create_fixed_frequency
         self.config = config
         self.expected_interval_seconds = expected_interval_minutes * 60
         self.small_gap_max_seconds = small_gap_max_minutes * 60
@@ -656,6 +672,176 @@ class GlucoseMLPreprocessor:
         
         return filtered_df, filtering_stats
     
+    def create_fixed_frequency_data(self, df: pl.DataFrame) -> Tuple[pl.DataFrame, Dict[str, Any]]:
+        """
+        Create fixed-frequency data by aligning sequences to round minutes and ensuring consistent intervals.
+        Glucose values are interpolated, while carbs and insulin are shifted to closest datapoints.
+        
+        Args:
+            df: DataFrame with processed data and sequence IDs
+            
+        Returns:
+            Tuple of (DataFrame with fixed-frequency data, statistics dictionary)
+        """
+        print(f"Creating fixed-frequency data with {self.expected_interval_minutes}-minute intervals...")
+        
+        fixed_freq_stats = {
+            'sequences_processed': 0,
+            'total_records_before': len(df),
+            'total_records_after': 0,
+            'glucose_interpolations': 0,
+            'carb_shifted_records': 0,
+            'insulin_shifted_records': 0,
+            'time_adjustments': 0
+        }
+        
+        # Process each sequence separately
+        unique_sequences = df['sequence_id'].unique().to_list()
+        all_fixed_sequences = []
+        
+        for seq_id in unique_sequences:
+            seq_data = df.filter(pl.col('sequence_id') == seq_id).sort('timestamp')
+            
+            if len(seq_data) < 2:
+                # Keep single-point sequences as-is
+                all_fixed_sequences.append(seq_data)
+                continue
+                
+            fixed_freq_stats['sequences_processed'] += 1
+            
+            # Convert to pandas for easier time manipulation
+            seq_pandas = seq_data.to_pandas()
+            
+            # Get the first timestamp and align it to the nearest round minute
+            first_timestamp = seq_pandas['timestamp'].iloc[0]
+            first_second = first_timestamp.second
+            
+            # Calculate adjustment needed to align to round minute
+            if first_second >= 30:
+                # Round up to next minute
+                adjustment_seconds = 60 - first_second
+            else:
+                # Round down to current minute
+                adjustment_seconds = -first_second
+            
+            # Create aligned start time
+            aligned_start = first_timestamp + timedelta(seconds=adjustment_seconds)
+            if adjustment_seconds != 0:
+                fixed_freq_stats['time_adjustments'] += 1
+            
+            # Calculate the end time of the sequence
+            last_timestamp = seq_pandas['timestamp'].iloc[-1]
+            
+            # Create fixed-frequency timestamps
+            current_time = aligned_start
+            fixed_timestamps = []
+            while current_time <= last_timestamp:
+                fixed_timestamps.append(current_time)
+                current_time += timedelta(minutes=self.expected_interval_minutes)
+            
+            # Create new DataFrame with fixed timestamps
+            fixed_rows = []
+            
+            for fixed_time in fixed_timestamps:
+                # Find the closest original timestamp
+                time_diffs = abs((seq_pandas['timestamp'] - fixed_time).dt.total_seconds())
+                closest_idx = time_diffs.idxmin()
+                      
+                # Create new row
+                new_row = {
+                    'Timestamp (YYYY-MM-DDThh:mm:ss)': fixed_time.strftime('%Y-%m-%dT%H:%M:%S'),
+                    'timestamp': fixed_time,
+                    'sequence_id': seq_id
+                }
+                
+                # Handle glucose interpolation - always interpolate glucose values
+                if 'Glucose Value (mg/dL)' in seq_pandas.columns:
+                    # Find the two closest points for interpolation
+                    time_diffs = abs((seq_pandas['timestamp'] - fixed_time).dt.total_seconds())
+                    sorted_indices = time_diffs.argsort()
+                    
+                    if len(sorted_indices) >= 2:
+                        # Get two closest points
+                        idx1 = sorted_indices.iloc[0]
+                        idx2 = sorted_indices.iloc[1]
+                        point1 = seq_pandas.iloc[idx1]
+                        point2 = seq_pandas.iloc[idx2]
+                        
+                        # Linear interpolation
+                        if (point1['Glucose Value (mg/dL)'] is not None and 
+                            point2['Glucose Value (mg/dL)'] is not None and
+                            not pd.isna(point1['Glucose Value (mg/dL)']) and
+                            not pd.isna(point2['Glucose Value (mg/dL)'])):
+                            
+                            # Calculate interpolation weight
+                            total_time = abs((point2['timestamp'] - point1['timestamp']).total_seconds())
+                            if total_time > 0:
+                                weight1 = abs((point2['timestamp'] - fixed_time).total_seconds()) / total_time
+                                weight2 = abs((fixed_time - point1['timestamp']).total_seconds()) / total_time
+                                
+                                interpolated_glucose = (weight1 * point1['Glucose Value (mg/dL)'] + 
+                                                      weight2 * point2['Glucose Value (mg/dL)'])
+                                new_row['Glucose Value (mg/dL)'] = interpolated_glucose
+                                fixed_freq_stats['glucose_interpolations'] += 1
+                            else:
+                                new_row['Glucose Value (mg/dL)'] = point1['Glucose Value (mg/dL)']
+                        else:
+                            # Use closest value if interpolation not possible
+                            closest_glucose = seq_pandas['Glucose Value (mg/dL)'].iloc[closest_idx]
+                            new_row['Glucose Value (mg/dL)'] = closest_glucose
+                    else:
+                        # Use closest value if not enough points for interpolation
+                        closest_glucose = seq_pandas['Glucose Value (mg/dL)'].iloc[closest_idx]
+                        new_row['Glucose Value (mg/dL)'] = closest_glucose
+                
+                # Handle insulin and carb shifting (use closest value)
+                if 'Insulin Value (u)' in seq_pandas.columns:
+                    new_row['Insulin Value (u)'] = seq_pandas['Insulin Value (u)'].iloc[closest_idx]
+                    if seq_pandas['Insulin Value (u)'].iloc[closest_idx] is not None:
+                        fixed_freq_stats['insulin_shifted_records'] += 1
+                
+                if 'Carb Value (grams)' in seq_pandas.columns:
+                    new_row['Carb Value (grams)'] = seq_pandas['Carb Value (grams)'].iloc[closest_idx]
+                    if seq_pandas['Carb Value (grams)'].iloc[closest_idx] is not None:
+                        fixed_freq_stats['carb_shifted_records'] += 1
+                
+                # Copy other fields from closest record (but not the timestamp string)
+                for col in seq_pandas.columns:
+                    if col not in ['timestamp', 'sequence_id', 'Glucose Value (mg/dL)', 'Insulin Value (u)', 'Carb Value (grams)', 'Timestamp (YYYY-MM-DDThh:mm:ss)']:
+                        new_row[col] = seq_pandas[col].iloc[closest_idx]
+                
+                fixed_rows.append(new_row)
+            
+            # Convert back to polars DataFrame
+            if fixed_rows:
+                fixed_seq_df = pl.DataFrame(fixed_rows)
+                # Ensure column types match original
+                for col in seq_data.columns:
+                    if col in fixed_seq_df.columns:
+                        fixed_seq_df = fixed_seq_df.with_columns(
+                            pl.col(col).cast(seq_data[col].dtype, strict=False)
+                        )
+                all_fixed_sequences.append(fixed_seq_df)
+        
+        # Combine all fixed sequences
+        if all_fixed_sequences:
+            df_fixed = pl.concat(all_fixed_sequences).sort(['sequence_id', 'timestamp'])
+        else:
+            df_fixed = df
+        
+        fixed_freq_stats['total_records_after'] = len(df_fixed)
+        
+        print(f"Processed {fixed_freq_stats['sequences_processed']} sequences")
+        print(f"Time adjustments made: {fixed_freq_stats['time_adjustments']}")
+        print(f"Glucose interpolations: {fixed_freq_stats['glucose_interpolations']}")
+        print(f"Insulin records shifted: {fixed_freq_stats['insulin_shifted_records']}")
+        print(f"Carb records shifted: {fixed_freq_stats['carb_shifted_records']}")
+        print(f"Records before: {fixed_freq_stats['total_records_before']:,}")
+        print(f"Records after: {fixed_freq_stats['total_records_after']:,}")
+        print("Fixed-frequency data creation complete")
+        
+        return df_fixed, fixed_freq_stats
+
     def filter_glucose_only(self, df: pl.DataFrame) -> Tuple[pl.DataFrame, Dict[str, Any]]:
         """
         Filter to keep only glucose data with simplified fields.
@@ -741,7 +927,7 @@ class GlucoseMLPreprocessor:
         
         return ml_df
     
-    def get_statistics(self, df: pl.DataFrame, gap_stats: Dict, interp_stats: Dict, removal_stats: Dict = None, filter_stats: Dict = None, replacement_stats: Dict = None, glucose_filter_stats: Dict = None) -> Dict[str, Any]:
+    def get_statistics(self, df: pl.DataFrame, gap_stats: Dict, interp_stats: Dict, removal_stats: Dict = None, filter_stats: Dict = None, replacement_stats: Dict = None, glucose_filter_stats: Dict = None, fixed_freq_stats: Dict = None) -> Dict[str, Any]:
         """
         Generate comprehensive statistics about the processed data.
         
@@ -753,6 +939,7 @@ class GlucoseMLPreprocessor:
             filter_stats: Sequence filtering statistics
             replacement_stats: High/Low value replacement statistics
             glucose_filter_stats: Glucose-only filtering statistics
+            fixed_freq_stats: Fixed-frequency data creation statistics
             
         Returns:
             Dictionary with comprehensive statistics
@@ -799,6 +986,7 @@ class GlucoseMLPreprocessor:
             'calibration_removal_analysis': removal_stats if removal_stats else {},
             'filtering_analysis': filter_stats if filter_stats else {},
             'replacement_analysis': replacement_stats if replacement_stats else {},
+            'fixed_frequency_analysis': fixed_freq_stats if fixed_freq_stats else {},
             'glucose_filtering_analysis': glucose_filter_stats if glucose_filter_stats else {},
             'data_quality': {
                 'glucose_data_completeness': (1 - df['Glucose Value (mg/dL)'].null_count() / len(df)) * 100 if 'Glucose Value (mg/dL)' in df.columns else 0,
@@ -901,32 +1089,48 @@ class GlucoseMLPreprocessor:
         
         print("-" * 40)
         
-        # Step 7: Filter to glucose-only data (if requested)
-        print("STEP 7: Filtering to glucose-only data...")
+        # Step 7: Create fixed-frequency data (if enabled)
+        if self.create_fixed_frequency:
+            print("STEP 7: Creating fixed-frequency data...")
+            df, fixed_freq_stats = self.create_fixed_frequency_data(df)
+            print("Fixed-frequency data creation complete")
+            
+            if self.save_intermediate_files:
+                intermediate_file = "step7_fixed_frequency.csv"
+                df.write_csv(intermediate_file, null_value="")
+                print(f"💾 Fixed-frequency data saved to: {intermediate_file}")
+        else:
+            print("STEP 7: Fixed-frequency data creation is disabled - skipping")
+            fixed_freq_stats = {}
+        
+        print("-" * 40)
+        
+        # Step 8: Filter to glucose-only data (if requested)
+        print("STEP 8: Filtering to glucose-only data...")
         df, glucose_filter_stats = self.filter_glucose_only(df)
         print("✓ Glucose-only filtering complete")
         
         if self.save_intermediate_files:
-            intermediate_file = "step7_glucose_only.csv"
+            intermediate_file = "step8_glucose_only.csv"
             df.write_csv(intermediate_file, null_value="")
             print(f"💾 Glucose-only data saved to: {intermediate_file}")
         
         print("-" * 40)
         
-        # Step 8: Prepare final ML dataset
-        print("STEP 8: Preparing final ML dataset...")
+        # Step 9: Prepare final ML dataset
+        print("STEP 9: Preparing final ML dataset...")
         ml_df = self.prepare_ml_data(df)
         print("✓ ML dataset preparation complete")
         
         if self.save_intermediate_files:
-            intermediate_file = "step8_ml_ready.csv"
+            intermediate_file = "step9_ml_ready.csv"
             ml_df.write_csv(intermediate_file, null_value="")
             print(f"💾 ML-ready data saved to: {intermediate_file}")
         
         print("-" * 40)
         
         # Generate statistics
-        stats = self.get_statistics(ml_df, gap_stats, interp_stats, removal_stats, filter_stats, replacement_stats, glucose_filter_stats)
+        stats = self.get_statistics(ml_df, gap_stats, interp_stats, removal_stats, filter_stats, replacement_stats, glucose_filter_stats, fixed_freq_stats)
         
         # Save final output if specified
         if output_file:
@@ -961,6 +1165,7 @@ def print_statistics(stats: Dict[str, Any], preprocessor: 'GlucoseMLPreprocessor
         print(f"   Minimum Sequence Length: {preprocessor.min_sequence_len}")
         print(f"   Calibration Period Threshold: {preprocessor.calibration_period_minutes} minutes")
         print(f"   Remove After Calibration: {preprocessor.remove_after_calibration_hours} hours")
+        print(f"   Create Fixed-Frequency Data: {preprocessor.create_fixed_frequency}")
     
     # Dataset Overview
     overview = stats['dataset_overview']
@@ -1037,6 +1242,18 @@ def print_statistics(stats: Dict[str, Any], preprocessor: 'GlucoseMLPreprocessor
         print(f"   Original Records: {filter_analysis['original_records']:,}")
         print(f"   Records After Filtering: {filter_analysis['filtered_records']:,}")
         print(f"   Records Removed: {filter_analysis['removed_records']:,}")
+    
+    # Fixed-Frequency Analysis
+    if 'fixed_frequency_analysis' in stats and stats['fixed_frequency_analysis']:
+        fixed_freq_analysis = stats['fixed_frequency_analysis']
+        print(f"\n⏱️  FIXED-FREQUENCY ANALYSIS:")
+        print(f"   Sequences Processed: {fixed_freq_analysis['sequences_processed']:,}")
+        print(f"   Time Adjustments Made: {fixed_freq_analysis['time_adjustments']:,}")
+        print(f"   Glucose Interpolations: {fixed_freq_analysis['glucose_interpolations']:,}")
+        print(f"   Insulin Records Shifted: {fixed_freq_analysis['insulin_shifted_records']:,}")
+        print(f"   Carb Records Shifted: {fixed_freq_analysis['carb_shifted_records']:,}")
+        print(f"   Records Before: {fixed_freq_analysis['total_records_before']:,}")
+        print(f"   Records After: {fixed_freq_analysis['total_records_after']:,}")
     
     # Glucose Filtering Analysis
     if 'glucose_filtering_analysis' in stats and stats['glucose_filtering_analysis']:

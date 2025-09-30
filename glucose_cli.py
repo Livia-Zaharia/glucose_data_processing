@@ -76,6 +76,11 @@ def main(
         False,
         "--glucose-only",
         help="Output only glucose data: remove Event Type, Insulin Value, and Carb Value fields, keep only rows with glucose values"
+    ),
+    create_fixed_frequency: bool = typer.Option(
+        True,
+        "--fixed-frequency/--no-fixed-frequency",
+        help="Create fixed-frequency data with consistent intervals (default: enabled)"
     )
 ):
     """
@@ -119,6 +124,7 @@ def main(
         typer.echo(f"   🗑️  Remove after calibration: {remove_after_calibration_hours} hours")
         typer.echo(f"   💾 Save intermediate files: {save_intermediate_files}")
         typer.echo(f"   🍯 Glucose only mode: {glucose_only}")
+        typer.echo(f"   ⏱️  Fixed-frequency data: {create_fixed_frequency}")
     
     try:
         # Create preprocessor from config file if provided, otherwise use CLI arguments
@@ -140,7 +146,8 @@ def main(
                 'save_intermediate_files': save_intermediate_files,
                 'calibration_period_minutes': calibration_period_minutes,
                 'remove_after_calibration_hours': remove_after_calibration_hours,
-                'glucose_only': glucose_only
+                'glucose_only': glucose_only,
+                'create_fixed_frequency': create_fixed_frequency
             }
             
             preprocessor = GlucoseMLPreprocessor.from_config_file(config_file, **cli_overrides)
@@ -154,7 +161,8 @@ def main(
                 save_intermediate_files=save_intermediate_files,
                 calibration_period_minutes=calibration_period_minutes,
                 remove_after_calibration_hours=remove_after_calibration_hours,
-                glucose_only=glucose_only
+                glucose_only=glucose_only,
+                create_fixed_frequency=create_fixed_frequency
             )
         
         # Process data
