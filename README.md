@@ -76,7 +76,8 @@ This project is designed to preprocess continuous glucose monitoring (CGM) data 
 3. **Calibration Removal**: Remove calibration events to create interpolatable gaps
 4. **Gap Detection**: Identify time gaps and create sequence boundaries
 5. **Smart Interpolation**: Fill small gaps while preserving sequence integrity
-6. **ML-Ready Output**: Generate clean, continuous sequences suitable for time-series ML models
+6. **Fixed-Frequency Creation**: Align sequences to consistent time intervals for ML models
+7. **ML-Ready Output**: Generate clean, continuous sequences suitable for time-series ML models
 
 ## 🖥️ CLI Usage
 
@@ -88,19 +89,20 @@ python glucose_cli.py <input_folder> [OPTIONS]
 
 ### Command Line Options
 
-| Option                             | Short | Default                | Description                                             |
-| ---------------------------------- | ----- | ---------------------- | ------------------------------------------------------- |
-| `--output`, `-o`                   |       | `glucose_ml_ready.csv` | Output file path for ML-ready data                      |
-| `--interval`, `-i`                 |       | `5`                    | Time discretization interval in minutes                 |
-| `--gap-max`, `-g`                  |       | `15`                   | Maximum gap size to interpolate in minutes              |
-| `--min-length`, `-l`               |       | `200`                  | Minimum sequence length to keep for ML training         |
-| `--calibration/--no-calibration`   |       | `True`                 | Interpolate calibration glucose values                  |
-| `--verbose`, `-v`                  |       | `False`                | Enable verbose output                                   |
-| `--stats/--no-stats`               |       | `True`                 | Show processing statistics                              |
-| `--save-intermediate`, `-s`        |       | `False`                | Save intermediate files after each step                 |
-| `--calibration-period`, `-c`       |       | `165`                  | Gap duration considered as calibration period (minutes) |
-| `--remove-after-calibration`, `-r` |       | `24`                   | Hours of data to remove after calibration period        |
-| `--glucose-only`                   |       | `False`                | Output only glucose data with simplified fields         |
+| Option                                   | Short | Default                | Description                                             |
+| ---------------------------------------- | ----- | ---------------------- | ------------------------------------------------------- |
+| `--output`, `-o`                         |       | `glucose_ml_ready.csv` | Output file path for ML-ready data                      |
+| `--interval`, `-i`                       |       | `5`                    | Time discretization interval in minutes                 |
+| `--gap-max`, `-g`                        |       | `15`                   | Maximum gap size to interpolate in minutes              |
+| `--min-length`, `-l`                     |       | `200`                  | Minimum sequence length to keep for ML training         |
+| `--calibration/--no-calibration`         |       | `True`                 | Interpolate calibration glucose values                  |
+| `--verbose`, `-v`                        |       | `False`                | Enable verbose output                                   |
+| `--stats/--no-stats`                     |       | `True`                 | Show processing statistics                              |
+| `--save-intermediate`, `-s`              |       | `False`                | Save intermediate files after each step                 |
+| `--calibration-period`, `-c`             |       | `165`                  | Gap duration considered as calibration period (minutes) |
+| `--remove-after-calibration`, `-r`       |       | `24`                   | Hours of data to remove after calibration period        |
+| `--glucose-only`                         |       | `False`                | Output only glucose data with simplified fields         |
+| `--fixed-frequency/--no-fixed-frequency` |       | `True`                 | Create fixed-frequency data with consistent intervals   |
 
 ### Examples
 
@@ -128,6 +130,12 @@ python glucose_cli.py ./000-csv --glucose-only --output glucose_only_data.csv
 
 # Combine glucose-only with other options
 python glucose_cli.py ./000-csv --glucose-only --min-length 100 --verbose
+
+# Disable fixed-frequency data creation (use original irregular intervals)
+python glucose_cli.py ./000-csv --no-fixed-frequency --output irregular_data.csv
+
+# Enable fixed-frequency with custom interval
+python glucose_cli.py ./000-csv --fixed-frequency --interval 10 --output fixed_10min_data.csv
 ```
 
 ## ⚙️ YAML Configuration File
@@ -173,6 +181,9 @@ glucose_value_replacement:
 
 # Glucose-only mode (simplified output)
 glucose_only: false # Output only glucose data with simplified fields
+
+# Fixed-frequency data creation
+create_fixed_frequency: true # Create fixed-frequency data with consistent intervals
 ```
 
 ### Key Configuration Features
@@ -184,6 +195,7 @@ glucose_only: false # Output only glucose data with simplified fields
 - **`remove_calibration`**: Remove calibration events to create interpolatable gaps
 - **`min_sequence_len`**: Minimum sequence length for ML training (default: 200 records)
 - **`save_intermediate_files`**: Save intermediate files for debugging
+- **`create_fixed_frequency`**: Create fixed-frequency data with consistent intervals (default: true)
 
 #### **Calibration Period Detection**
 
@@ -199,6 +211,10 @@ glucose_only: false # Output only glucose data with simplified fields
 #### **Glucose-Only Mode**
 
 - **`glucose_only`**: When enabled, outputs only glucose data with simplified fields (default: false)
+
+#### **Fixed-Frequency Data Creation**
+
+- **`create_fixed_frequency`**: When enabled, creates fixed-frequency data with consistent intervals (default: true)
 
 ### Priority Order
 
@@ -323,6 +339,20 @@ Original Records: 1,154,322
 Records After Filtering: 987,654
 ```
 
+#### 7. Fixed-Frequency Data Creation
+
+```
+Creating fixed-frequency data with 5-minute intervals...
+Processed 892 sequences
+Time adjustments made: 156
+Glucose interpolations: 12,456
+Insulin records shifted: 8,234
+Carb records shifted: 6,789
+Records before: 987,654
+Records after: 1,023,456
+Fixed-frequency data creation complete
+```
+
 ### Why More Small Gaps Than Interpolations?
 
 The difference between "Small Gaps Identified" and actual interpolations occurs due to several factors:
@@ -407,6 +437,49 @@ You can customize the High/Low replacement values through:
 
 The replacement occurs early in the pipeline (Step 2) to ensure all subsequent processing works with numeric glucose values.
 
+### Fixed-Frequency Data Creation (Step 7)
+
+The fixed-frequency step is a new feature that creates consistent time intervals for machine learning applications:
+
+#### **What It Does**
+
+1. **Time Alignment**: Aligns the first point of each sequence to the nearest round minute
+2. **Fixed Intervals**: Creates timestamps at exactly the specified interval (default: 5 minutes)
+3. **Glucose Interpolation**: Interpolates glucose values between neighboring points for smooth transitions
+4. **Event Shifting**: Shifts carb and insulin values to the closest datapoints (preserves discrete events)
+
+#### **Why It's Important for ML**
+
+- **Consistent Structure**: All sequences have exactly the same time intervals
+- **Predictable Format**: ML models can expect data points at regular intervals
+- **Better Interpolation**: Glucose values are properly interpolated rather than just shifted
+- **Preserved Events**: Carb and insulin events are preserved by shifting to closest points
+
+#### **Example Transformation**
+
+**Before (irregular intervals):**
+
+```
+10:02:30 - Glucose: 100.0
+10:08:45 - Glucose: 110.0
+10:15:15 - Glucose: 120.0
+```
+
+**After (fixed 5-minute intervals):**
+
+```
+10:00:00 - Glucose: 100.0
+10:05:00 - Glucose: 110.0 (interpolated)
+10:10:00 - Glucose: 120.0
+10:15:00 - Glucose: 130.0 (interpolated)
+```
+
+#### **Configuration Options**
+
+- **Enable/Disable**: Use `--fixed-frequency/--no-fixed-frequency` or `create_fixed_frequency: true/false`
+- **Default**: Enabled by default (recommended for ML applications)
+- **Interval**: Controlled by `--interval` parameter (default: 5 minutes)
+
 ## 🔧 Advanced Configuration
 
 ### Calibration Period Detection
@@ -445,7 +518,9 @@ This creates files like:
 - `step4_sequences_created.csv`
 - `step5_interpolated_values.csv`
 - `step6_filtered_sequences.csv`
-- `step7_ml_ready.csv`
+- `step7_fixed_frequency.csv`
+- `step8_glucose_only.csv`
+- `step9_ml_ready.csv`
 
 ## 📈 Output Data Format
 
