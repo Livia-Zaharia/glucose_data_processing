@@ -19,11 +19,19 @@ from pathlib import Path
 import csv
 import warnings
 import yaml
+import sys
 
-# Import format detection and conversion classes
-from formats import CSVFormatDetector
+# Import database detection and conversion classes
+from formats import DatabaseDetector
 
 warnings.filterwarnings('ignore')
+
+# Set console encoding to UTF-8 to handle Unicode characters
+if hasattr(sys.stdout, 'reconfigure'):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except:
+        pass
 
 
 class GlucoseMLPreprocessor:
@@ -57,20 +65,20 @@ class GlucoseMLPreprocessor:
         with open(config_path, 'r') as file:
             config = yaml.safe_load(file)
         
-        # Extract glucose replacement values
-        glucose_config = config.get('glucose_value_replacement', {})
-        high_value = glucose_config.get('high_value', 401)
-        low_value = glucose_config.get('low_value', 39)
+        # Extract database-specific configurations
+        dexcom_config = config.get('dexcom', {})
+        high_value = dexcom_config.get('high_glucose_value', 401)
+        low_value = dexcom_config.get('low_glucose_value', 39)
         
         # Create instance with config values, overridden by CLI arguments
         return cls(
             expected_interval_minutes=cli_overrides.get('expected_interval_minutes', config.get('expected_interval_minutes', 5)),
             small_gap_max_minutes=cli_overrides.get('small_gap_max_minutes', config.get('small_gap_max_minutes', 15)),
-            remove_calibration=cli_overrides.get('remove_calibration', config.get('remove_calibration', True)),
+            remove_calibration=cli_overrides.get('remove_calibration', dexcom_config.get('remove_calibration', True)),
             min_sequence_len=cli_overrides.get('min_sequence_len', config.get('min_sequence_len', 200)),
             save_intermediate_files=cli_overrides.get('save_intermediate_files', config.get('save_intermediate_files', False)),
-            calibration_period_minutes=cli_overrides.get('calibration_period_minutes', config.get('calibration_period_minutes', 165)),
-            remove_after_calibration_hours=cli_overrides.get('remove_after_calibration_hours', config.get('remove_after_calibration_hours', 24)),
+            calibration_period_minutes=cli_overrides.get('calibration_period_minutes', dexcom_config.get('calibration_period_minutes', 165)),
+            remove_after_calibration_hours=cli_overrides.get('remove_after_calibration_hours', dexcom_config.get('remove_after_calibration_hours', 24)),
             high_glucose_value=cli_overrides.get('high_glucose_value', high_value),
             low_glucose_value=cli_overrides.get('low_glucose_value', low_value),
             glucose_only=cli_overrides.get('glucose_only', config.get('glucose_only', False)),
@@ -135,132 +143,39 @@ class GlucoseMLPreprocessor:
         
         return None
     
-    def process_csv_file(self, file_path: Path) -> List[Dict[str, Any]]:
-        """Process a single CSV file and extract required fields using format detection."""
-        data = []
-        
-        try:
-            # Detect the format of the CSV file
-            format_detector = CSVFormatDetector()
-            converter = format_detector.detect_format(file_path)
-            
-            if converter is None:
-                print(f"Warning: Could not detect format for {file_path}, skipping file")
-                return data
-            
-            print(f"Detected format: {converter.get_format_name()} for {file_path.name}")
-            
-            with open(file_path, 'r', encoding='utf-8') as file:
-                lines = file.readlines()
-                
-                # Find the line with headers
-                header_line_num = None
-                for line_num in range(min(3, len(lines))):
-                    line = lines[line_num].strip()
-                    if not line:
-                        continue
-                    headers = [col.strip() for col in line.split(',')]
-                    if converter.can_handle(headers):
-                        header_line_num = line_num
-                        break
-                
-                if header_line_num is None:
-                    print(f"Could not find headers for {file_path}")
-                    return data
-                
-                # Create a new file-like object starting from the header line
-                from io import StringIO
-                csv_content = ''.join(lines[header_line_num:])
-                csv_file = StringIO(csv_content)
-                
-                reader = csv.DictReader(csv_file)
-                
-                for row in reader:
-                    # Use the appropriate converter to process the row
-                    converted_record = converter.convert_row(row)
-                    if converted_record is not None:
-                        data.append(converted_record)
-                    
-        except Exception as e:
-            print(f"Error processing {file_path}: {e}")
-        
-        return data
     
-    def consolidate_glucose_data(self, csv_folder: str, output_file: str = None) -> pl.DataFrame:
-        """Consolidate all CSV files in the folder into a single DataFrame.
+    def consolidate_glucose_data(self, data_folder: str, output_file: str = None) -> pl.DataFrame:
+        """Consolidate all data files in the folder into a single DataFrame.
         
         Args:
-            csv_folder: Path to folder containing CSV files
+            data_folder: Path to folder containing data files
             output_file: Optional path to save consolidated data
             
         Returns:
             DataFrame with consolidated and sorted data
         """
-        csv_path = Path(csv_folder)
+        # Detect database type and get appropriate converter
+        db_detector = DatabaseDetector()
+        database_type = db_detector.detect_database_type(data_folder)
         
-        if not csv_path.exists():
-            raise FileNotFoundError(f"CSV folder not found: {csv_folder}")
+        print(f"Detected database type: {database_type}")
         
-        if not csv_path.is_dir():
-            raise ValueError(f"Input must be a directory containing CSV files, got: {csv_folder}")
+        if database_type == 'unknown':
+            raise ValueError(f"Could not detect database type for folder: {data_folder}")
         
-        all_data = []
+        # Get database converter
+        database_converter = db_detector.get_database_converter(database_type, self.config or {})
         
-        # Get all CSV files
-        csv_files = list(csv_path.glob("*.csv"))
+        if database_converter is None:
+            raise ValueError(f"No converter available for database type: {database_type}")
         
-        if not csv_files:
-            raise ValueError(f"No CSV files found in directory: {csv_folder}")
+        print(f"Using {database_converter.get_database_name()}")
         
-        print(f"Found {len(csv_files)} CSV files to consolidate")
-        
-        for csv_file in sorted(csv_files):
-            print(f"Processing: {csv_file.name}")
-            file_data = self.process_csv_file(csv_file)
-            all_data.extend(file_data)
-            print(f"  ✓ Extracted {len(file_data)} records")
-        
-        print(f"\nTotal records collected: {len(all_data):,}")
-        
-        if not all_data:
-            raise ValueError("No valid data found in CSV files!")
+        # Consolidate data using the appropriate converter
+        df = database_converter.consolidate_data(data_folder, output_file)
         
         # Store original record count for statistics
-        self._original_record_count = len(all_data)
-        
-        # Convert to DataFrame for easier sorting
-        df = pl.DataFrame(all_data)
-        
-        # Parse timestamps and sort
-        print("Parsing timestamps and sorting...")
-        df = df.with_columns(
-            pl.col('Timestamp (YYYY-MM-DDThh:mm:ss)').map_elements(self.parse_timestamp, return_dtype=pl.Datetime).alias('parsed_timestamp')
-        )
-        
-        # Remove rows where timestamp parsing failed
-        df = df.filter(pl.col('parsed_timestamp').is_not_null())
-        
-        print(f"Records with valid timestamps: {len(df):,}")
-        
-        # Sort by timestamp (oldest first)
-        df = df.sort('parsed_timestamp')
-        
-        # Rename parsed_timestamp to timestamp for consistency with other methods
-        df = df.rename({'parsed_timestamp': 'timestamp'})
-        
-        # Write to output file
-        if output_file:
-            print(f"Writing consolidated data to: {output_file}")
-            df.write_csv(output_file)
-        
-        print(f"✓ Consolidation complete!")
-        print(f"Total records in output: {len(df):,}")
-        
-        # Show date range
-        if len(df) > 0:
-            first_date = df['Timestamp (YYYY-MM-DDThh:mm:ss)'][0]
-            last_date = df['Timestamp (YYYY-MM-DDThh:mm:ss)'][-1]
-            print(f"Date range: {first_date} to {last_date}")
+        self._original_record_count = len(df)
 
         return df
         
@@ -270,121 +185,79 @@ class GlucoseMLPreprocessor:
         Detect time gaps and create sequence IDs, marking calibration periods and sequences for removal.
         
         Args:
-            df: DataFrame with timestamp column
+            df: DataFrame with timestamp column and optionally user_id column
             
         Returns:
             Tuple of (DataFrame with sequence IDs and removal flags, statistics dictionary)
         """
         print("Detecting gaps and creating sequences...")
         
-        # Sort by timestamp to ensure proper order
-        df = df.sort('timestamp')
-        
-        # Calculate time differences and create sequence IDs
-        df = df.with_columns([
-            pl.col('timestamp').diff().dt.total_seconds().alias('time_diff_seconds'),
-        ]).with_columns([
-            (pl.col('time_diff_seconds') > self.small_gap_max_seconds).alias('is_gap'),
-        ]).with_columns([
-            pl.col('is_gap').cum_sum().alias('sequence_id')
-        ])
-        
-        # Detect calibration periods and mark sequences for removal
-        calibration_stats = {
-            'calibration_periods_detected': 0,
-            'sequences_marked_for_removal': 0,
-            'total_records_marked_for_removal': 0
-        }
-        
-        # Check if calibration period detection is enabled
-        if (self.calibration_period_minutes > self.small_gap_max_minutes and 
-            self.remove_after_calibration_hours > 0):
+        # Handle multi-user data by processing each user separately
+        if 'user_id' in df.columns:
+            print("Processing multi-user data - creating sequences per user...")
+            all_sequences = []
             
-            print(f"Detecting calibration periods (gaps >= {self.calibration_period_minutes} minutes)...")
+            for user_id in df['user_id'].unique():
+                user_data = df.filter(pl.col('user_id') == user_id).sort('timestamp')
+                user_sequences = self._create_sequences_for_user(user_data, user_id)
+                all_sequences.append(user_sequences)
             
-            # Find gaps that are calibration periods (>= calibration_period_minutes)
-            calibration_gaps = df.filter(
-                (pl.col('is_gap') == True) & 
-                (pl.col('time_diff_seconds') >= self.calibration_period_seconds)
-            )
-            
-            calibration_stats['calibration_periods_detected'] = len(calibration_gaps)
-            
-            if len(calibration_gaps) > 0:
-                print(f"Found {len(calibration_gaps)} calibration periods")
-                
-                # Mark sequences after calibration periods for removal
-                removal_start_times = []
-                for row in calibration_gaps.iter_rows(named=True):
-                    # Get the sequence that starts after this calibration gap
-                    calibration_end_time = row['timestamp']
-                    removal_start_time = calibration_end_time
-                    removal_end_time = calibration_end_time + timedelta(hours=self.remove_after_calibration_hours)
-                    removal_start_times.append((removal_start_time, removal_end_time))
-                
-                # Create removal flag for records in the specified time period after calibration
-                def should_remove_record(timestamp, removal_periods):
-                    for start_time, end_time in removal_periods:
-                        if start_time <= timestamp <= end_time:
-                            return True
-                    return False
-                
-                # Add removal flag
-                df = df.with_columns([
-                    pl.col('timestamp').map_elements(
-                        lambda ts: should_remove_record(ts, removal_start_times),
-                        return_dtype=pl.Boolean
-                    ).alias('remove_after_calibration')
-                ])
-                
-                # Count records marked for removal
-                records_to_remove = df.filter(pl.col('remove_after_calibration') == True)
-                calibration_stats['total_records_marked_for_removal'] = len(records_to_remove)
-                
-                # Count sequences that will be affected
-                affected_sequences = records_to_remove['sequence_id'].unique()
-                calibration_stats['sequences_marked_for_removal'] = len(affected_sequences)
-                
-                print(f"Marked {calibration_stats['total_records_marked_for_removal']:,} records for removal")
-                print(f"Affected {calibration_stats['sequences_marked_for_removal']} sequences")
-                
-                # Actually remove the marked records
-                df = df.filter(pl.col('remove_after_calibration') != True)
-                print(f"Removed {calibration_stats['total_records_marked_for_removal']:,} records after calibration periods")
-                
-                # Recalculate sequence IDs after removal (remove the temporary removal flag column)
-                df = df.drop('remove_after_calibration')
-                df = df.with_columns([
-                    pl.col('timestamp').diff().dt.total_seconds().alias('time_diff_seconds'),
-                ]).with_columns([
-                    (pl.col('time_diff_seconds') > self.small_gap_max_seconds).alias('is_gap'),
-                ]).with_columns([
-                    pl.col('is_gap').cum_sum().alias('sequence_id')
-                ])
-            else:
-                # No calibration periods found, no removal flag column was created
-                pass
+            # Combine all user sequences
+            df = pl.concat(all_sequences).sort(['user_id', 'sequence_id', 'timestamp'])
         else:
-            # Calibration period detection disabled, no removal flag needed
-            pass
+            # Single user data - process normally
+            df = df.sort('timestamp')
+            df = self._create_sequences_for_user(df)
         
         # Calculate statistics
-        sequence_counts = df.group_by('sequence_id').count().sort('sequence_id')
+        sequence_counts = df.group_by(['user_id', 'sequence_id'] if 'user_id' in df.columns else ['sequence_id']).count().sort(['user_id', 'sequence_id'] if 'user_id' in df.columns else 'sequence_id')
         stats = {
             'total_sequences': df['sequence_id'].max() + 1,
-            'gap_positions': df['is_gap'].sum(),
-            'total_gaps': df['is_gap'].sum(),
+            'gap_positions': df['is_gap'].sum() if 'is_gap' in df.columns else 0,
+            'total_gaps': df['is_gap'].sum() if 'is_gap' in df.columns else 0,
             'sequence_lengths': dict(zip(sequence_counts['sequence_id'].to_list(), sequence_counts['count'].to_list())),
-            'calibration_period_analysis': calibration_stats
+            'calibration_period_analysis': {'calibration_periods_detected': 0, 'sequences_marked_for_removal': 0, 'total_records_marked_for_removal': 0}
         }
         
         print(f"Created {stats['total_sequences']} sequences")
         print(f"Found {stats['total_gaps']} gaps > {self.small_gap_max_minutes} minutes")
         
         # Remove temporary columns
-        df = df.drop(['time_diff_seconds', 'is_gap'])
+        columns_to_remove = ['time_diff_seconds', 'is_gap']
+        df = df.drop([col for col in columns_to_remove if col in df.columns])
         
         return df, stats
+    
+    def _create_sequences_for_user(self, user_df: pl.DataFrame, user_id: str = None) -> pl.DataFrame:
+        """
+        Create sequences for a single user's data.
+        
+        Args:
+            user_df: DataFrame with data for a single user
+            user_id: User ID (for multi-user data)
+            
+        Returns:
+            DataFrame with sequence IDs added
+        """
+        # Calculate time differences and create sequence IDs
+        df = user_df.with_columns([
+                    pl.col('timestamp').diff().dt.total_seconds().alias('time_diff_seconds'),
+                ]).with_columns([
+                    (pl.col('time_diff_seconds') > self.small_gap_max_seconds).alias('is_gap'),
+                ]).with_columns([
+                    pl.col('is_gap').cum_sum().alias('sequence_id')
+                ])
+        
+        # For multi-user data, create unique sequence IDs by combining user_id and sequence_id
+        if user_id is not None:
+            # Create global sequence IDs by offsetting based on user
+            max_previous_sequences = 0  # This would need to be tracked across users
+            # For now, we'll use a simpler approach: user_id * 100000 + sequence_id
+            df = df.with_columns([
+                (pl.lit(int(user_id) * 100000) + pl.col('sequence_id')).alias('sequence_id')
+            ])
+        
+        return df
     
     def interpolate_missing_values(self, df: pl.DataFrame) -> Tuple[pl.DataFrame, Dict[str, Any]]:
         """
@@ -464,6 +337,10 @@ class GlucoseMLPreprocessor:
                                     'sequence_id': seq_id
                                 }
                                 
+                                # Add user_id if it exists in the original data
+                                if 'user_id' in seq_pandas.columns:
+                                    new_row['user_id'] = prev_row['user_id']
+                                
                                 # Linear interpolation for numeric columns
                                 numeric_cols = ['Glucose Value (mg/dL)', 'Insulin Value (u)', 'Carb Value (grams)']
                                 interpolations_made = 0
@@ -498,23 +375,26 @@ class GlucoseMLPreprocessor:
                 
                 # Add interpolated rows to the sequence
                 if new_rows:
-                    interpolated_df = pl.DataFrame(new_rows)
-                    # Ensure all columns have the same types as the original sequence
-                    interpolated_df = interpolated_df.with_columns([
-                        pl.col('sequence_id').cast(seq_data['sequence_id'].dtype),
-                        # Ensure numeric columns have the same type as original data
-                        pl.col('Glucose Value (mg/dL)').cast(seq_data['Glucose Value (mg/dL)'].dtype, strict=False),
-                        pl.col('Insulin Value (u)').cast(seq_data['Insulin Value (u)'].dtype, strict=False),
-                        pl.col('Carb Value (grams)').cast(seq_data['Carb Value (grams)'].dtype, strict=False)
-                    ])
-                    seq_data = pl.concat([seq_data, interpolated_df]).sort(['sequence_id', 'timestamp'])
+                    # Create DataFrame with explicit schema based on original sequence
+                    schema = {col: seq_data[col].dtype for col in seq_data.columns}
+                    interpolated_df = pl.DataFrame(new_rows, schema=schema)
+                    # Ensure column order matches original sequence
+                    interpolated_df = interpolated_df.select(seq_data.columns)
+                    # Sort by user_id and timestamp if user_id exists, otherwise just by sequence_id and timestamp
+                    if 'user_id' in seq_data.columns:
+                        seq_data = pl.concat([seq_data, interpolated_df]).sort(['user_id', 'sequence_id', 'timestamp'])
+                    else:
+                        seq_data = pl.concat([seq_data, interpolated_df]).sort(['sequence_id', 'timestamp'])
             
             # Update the main DataFrame
             df = df.filter(pl.col('sequence_id') != seq_id)  # Remove original sequence data
             df = pl.concat([df, seq_data])
         
-        # Sort by sequence_id and timestamp
-        df = df.sort(['sequence_id', 'timestamp'])
+        # Sort by user_id, sequence_id and timestamp if user_id exists, otherwise just by sequence_id and timestamp
+        if 'user_id' in df.columns:
+            df = df.sort(['user_id', 'sequence_id', 'timestamp'])
+        else:
+            df = df.sort(['sequence_id', 'timestamp'])
         
         print(f"Identified and processed {interpolation_stats['small_gaps_filled']} small gaps")
         print(f"Created {interpolation_stats['total_interpolated_data_points']} interpolated data points")
@@ -524,96 +404,6 @@ class GlucoseMLPreprocessor:
         
         return df, interpolation_stats
     
-    def remove_calibration_values(self, df: pl.DataFrame) -> Tuple[pl.DataFrame, Dict[str, Any]]:
-        """
-        Remove all rows with Calibration Event Type to create gaps that can be interpolated.
-        
-        Args:
-            df: DataFrame with glucose data
-            
-        Returns:
-            Tuple of (DataFrame with calibration rows removed, statistics dictionary)
-        """
-        print("Removing calibration events to create interpolatable gaps...")
-        
-        removal_stats = {
-            'calibration_events_removed': 0,
-            'records_before_removal': len(df),
-            'records_after_removal': 0,
-            'calibration_removal_enabled': self.remove_calibration
-        }
-        
-        if not self.remove_calibration:
-            print("Calibration removal is disabled - keeping all calibration events")
-            removal_stats['records_after_removal'] = len(df)
-            return df, removal_stats
-        
-        # Count calibration events before removal
-        calibration_events = df.filter(pl.col('Event Type') == 'Calibration')
-        removal_stats['calibration_events_removed'] = len(calibration_events)
-        
-        if len(calibration_events) == 0:
-            print("No calibration events found")
-            removal_stats['records_after_removal'] = len(df)
-            return df, removal_stats
-        
-        print(f"Found {len(calibration_events)} calibration events to remove")
-        
-        # Remove all calibration events
-        df_filtered = df.filter(pl.col('Event Type') != 'Calibration')
-        removal_stats['records_after_removal'] = len(df_filtered)
-        
-        print(f"Removed {removal_stats['calibration_events_removed']} calibration events")
-        print(f"Records before removal: {removal_stats['records_before_removal']:,}")
-        print(f"Records after removal: {removal_stats['records_after_removal']:,}")
-        print("✓ Calibration events removed - gaps can now be interpolated")
-        
-        return df_filtered, removal_stats
-    
-    def replace_high_low_values(self, df: pl.DataFrame) -> Tuple[pl.DataFrame, Dict[str, Any]]:
-        """
-        Replace 'High' with 401 and 'Low' with 39 in the glucose field.
-        
-        Args:
-            df: DataFrame with glucose data
-            
-        Returns:
-            Tuple of (DataFrame with replaced values, statistics dictionary)
-        """
-        print("Replacing High/Low glucose values with numeric equivalents...")
-        
-        replacement_stats = {
-            'high_replacements': 0,
-            'low_replacements': 0,
-            'total_replacements': 0,
-            'glucose_field_converted_to_float': False
-        }
-        
-        # Count High and Low values before replacement
-        high_count = df.filter(pl.col('Glucose Value (mg/dL)') == 'High').height
-        low_count = df.filter(pl.col('Glucose Value (mg/dL)') == 'Low').height
-        
-        replacement_stats['high_replacements'] = high_count
-        replacement_stats['low_replacements'] = low_count
-        replacement_stats['total_replacements'] = high_count + low_count
-        
-        # Replace High and Low with configurable values, then convert to float
-        df = df.with_columns([
-            pl.col('Glucose Value (mg/dL)')
-            .str.replace('High', str(self.high_glucose_value))
-            .str.replace('Low', str(self.low_glucose_value))
-            .cast(pl.Float64, strict=False)
-            .alias('Glucose Value (mg/dL)')
-        ])
-        
-        replacement_stats['glucose_field_converted_to_float'] = True
-        
-        print(f"Replaced {replacement_stats['high_replacements']} 'High' values with {self.high_glucose_value}")
-        print(f"Replaced {replacement_stats['low_replacements']} 'Low' values with {self.low_glucose_value}")
-        print(f"Total replacements: {replacement_stats['total_replacements']}")
-        print("✓ Glucose field converted to Float64 type")
-        
-        return df, replacement_stats
     
     def filter_sequences_by_length(self, df: pl.DataFrame) -> Tuple[pl.DataFrame, Dict[str, Any]]:
         """
@@ -643,7 +433,7 @@ class GlucoseMLPreprocessor:
         }
         
         if len(sequences_to_keep) == 0:
-            print("⚠️  Warning: No sequences meet the minimum length requirement!")
+            print("Warning: No sequences meet the minimum length requirement!")
             return df, filtering_stats
         
         # Filter the DataFrame to keep only sequences that meet the length requirement
@@ -756,43 +546,56 @@ class GlucoseMLPreprocessor:
                 
                 # Handle glucose interpolation - always interpolate glucose values
                 if 'Glucose Value (mg/dL)' in seq_pandas.columns:
-                    # Find the two closest points for interpolation
-                    time_diffs = abs((seq_pandas['timestamp'] - fixed_time).dt.total_seconds())
-                    sorted_indices = time_diffs.argsort()
+                    # Find valid glucose values for interpolation
+                    valid_glucose_mask = (
+                        seq_pandas['Glucose Value (mg/dL)'].notna() & 
+                        (seq_pandas['Glucose Value (mg/dL)'] != '') &
+                        (seq_pandas['Glucose Value (mg/dL)'].astype(str).str.strip() != '')
+                    )
                     
-                    if len(sorted_indices) >= 2:
-                        # Get two closest points
-                        idx1 = sorted_indices.iloc[0]
-                        idx2 = sorted_indices.iloc[1]
-                        point1 = seq_pandas.iloc[idx1]
-                        point2 = seq_pandas.iloc[idx2]
+                    if valid_glucose_mask.any():
+                        # Get valid glucose points
+                        valid_glucose_data = seq_pandas[valid_glucose_mask].copy()
                         
-                        # Linear interpolation
-                        if (point1['Glucose Value (mg/dL)'] is not None and 
-                            point2['Glucose Value (mg/dL)'] is not None and
-                            not pd.isna(point1['Glucose Value (mg/dL)']) and
-                            not pd.isna(point2['Glucose Value (mg/dL)'])):
+                        # Calculate time differences to find closest valid glucose points
+                        time_diffs = abs((valid_glucose_data['timestamp'] - fixed_time).dt.total_seconds())
+                        sorted_indices = time_diffs.argsort()
+                        
+                        if len(sorted_indices) >= 2:
+                            # Get two closest valid glucose points
+                            idx1 = sorted_indices.iloc[0]
+                            idx2 = sorted_indices.iloc[1]
+                            point1 = valid_glucose_data.iloc[idx1]
+                            point2 = valid_glucose_data.iloc[idx2]
                             
-                            # Calculate interpolation weight
-                            total_time = abs((point2['timestamp'] - point1['timestamp']).total_seconds())
-                            if total_time > 0:
-                                weight1 = abs((point2['timestamp'] - fixed_time).total_seconds()) / total_time
-                                weight2 = abs((fixed_time - point1['timestamp']).total_seconds()) / total_time
+                            # Linear interpolation between valid glucose points
+                            try:
+                                glucose1 = float(point1['Glucose Value (mg/dL)'])
+                                glucose2 = float(point2['Glucose Value (mg/dL)'])
                                 
-                                interpolated_glucose = (weight1 * point1['Glucose Value (mg/dL)'] + 
-                                                      weight2 * point2['Glucose Value (mg/dL)'])
-                                new_row['Glucose Value (mg/dL)'] = interpolated_glucose
-                                fixed_freq_stats['glucose_interpolations'] += 1
-                            else:
-                                new_row['Glucose Value (mg/dL)'] = point1['Glucose Value (mg/dL)']
+                                # Calculate interpolation weight
+                                total_time = abs((point2['timestamp'] - point1['timestamp']).total_seconds())
+                                if total_time > 0:
+                                    weight1 = abs((point2['timestamp'] - fixed_time).total_seconds()) / total_time
+                                    weight2 = abs((fixed_time - point1['timestamp']).total_seconds()) / total_time
+                                    
+                                    interpolated_glucose = (weight1 * glucose1 + weight2 * glucose2)
+                                    new_row['Glucose Value (mg/dL)'] = interpolated_glucose
+                                    fixed_freq_stats['glucose_interpolations'] += 1
+                                else:
+                                    new_row['Glucose Value (mg/dL)'] = glucose1
+                            except (ValueError, TypeError):
+                                # If conversion fails, use closest valid glucose value
+                                closest_valid_idx = valid_glucose_data.iloc[sorted_indices.iloc[0]]
+                                new_row['Glucose Value (mg/dL)'] = closest_valid_idx['Glucose Value (mg/dL)']
                         else:
-                            # Use closest value if interpolation not possible
-                            closest_glucose = seq_pandas['Glucose Value (mg/dL)'].iloc[closest_idx]
-                            new_row['Glucose Value (mg/dL)'] = closest_glucose
+                            # Use closest valid glucose value if not enough points for interpolation
+                            closest_valid_idx = valid_glucose_data.iloc[sorted_indices.iloc[0]]
+                            new_row['Glucose Value (mg/dL)'] = closest_valid_idx['Glucose Value (mg/dL)']
                     else:
-                        # Use closest value if not enough points for interpolation
-                        closest_glucose = seq_pandas['Glucose Value (mg/dL)'].iloc[closest_idx]
-                        new_row['Glucose Value (mg/dL)'] = closest_glucose
+                        # No valid glucose values found - this shouldn't happen in practice
+                        # but we'll set to None to avoid errors
+                        new_row['Glucose Value (mg/dL)'] = None
                 
                 # Handle insulin and carb shifting (use closest value)
                 if 'Insulin Value (u)' in seq_pandas.columns:
@@ -814,13 +617,9 @@ class GlucoseMLPreprocessor:
             
             # Convert back to polars DataFrame
             if fixed_rows:
-                fixed_seq_df = pl.DataFrame(fixed_rows)
-                # Ensure column types match original
-                for col in seq_data.columns:
-                    if col in fixed_seq_df.columns:
-                        fixed_seq_df = fixed_seq_df.with_columns(
-                            pl.col(col).cast(seq_data[col].dtype, strict=False)
-                        )
+                # Create DataFrame with explicit schema based on original sequence
+                schema = {col: seq_data[col].dtype for col in seq_data.columns}
+                fixed_seq_df = pl.DataFrame(fixed_rows, schema=schema)
                 all_fixed_sequences.append(fixed_seq_df)
         
         # Combine all fixed sequences
@@ -887,7 +686,7 @@ class GlucoseMLPreprocessor:
         print(f"Records removed (no glucose): {filtering_stats['records_removed']:,}")
         if filtering_stats['fields_removed']:
             print(f"Fields removed: {', '.join(filtering_stats['fields_removed'])}")
-        print("✓ Glucose-only filtering complete")
+        print("OK: Glucose-only filtering complete")
         
         return df_filtered, filtering_stats
     
@@ -1009,10 +808,10 @@ class GlucoseMLPreprocessor:
         Returns:
             Tuple of (processed DataFrame, statistics dictionary)
         """
-        print("🍯 Starting glucose data preprocessing for ML...")
-        print(f"⚙️  Time discretization interval: {self.expected_interval_minutes} minutes")
-        print(f"⚙️  Small gap max (interpolation limit): {self.small_gap_max_minutes} minutes")
-        print(f"⚙️  Save intermediate files: {self.save_intermediate_files}")
+        print("Starting glucose data preprocessing for ML...")
+        print(f"Time discretization interval: {self.expected_interval_minutes} minutes")
+        print(f"Small gap max (interpolation limit): {self.small_gap_max_minutes} minutes")
+        print(f"Save intermediate files: {self.save_intermediate_files}")
         print("-" * 50)
         
         # Step 1: Consolidate CSV files (mandatory step)
@@ -1025,120 +824,96 @@ class GlucoseMLPreprocessor:
         df = self.consolidate_glucose_data(csv_folder, consolidated_file)
         
         if self.save_intermediate_files:
-            print(f"💾 Consolidated data saved to: {consolidated_file}")
+            print(f"Consolidated data saved to: {consolidated_file}")
         
         print("-" * 40)
         
-        # Step 2: Replace High/Low glucose values
-        print("STEP 2: Replacing High/Low glucose values...")
-        df, replacement_stats = self.replace_high_low_values(df)
-        print("✓ High/Low value replacement complete")
-        
-        if self.save_intermediate_files:
-            intermediate_file = "step2_high_low_replaced.csv"
-            df.write_csv(intermediate_file, null_value="")
-            print(f"💾 Data with High/Low replacements saved to: {intermediate_file}")
-        
-        print("-" * 40)
-        
-        # Step 3: Remove calibration events
-        print("STEP 3: Removing calibration events...")
-        df, removal_stats = self.remove_calibration_values(df)
-        print("✓ Calibration event removal complete")
-        
-        if self.save_intermediate_files:
-            intermediate_file = "step3_calibrations_removed.csv"
-            df.write_csv(intermediate_file, null_value="")
-            print(f"💾 Data with calibrations removed saved to: {intermediate_file}")
-        
-        print("-" * 40)
-        
-        # Step 4: Detect gaps and create sequences
-        print("STEP 4: Detecting gaps and creating sequences...")
+        # Step 2: Detect gaps and create sequences
+        print("STEP 2: Detecting gaps and creating sequences...")
         df, gap_stats = self.detect_gaps_and_sequences(df)
-        print("✓ Gap detection and sequence creation complete")
+        print("OK: Gap detection and sequence creation complete")
         
         if self.save_intermediate_files:
-            intermediate_file = "step4_sequences_created.csv"
+            intermediate_file = "step2_sequences_created.csv"
             df.write_csv(intermediate_file, null_value="")
-            print(f"💾 Data with sequences saved to: {intermediate_file}")
+            print(f"Data with sequences saved to: {intermediate_file}")
         
         print("-" * 40)
         
-        # Step 5: Interpolate missing values
-        print("STEP 5: Interpolating missing values...")
+        # Step 3: Interpolate missing values
+        print("STEP 3: Interpolating missing values...")
         df, interp_stats = self.interpolate_missing_values(df)
-        print("✓ Missing value interpolation complete")
+        print("OK: Missing value interpolation complete")
         
         if self.save_intermediate_files:
-            intermediate_file = "step5_interpolated_values.csv"
+            intermediate_file = "step3_interpolated_values.csv"
             df.write_csv(intermediate_file, null_value="")
-            print(f"💾 Data with interpolated values saved to: {intermediate_file}")
+            print(f"Data with interpolated values saved to: {intermediate_file}")
         
         print("-" * 40)
         
-        # Step 6: Filter sequences by minimum length
-        print("STEP 6: Filtering sequences by minimum length...")
+        # Step 4: Filter sequences by minimum length
+        print("STEP 4: Filtering sequences by minimum length...")
         df, filter_stats = self.filter_sequences_by_length(df)
-        print("✓ Sequence filtering complete")
+        print("OK: Sequence filtering complete")
         
         if self.save_intermediate_files:
-            intermediate_file = "step6_filtered_sequences.csv"
+            intermediate_file = "step4_filtered_sequences.csv"
             df.write_csv(intermediate_file, null_value="")
-            print(f"💾 Filtered data saved to: {intermediate_file}")
+            print(f"Filtered data saved to: {intermediate_file}")
         
         print("-" * 40)
         
-        # Step 7: Create fixed-frequency data (if enabled)
+        # Step 5: Create fixed-frequency data (if enabled)
         if self.create_fixed_frequency:
-            print("STEP 7: Creating fixed-frequency data...")
+            print("STEP 5: Creating fixed-frequency data...")
             df, fixed_freq_stats = self.create_fixed_frequency_data(df)
             print("Fixed-frequency data creation complete")
             
             if self.save_intermediate_files:
-                intermediate_file = "step7_fixed_frequency.csv"
+                intermediate_file = "step5_fixed_frequency.csv"
                 df.write_csv(intermediate_file, null_value="")
-                print(f"💾 Fixed-frequency data saved to: {intermediate_file}")
+                print(f"Fixed-frequency data saved to: {intermediate_file}")
         else:
-            print("STEP 7: Fixed-frequency data creation is disabled - skipping")
+            print("STEP 5: Fixed-frequency data creation is disabled - skipping")
             fixed_freq_stats = {}
         
         print("-" * 40)
         
-        # Step 8: Filter to glucose-only data (if requested)
-        print("STEP 8: Filtering to glucose-only data...")
+        # Step 6: Filter to glucose-only data (if requested)
+        print("STEP 6: Filtering to glucose-only data...")
         df, glucose_filter_stats = self.filter_glucose_only(df)
-        print("✓ Glucose-only filtering complete")
+        print("OK: Glucose-only filtering complete")
         
         if self.save_intermediate_files:
-            intermediate_file = "step8_glucose_only.csv"
+            intermediate_file = "step6_glucose_only.csv"
             df.write_csv(intermediate_file, null_value="")
-            print(f"💾 Glucose-only data saved to: {intermediate_file}")
+            print(f"Glucose-only data saved to: {intermediate_file}")
         
         print("-" * 40)
         
-        # Step 9: Prepare final ML dataset
-        print("STEP 9: Preparing final ML dataset...")
+        # Step 7: Prepare final ML dataset
+        print("STEP 7: Preparing final ML dataset...")
         ml_df = self.prepare_ml_data(df)
-        print("✓ ML dataset preparation complete")
+        print("OK: ML dataset preparation complete")
         
         if self.save_intermediate_files:
-            intermediate_file = "step9_ml_ready.csv"
+            intermediate_file = "step7_ml_ready.csv"
             ml_df.write_csv(intermediate_file, null_value="")
-            print(f"💾 ML-ready data saved to: {intermediate_file}")
+            print(f"ML-ready data saved to: {intermediate_file}")
         
         print("-" * 40)
         
-        # Generate statistics
-        stats = self.get_statistics(ml_df, gap_stats, interp_stats, removal_stats, filter_stats, replacement_stats, glucose_filter_stats, fixed_freq_stats)
+        # Generate statistics (removed database-specific stats that are now handled by converters)
+        stats = self.get_statistics(ml_df, gap_stats, interp_stats, None, filter_stats, None, glucose_filter_stats, fixed_freq_stats)
         
         # Save final output if specified
         if output_file:
             ml_df.write_csv(output_file, null_value="")
-            print(f"💾 Final processed data saved to: {output_file}")
+            print(f"Final processed data saved to: {output_file}")
         
         print("-" * 50)
-        print("✅ Preprocessing completed successfully!")
+        print("Preprocessing completed successfully!")
         
         return ml_df, stats
     
@@ -1158,7 +933,7 @@ def print_statistics(stats: Dict[str, Any], preprocessor: 'GlucoseMLPreprocessor
     
     # Show parameters if preprocessor is provided
     if preprocessor:
-        print(f"\n⚙️  PARAMETERS USED:")
+        print(f"\nPARAMETERS USED:")
         print(f"   Time Discretization Interval: {preprocessor.expected_interval_minutes} minutes")
         print(f"   Small Gap Max (Interpolation Limit): {preprocessor.small_gap_max_minutes} minutes")
         print(f"   Remove Calibration Events: {preprocessor.remove_calibration}")
@@ -1169,7 +944,7 @@ def print_statistics(stats: Dict[str, Any], preprocessor: 'GlucoseMLPreprocessor
     
     # Dataset Overview
     overview = stats['dataset_overview']
-    print(f"\n📊 DATASET OVERVIEW:")
+    print(f"\nDATASET OVERVIEW:")
     print(f"   Total Records: {overview['total_records']:,}")
     print(f"   Total Sequences: {overview['total_sequences']:,}")
     print(f"   Date Range: {overview['date_range']['start']} to {overview['date_range']['end']}")
@@ -1182,7 +957,7 @@ def print_statistics(stats: Dict[str, Any], preprocessor: 'GlucoseMLPreprocessor
     
     # Sequence Analysis
     seq_analysis = stats['sequence_analysis']
-    print(f"\n🔗 SEQUENCE ANALYSIS:")
+    print(f"\nSEQUENCE ANALYSIS:")
     print(f"   Longest Sequence: {seq_analysis['longest_sequence']:,} records")
     print(f"   Shortest Sequence: {seq_analysis['shortest_sequence']:,} records")
     print(f"   Average Sequence Length: {seq_analysis['sequence_lengths']['mean']:.1f} records")
@@ -1190,14 +965,14 @@ def print_statistics(stats: Dict[str, Any], preprocessor: 'GlucoseMLPreprocessor
     
     # Gap Analysis
     gap_analysis = stats['gap_analysis']
-    print(f"\n⏰ GAP ANALYSIS:")
+    print(f"\nGAP ANALYSIS:")
     print(f"   Total Gaps > {preprocessor.small_gap_max_minutes if preprocessor else 'N/A'} minutes: {gap_analysis['total_gaps']:,}")
     print(f"   Sequences Created: {gap_analysis['total_sequences']:,}")
     
     # Calibration Period Analysis
     if 'calibration_period_analysis' in gap_analysis:
         calib_analysis = gap_analysis['calibration_period_analysis']
-        print(f"\n🔬 CALIBRATION PERIOD ANALYSIS:")
+        print(f"\nCALIBRATION PERIOD ANALYSIS:")
         print(f"   Calibration Periods Detected: {calib_analysis['calibration_periods_detected']:,}")
         print(f"   Records Removed After Calibration: {calib_analysis['total_records_marked_for_removal']:,}")
         print(f"   Sequences Affected: {calib_analysis['sequences_marked_for_removal']:,}")
@@ -1205,15 +980,15 @@ def print_statistics(stats: Dict[str, Any], preprocessor: 'GlucoseMLPreprocessor
     # High/Low Value Replacement Analysis
     if 'replacement_analysis' in stats and stats['replacement_analysis']:
         replacement_analysis = stats['replacement_analysis']
-        print(f"\n🔄 HIGH/LOW VALUE REPLACEMENT ANALYSIS:")
-        print(f"   High Values Replaced (→ 401): {replacement_analysis['high_replacements']:,}")
-        print(f"   Low Values Replaced (→ 39): {replacement_analysis['low_replacements']:,}")
+        print(f"\nHIGH/LOW VALUE REPLACEMENT ANALYSIS:")
+        print(f"   High Values Replaced (-> 401): {replacement_analysis['high_replacements']:,}")
+        print(f"   Low Values Replaced (-> 39): {replacement_analysis['low_replacements']:,}")
         print(f"   Total Replacements: {replacement_analysis['total_replacements']:,}")
         print(f"   Glucose Field Type: {'Float64' if replacement_analysis['glucose_field_converted_to_float'] else 'String'}")
     
     # Interpolation Analysis
     interp_analysis = stats['interpolation_analysis']
-    print(f"\n🔧 INTERPOLATION ANALYSIS:")
+    print(f"\nINTERPOLATION ANALYSIS:")
     print(f"   Small Gaps Identified and Processed: {interp_analysis['small_gaps_filled']:,}")
     print(f"   Interpolated Data Points Created: {interp_analysis['total_interpolated_data_points']:,}")
     print(f"   Total Field Interpolations: {interp_analysis['total_interpolations']:,}")
@@ -1226,49 +1001,49 @@ def print_statistics(stats: Dict[str, Any], preprocessor: 'GlucoseMLPreprocessor
     # Calibration Removal Analysis
     if 'calibration_removal_analysis' in stats and stats['calibration_removal_analysis']:
         removal_analysis = stats['calibration_removal_analysis']
-        print(f"\n🗑️  CALIBRATION REMOVAL ANALYSIS:")
-        print(f"   Calibration Events Removed: {removal_analysis['calibration_events_removed']:,}")
-        print(f"   Records Before Removal: {removal_analysis['records_before_removal']:,}")
-        print(f"   Records After Removal: {removal_analysis['records_after_removal']:,}")
-        print(f"   Removal Enabled: {removal_analysis['calibration_removal_enabled']}")
+        print(f"\nCALIBRATION REMOVAL ANALYSIS:")
+        print(f"   Calibration Events Removed: {removal_analysis.get('calibration_events_removed', 0):,}")
+        print(f"   Records Before Removal: {removal_analysis.get('records_before_removal', 0):,}")
+        print(f"   Records After Removal: {removal_analysis.get('records_after_removal', 0):,}")
+        print(f"   Removal Enabled: {removal_analysis.get('calibration_removal_enabled', False)}")
     
     # Filtering Analysis
     if 'filtering_analysis' in stats and stats['filtering_analysis']:
         filter_analysis = stats['filtering_analysis']
-        print(f"\n🔍 SEQUENCE FILTERING ANALYSIS:")
-        print(f"   Original Sequences: {filter_analysis['original_sequences']:,}")
-        print(f"   Sequences After Filtering: {filter_analysis['filtered_sequences']:,}")
-        print(f"   Sequences Removed: {filter_analysis['removed_sequences']:,}")
-        print(f"   Original Records: {filter_analysis['original_records']:,}")
-        print(f"   Records After Filtering: {filter_analysis['filtered_records']:,}")
-        print(f"   Records Removed: {filter_analysis['removed_records']:,}")
+        print(f"\nSEQUENCE FILTERING ANALYSIS:")
+        print(f"   Original Sequences: {filter_analysis.get('original_sequences', 0):,}")
+        print(f"   Sequences After Filtering: {filter_analysis.get('filtered_sequences', 0):,}")
+        print(f"   Sequences Removed: {filter_analysis.get('removed_sequences', 0):,}")
+        print(f"   Original Records: {filter_analysis.get('original_records', 0):,}")
+        print(f"   Records After Filtering: {filter_analysis.get('filtered_records', 0):,}")
+        print(f"   Records Removed: {filter_analysis.get('removed_records', 0):,}")
     
     # Fixed-Frequency Analysis
     if 'fixed_frequency_analysis' in stats and stats['fixed_frequency_analysis']:
         fixed_freq_analysis = stats['fixed_frequency_analysis']
-        print(f"\n⏱️  FIXED-FREQUENCY ANALYSIS:")
-        print(f"   Sequences Processed: {fixed_freq_analysis['sequences_processed']:,}")
-        print(f"   Time Adjustments Made: {fixed_freq_analysis['time_adjustments']:,}")
-        print(f"   Glucose Interpolations: {fixed_freq_analysis['glucose_interpolations']:,}")
-        print(f"   Insulin Records Shifted: {fixed_freq_analysis['insulin_shifted_records']:,}")
-        print(f"   Carb Records Shifted: {fixed_freq_analysis['carb_shifted_records']:,}")
-        print(f"   Records Before: {fixed_freq_analysis['total_records_before']:,}")
-        print(f"   Records After: {fixed_freq_analysis['total_records_after']:,}")
+        print(f"\nFIXED-FREQUENCY ANALYSIS:")
+        print(f"   Sequences Processed: {fixed_freq_analysis.get('sequences_processed', 0):,}")
+        print(f"   Time Adjustments Made: {fixed_freq_analysis.get('time_adjustments', 0):,}")
+        print(f"   Glucose Interpolations: {fixed_freq_analysis.get('glucose_interpolations', 0):,}")
+        print(f"   Insulin Records Shifted: {fixed_freq_analysis.get('insulin_shifted_records', 0):,}")
+        print(f"   Carb Records Shifted: {fixed_freq_analysis.get('carb_shifted_records', 0):,}")
+        print(f"   Records Before: {fixed_freq_analysis.get('total_records_before', 0):,}")
+        print(f"   Records After: {fixed_freq_analysis.get('total_records_after', 0):,}")
     
     # Glucose Filtering Analysis
     if 'glucose_filtering_analysis' in stats and stats['glucose_filtering_analysis']:
         glucose_filter_analysis = stats['glucose_filtering_analysis']
-        print(f"\n🍯 GLUCOSE-ONLY FILTERING ANALYSIS:")
-        print(f"   Glucose-Only Mode Enabled: {glucose_filter_analysis['glucose_only_enabled']}")
-        print(f"   Original Records: {glucose_filter_analysis['original_records']:,}")
-        print(f"   Records After Filtering: {glucose_filter_analysis['records_after_filtering']:,}")
-        print(f"   Records Removed (No Glucose): {glucose_filter_analysis['records_removed']:,}")
-        if glucose_filter_analysis['fields_removed']:
+        print(f"\nGLUCOSE-ONLY FILTERING ANALYSIS:")
+        print(f"   Glucose-Only Mode Enabled: {glucose_filter_analysis.get('glucose_only_enabled', False)}")
+        print(f"   Original Records: {glucose_filter_analysis.get('original_records', 0):,}")
+        print(f"   Records After Filtering: {glucose_filter_analysis.get('records_after_filtering', 0):,}")
+        print(f"   Records Removed (No Glucose): {glucose_filter_analysis.get('records_removed', 0):,}")
+        if glucose_filter_analysis.get('fields_removed', []):
             print(f"   Fields Removed: {', '.join(glucose_filter_analysis['fields_removed'])}")
     
     # Data Quality
     quality = stats['data_quality']
-    print(f"\n✅ DATA QUALITY:")
+    print(f"\nDATA QUALITY:")
     print(f"   Glucose Data Completeness: {quality['glucose_data_completeness']:.1f}%")
     print(f"   Insulin Data Completeness: {quality['insulin_data_completeness']:.1f}%")
     print(f"   Carb Data Completeness: {quality['carb_data_completeness']:.1f}%")
@@ -1279,13 +1054,17 @@ def print_statistics(stats: Dict[str, Any], preprocessor: 'GlucoseMLPreprocessor
 
 if __name__ == "__main__":
     # Configuration
-    CSV_FOLDER = "000-csv"  # Folder containing multiple CSV files
-    CONSOLIDATED_FILE = "consolidated_glucose_data.csv"  # Consolidated data file
-    OUTPUT_FILE = "glucose_ml_ready.csv"  # Final ML-ready output
+    DATA_FOLDER = "zendo_small"  # Folder containing data files (can be any supported database type)
+    OUTPUT_FILE = "glucose_ml_ready_test.csv"  # Final ML-ready output
+    CONFIG_FILE = "glucose_config_new.yaml"  # Configuration file
     
-    # Processing mode - consolidation is now mandatory
-    
-    # Initialize preprocessor with configurable parameters
+    # Initialize preprocessor from configuration file
+    try:
+        preprocessor = GlucoseMLPreprocessor.from_config_file(CONFIG_FILE)
+        print(f"Loaded configuration from: {CONFIG_FILE}")
+    except FileNotFoundError:
+        print(f"Configuration file {CONFIG_FILE} not found, using default settings")
+        # Fallback to default configuration
     preprocessor = GlucoseMLPreprocessor(
         expected_interval_minutes=5,   # Time discretization interval
         small_gap_max_minutes=15,      # Maximum gap size to interpolate
@@ -1297,21 +1076,24 @@ if __name__ == "__main__":
     
     # Process data
     try:
+        # Start from data folder and consolidate (database type auto-detected)
+        print("Starting glucose data processing...")
+        print(f"Data folder: {DATA_FOLDER}")
+        print(f"Output file: {OUTPUT_FILE}")
+        print("-" * 50)
        
-        # Start from CSV folder and consolidate (mandatory step)
-        print("Starting glucose data processing from CSV folder...")
-        ml_data, statistics = preprocessor.process(CSV_FOLDER, OUTPUT_FILE)
+        ml_data, statistics = preprocessor.process(DATA_FOLDER, OUTPUT_FILE)
         
         # Print statistics
         print_statistics(statistics, preprocessor)
         
         # Show sample of processed data
-        print(f"\n📋 SAMPLE OF PROCESSED DATA:")
+        print(f"\nSAMPLE OF PROCESSED DATA:")
         print(ml_data.head(10))
         
-        print(f"\n💾 Output file: {OUTPUT_FILE}")
-        print(f"📈 Ready for machine learning training!")
+        print(f"\nOutput file: {OUTPUT_FILE}")
+        print(f"Ready for machine learning training!")
         
     except Exception as e:
-        print(f"❌ Error during processing: {e}")
+        print(f"Error during processing: {e}")
         raise

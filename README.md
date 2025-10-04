@@ -245,9 +245,45 @@ python glucose_cli.py ./000-csv --config my_custom_config.yaml
 
 ## 📁 Input File Requirements
 
-### Folder Structure
+### Supported Database Types
 
-Place your CSV files in a folder (e.g., `000-csv/`) with the following structure:
+The system now supports multiple database types with automatic detection and conversion:
+
+#### 1. **Dexcom G6 Database** (`dexcom`)
+
+- **Format**: Single CSV files with Dexcom G6 format
+- **Structure**: Mono-user database
+- **Files**: `000-14 oct-28 oct 2019.csv`, `001-28 oct-10 nov 2019.csv`, etc.
+- **Detection**: Files with numeric prefixes and date ranges in names
+
+#### 2. **FreeStyle Libre 3 Database** (`libre3`)
+
+- **Format**: Libre 3 CSV export format
+- **Structure**: Mono-user database
+- **Files**: `FreeStyle_Libre_3__11-12-2024.csv`
+- **Detection**: Files with "FreeStyle_Libre_3" in name
+
+#### 3. **University of Manchester T1D Database** (`uom`) - **NEW!**
+
+- **Format**: Multi-user database with organized folder structure
+- **Structure**: Multi-user database with separate folders for different data types
+- **Files**: Organized by data type and user ID
+- **Detection**: Files with "UoM" prefix and user ID patterns
+
+### Database Auto-Detection
+
+The system automatically detects the database type based on file patterns and folder structure:
+
+```bash
+# Works with any supported database type
+python glucose_cli.py ./000-csv        # Dexcom format
+python glucose_cli.py ./libre3         # Libre 3 format
+python glucose_cli.py ./zendo_small    # UoM T1D format
+```
+
+### Folder Structures
+
+#### **Dexcom G6 Format**
 
 ```
 000-csv/
@@ -257,9 +293,40 @@ Place your CSV files in a folder (e.g., `000-csv/`) with the following structure
 └── ... (additional CSV files)
 ```
 
-### CSV File Format
+#### **FreeStyle Libre 3 Format**
 
-Each CSV file should contain glucose monitoring data with the following required columns:
+```
+libre3/
+├── FreeStyle_Libre_3__11-12-2024.csv
+└── ... (additional Libre 3 files)
+```
+
+#### **University of Manchester T1D Format** - **NEW!**
+
+```
+zendo_small/
+├── Glucose Data/
+│   ├── UoMGlucose2301.csv
+│   ├── UoMGlucose2302.csv
+│   └── ...
+├── Insulin Data/
+│   ├── Basal Data/
+│   │   ├── UoMBasal2301.csv
+│   │   └── ...
+│   └── Bolus Data/
+│       ├── UoMBolus2301.csv
+│       └── ...
+├── Nutrition Data/
+│   ├── UoMNutrition2301.csv
+│   └── ...
+└── README.md
+```
+
+### CSV File Formats
+
+Each database type has its own CSV format, but the system automatically converts them to a standardized format:
+
+#### **Standardized Output Format**
 
 | Column Name                       | Description           | Example                                 |
 | --------------------------------- | --------------------- | --------------------------------------- |
@@ -268,8 +335,9 @@ Each CSV file should contain glucose monitoring data with the following required
 | `Glucose Value (mg/dL)`           | Glucose reading       | `120.0`                                 |
 | `Insulin Value (u)`               | Insulin amount        | `2.5`                                   |
 | `Carb Value (grams)`              | Carbohydrate amount   | `30.0`                                  |
+| `user_id`                         | User identifier       | `2301` (for multi-user databases)       |
 
-### Supported Event Types
+#### **Supported Event Types**
 
 - **EGV**: Estimated Glucose Value (main glucose readings)
 - **Calibration**: Calibration events (can cause data spikes)
@@ -445,8 +513,9 @@ The fixed-frequency step is a new feature that creates consistent time intervals
 
 1. **Time Alignment**: Aligns the first point of each sequence to the nearest round minute
 2. **Fixed Intervals**: Creates timestamps at exactly the specified interval (default: 5 minutes)
-3. **Glucose Interpolation**: Interpolates glucose values between neighboring points for smooth transitions
+3. **Glucose Interpolation**: **IMPROVED** - Ensures every row has a glucose value by interpolating from the nearest valid glucose readings, regardless of event type
 4. **Event Shifting**: Shifts carb and insulin values to the closest datapoints (preserves discrete events)
+5. **Quality Assurance**: Guarantees no empty glucose values in the final output
 
 #### **Why It's Important for ML**
 
@@ -607,6 +676,153 @@ The `--glucose-only` option is particularly useful for:
 - Simplified time series analysis
 - Educational or demonstration purposes
 
+## 🔧 Converter Architecture
+
+### Overview
+
+The system uses a modular converter architecture that automatically detects and processes different database formats. This allows support for multiple glucose monitoring devices and database structures without manual configuration.
+
+### Architecture Components
+
+#### 1. **Database Detection System**
+
+- **`DatabaseDetector`**: Automatically identifies database type based on file patterns
+- **Supported Types**: Dexcom G6, FreeStyle Libre 3, University of Manchester T1D
+- **Detection Logic**: Analyzes file names, folder structure, and header patterns
+
+#### 2. **Database Converters**
+
+- **`DatabaseConverter`**: Abstract base class for all database converters
+- **`MonoUserDatabaseConverter`**: Handles single-user databases (Dexcom, Libre 3)
+- **`MultiUserDatabaseConverter`**: Handles multi-user databases (UoM T1D)
+
+#### 3. **Format Detection System**
+
+- **`CSVFormatDetector`**: Detects individual CSV file formats within databases
+- **Format Converters**: Specialized converters for each data type (glucose, insulin, nutrition, etc.)
+- **Auto-Detection**: Automatically identifies file format based on column headers
+
+### Supported Database Types
+
+#### **Mono-User Databases**
+
+- **Dexcom G6**: Single user, multiple CSV files with date ranges
+- **FreeStyle Libre 3**: Single user, Libre 3 export format
+
+#### **Multi-User Databases**
+
+- **University of Manchester T1D**: Multiple users, organized folder structure by data type
+
+### Adding New Database Types
+
+To add support for a new database type:
+
+1. **Create Database Converter**: Extend `DatabaseConverter` class
+2. **Implement Detection Logic**: Add file pattern detection in `DatabaseDetector`
+3. **Create Format Converters**: Add specialized CSV format converters if needed
+4. **Register Converter**: Add to the `database_converters` dictionary
+
+### Benefits of This Architecture
+
+- **Extensibility**: Easy to add new database types
+- **Maintainability**: Clear separation of concerns
+- **Flexibility**: Handles both mono-user and multi-user databases
+- **Auto-Detection**: No manual configuration required
+- **Standardization**: All databases converted to consistent format
+
+## 📊 University of Manchester T1D Dataset (Zendo)
+
+### Overview
+
+The **T1D-UOM (Type 1 Diabetes - University of Manchester)** dataset is a comprehensive longitudinal multimodal dataset containing Type 1 Diabetes data from 16 individuals collected from October 2023 to August 2024.
+
+### Dataset Features
+
+- **Multi-Modal Data**: Glucose, insulin, nutrition, activity, and sleep data
+- **Longitudinal**: Up to 10+ months of continuous monitoring per participant
+- **High Frequency**: Glucose readings every 5 minutes, activity data every minute
+- **Comprehensive**: Includes both medical and lifestyle factors
+- **Ethically Approved**: University of Manchester Ethical Approval 2024-15687-33719
+
+### Data Structure
+
+#### **Glucose Data** (`UoMGlucose*.csv`)
+
+- **Format**: `bg_ts` (datetime), `value` (mmol/L)
+- **Frequency**: Every 5 minutes
+- **Coverage**: 356,146 records across 17 files
+- **Units**: Blood glucose in mmol/L (automatically converted to mg/dL)
+
+#### **Insulin Data**
+
+- **Basal Insulin** (`UoMBasal*.csv`): `basal_ts`, `basal_dose`, `insulin_kind`
+- **Bolus Insulin** (`UoMBolus*.csv`): `bolus_ts`, `bolus_dose`
+- **Coverage**: 20,407 basal records, 5,660 bolus records
+- **Units**: Insulin units (U) and units per hour (U/h)
+
+#### **Nutrition Data** (`UoMNutrition*.csv`)
+
+- **Format**: `meal_ts`, `meal_type`, `carbs_g`, `prot_g`, `fat_g`, `fibre_g`
+- **Meal Types**: Breakfast, Lunch, Dinner, Snack
+- **Coverage**: 4,351 nutrition records
+- **Units**: Grams for all macronutrients
+
+#### **Activity Data** (`UoMActivity*.csv`)
+
+- **Format**: `activity_ts`, `activity_type`, `step_count`, `distance_m`, `met`
+- **Types**: SEDENTARY, WALKING, RUNNING, GENERIC
+- **Coverage**: 228,681 activity records
+- **Metrics**: Steps, distance, calories, MET values
+
+#### **Sleep Data** (`UoMSleep*.csv`)
+
+- **Format**: `sleep_ts`, `heart_rate`, `sleep_level`, `stress_level_value`
+- **Coverage**: 323,340 sleep records
+- **Metrics**: Heart rate, sleep stages, stress levels
+
+### Usage with the Preprocessor
+
+The dataset is fully compatible with the preprocessing system:
+
+```bash
+# Process the full zendo dataset
+python glucose_cli.py ./zenodo_archive
+
+# Process the smaller test dataset
+python glucose_cli.py ./zendo_small
+
+# Process with custom settings
+python glucose_cli.py ./zendo_small --interval 5 --min-length 100 --verbose
+```
+
+### Key Advantages
+
+1. **Multi-User Support**: Handles 16 different participants automatically
+2. **Data Integration**: Combines glucose, insulin, nutrition, and activity data
+3. **High Quality**: Ethically approved, research-grade dataset
+4. **Comprehensive**: Covers all aspects of diabetes management
+5. **Longitudinal**: Long-term data for trend analysis and prediction
+
+### Citation
+
+If you use this dataset, please cite:
+
+```bibtex
+@dataset{t1d_uom_2024,
+  title={T1D-UOM – A Longitudinal Multimodal Dataset of Type 1 Diabetes},
+  author={University of Manchester},
+  year={2024},
+  doi={10.5281/zenodo.15169263},
+  url={https://doi.org/10.5281/zenodo.15169263}
+}
+```
+
+### Dataset Access
+
+- **Full Dataset**: Available on [Zenodo](https://doi.org/10.5281/zenodo.15169263)
+- **Test Dataset**: `zendo_small/` folder (subset for testing)
+- **Documentation**: Complete data dictionary in `zendo_small/README.md`
+
 ## 🤝 Contributing
 
 1. Fork the repository
@@ -614,6 +830,50 @@ The `--glucose-only` option is particularly useful for:
 3. Make your changes
 4. Add tests if applicable
 5. Submit a pull request
+
+## 🆕 Recent Updates
+
+### Version 2.0 - Major Architecture Overhaul
+
+#### **New Converter System**
+
+- **Modular Architecture**: Complete rewrite with pluggable database converters
+- **Auto-Detection**: Automatic database type detection based on file patterns
+- **Multi-Database Support**: Dexcom G6, FreeStyle Libre 3, University of Manchester T1D
+- **Extensible Design**: Easy to add new database types and formats
+
+#### **Enhanced Data Processing**
+
+- **Fixed Glucose Interpolation**: **CRITICAL FIX** - Ensures every row has a glucose value in fixed-frequency data
+- **Improved Error Handling**: Robust statistics handling with proper null checks
+- **Multi-User Support**: Full support for multi-user databases with user ID tracking
+- **Better Data Quality**: Guaranteed glucose values in all output rows
+
+#### **New Dataset Support**
+
+- **University of Manchester T1D Dataset**: Full support for the comprehensive T1D-UOM dataset
+- **Multi-Modal Data**: Glucose, insulin, nutrition, activity, and sleep data integration
+- **Longitudinal Analysis**: Support for long-term data analysis across multiple participants
+
+#### **Bug Fixes**
+
+- **KeyError Fixes**: Resolved statistics KeyError issues in CLI and preprocessor
+- **Glucose Interpolation**: Fixed missing glucose values in non-EGV event rows
+- **Statistics Robustness**: Added proper null checks and default values throughout
+
+### Migration Guide
+
+If upgrading from a previous version:
+
+1. **Database Detection**: The system now automatically detects database types - no manual configuration needed
+2. **Output Format**: Output format remains the same, but now includes `user_id` for multi-user databases
+3. **Configuration**: Existing configuration files remain compatible
+4. **CLI Usage**: No changes to command-line interface - just point to your data folder
+
+### Breaking Changes
+
+- **None**: All existing functionality remains compatible
+- **Enhanced**: All features are enhanced with better error handling and data quality
 
 ## 📄 License
 

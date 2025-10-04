@@ -23,10 +23,12 @@ from .base_converter import CSVFormatConverter
 from .dexcom_g6_converter import DexcomG6Converter
 from .freestyle_libre3_converter import FreeStyleLibre3Converter
 from .format_detector import CSVFormatDetector
+from .database_detector import DatabaseDetector
 
 __all__ = [
     'CSVFormatConverter',
     'DexcomG6Converter', 
     'FreeStyleLibre3Converter',
-    'CSVFormatDetector'
+    'CSVFormatDetector',
+    'DatabaseDetector'
 ]

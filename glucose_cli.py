@@ -201,9 +201,9 @@ def main(
                 typer.echo(f"   💾 Data preserved: {preservation_percentage:.1f}% ({final_records:,}/{original_records:,} records)")
                 
                 # Show replacement summary
-                if 'replacement_analysis' in statistics:
+                if 'replacement_analysis' in statistics and statistics['replacement_analysis']:
                     replacement_analysis = statistics['replacement_analysis']
-                    if replacement_analysis['total_replacements'] > 0:
+                    if replacement_analysis.get('total_replacements', 0) > 0:
                         typer.echo(f"   🔄 High/Low replacements: {replacement_analysis['total_replacements']:,} values")
                 
                 # Show interpolation summary
@@ -213,22 +213,22 @@ def main(
                 typer.echo(f"   🔧 Field interpolations: {interp_analysis['total_interpolations']:,} values")
                 
                 # Show calibration removal summary if enabled
-                if remove_calibration and 'calibration_removal_analysis' in statistics:
+                if remove_calibration and 'calibration_removal_analysis' in statistics and statistics['calibration_removal_analysis']:
                     removal_analysis = statistics['calibration_removal_analysis']
-                    if removal_analysis['calibration_events_removed'] > 0:
+                    if removal_analysis.get('calibration_events_removed', 0) > 0:
                         typer.echo(f"   🗑️  Calibration events removed: {removal_analysis['calibration_events_removed']:,}")
                 
                 # Show filtering summary
-                if 'filtering_analysis' in statistics:
+                if 'filtering_analysis' in statistics and statistics['filtering_analysis']:
                     filter_analysis = statistics['filtering_analysis']
-                    typer.echo(f"   🔍 Sequences filtered: {filter_analysis['removed_sequences']:,} removed")
+                    typer.echo(f"   🔍 Sequences filtered: {filter_analysis.get('removed_sequences', 0):,} removed")
                 
                 # Show calibration period summary
-                gap_analysis = statistics['gap_analysis']
-                if 'calibration_period_analysis' in gap_analysis:
+                gap_analysis = statistics.get('gap_analysis', {})
+                if 'calibration_period_analysis' in gap_analysis and gap_analysis['calibration_period_analysis']:
                     calib_analysis = gap_analysis['calibration_period_analysis']
-                    if calib_analysis['calibration_periods_detected'] > 0:
-                        typer.echo(f"   🔬 Calibration periods: {calib_analysis['calibration_periods_detected']:,} detected, {calib_analysis['total_records_marked_for_removal']:,} records removed")
+                    if calib_analysis.get('calibration_periods_detected', 0) > 0:
+                        typer.echo(f"   🔬 Calibration periods: {calib_analysis['calibration_periods_detected']:,} detected, {calib_analysis.get('total_records_marked_for_removal', 0):,} records removed")
         
     except Exception as e:
         typer.echo(f"❌ Error during processing: {e}", err=True)

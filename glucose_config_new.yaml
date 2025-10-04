@@ -1,0 +1,35 @@
+# Glucose Data Preprocessing Configuration
+# Database-specific settings for different glucose monitoring systems
+
+# General preprocessing settings
+expected_interval_minutes: 5
+small_gap_max_minutes: 15
+min_sequence_len: 200
+save_intermediate_files: false
+create_fixed_frequency: true
+glucose_only: false
+
+# Database-specific configurations
+dexcom:
+  # Dexcom G6 specific settings
+  high_glucose_value: 401
+  low_glucose_value: 39
+  remove_calibration: true
+  calibration_period_minutes: 165 # 2h 45m
+  remove_after_calibration_hours: 24
+
+libre3:
+  # FreeStyle Libre 3 specific settings
+  # No High/Low replacement or calibration removal needed
+  # as Libre3 provides numeric glucose values
+
+uom:
+  # University of Manchester T1D dataset specific settings
+  # Multi-user database - each user processed separately
+  # User ID extracted from filename patterns like UoMGlucose2301.csv
+  # Data types: glucose, basal insulin, bolus insulin, nutrition
+
+zendo:
+  # Zendo database specific settings (similar to UoM)
+  # Multi-user database with separate data types
+  # User ID and data type extracted from folder structure

@@ -11,6 +11,10 @@ from pathlib import Path
 from .base_converter import CSVFormatConverter
 from .dexcom_g6_converter import DexcomG6Converter
 from .freestyle_libre3_converter import FreeStyleLibre3Converter
+from .uom_glucose_converter import UoMGlucoseConverter
+from .uom_basal_converter import UoMBasalConverter
+from .uom_bolus_converter import UoMBolusConverter
+from .uom_nutrition_converter import UoMNutritionConverter
 
 
 class CSVFormatDetector:
@@ -20,7 +24,11 @@ class CSVFormatDetector:
         """Initialize the format detector with available converters."""
         self.converters = [
             DexcomG6Converter(),
-            FreeStyleLibre3Converter()
+            FreeStyleLibre3Converter(),
+            UoMGlucoseConverter(),
+            UoMBasalConverter(),
+            UoMBolusConverter(),
+            UoMNutritionConverter()
         ]
     
     def detect_format(self, file_path: Path) -> Optional[CSVFormatConverter]:
@@ -51,6 +59,9 @@ class CSVFormatDetector:
                     # Check each converter
                     for converter in self.converters:
                         if converter.can_handle(headers):
+                            # Set context for UoM converter if needed
+                            if hasattr(converter, 'set_context'):
+                                converter.set_context(file_path)
                             return converter
                 
                 return None
