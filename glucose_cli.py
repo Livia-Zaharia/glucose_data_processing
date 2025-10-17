@@ -8,14 +8,14 @@ allowing users to process glucose data from CSV folders through command line arg
 
 import typer
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 import sys
 from glucose_ml_preprocessor import GlucoseMLPreprocessor, print_statistics
 
 def main(
-    input_folder: str = typer.Argument(
+    input_folders: List[str] = typer.Argument(
         ..., 
-        help="Path to folder containing CSV files to process"
+        help="Path(s) to folder(s) containing CSV files to process. Multiple folders can be specified to combine different databases."
     ),
     config_file: str = typer.Option(
         None,
@@ -84,37 +84,55 @@ def main(
     )
 ):
     """
-    Process glucose data from CSV folder for machine learning.
+    Process glucose data from CSV folder(s) for machine learning.
     
-    This tool consolidates CSV files from the input folder and processes them through
+    This tool consolidates CSV files from one or more input folders and processes them through
     the complete ML preprocessing pipeline including High/Low value replacement, calibration removal, 
     gap detection, interpolation, calibration period detection, and sequence filtering.
     
+    When multiple folders are provided, sequence IDs are tracked and offset to ensure consistency
+    across different databases, producing a single unified output file.
+    
     Examples:
-        # Use default settings
+        # Use default settings with a single folder
         glucose-cli ./csv-folder --output ml_data.csv --verbose
+        
+        # Process multiple databases into one file
+        glucose-cli ./000-csv ./libre3 ./zendo_small --output combined_ml_data.csv
         
         # Use configuration file with CLI overrides
         glucose-cli ./csv-folder --config glucose_config.yaml --output ml_data.csv
         
         # Override specific parameters from config file
         glucose-cli ./csv-folder --config glucose_config.yaml --interval 10 --gap-max 30
+        
+        # Combine multiple databases with verbose output
+        glucose-cli ./dexcom_data ./libre3_data --output combined.csv --verbose
     """
     
-    # Validate input path
-    input_path_obj = Path(input_folder)
-    if not input_path_obj.exists():
-        typer.echo(f"❌ Error: Input folder '{input_folder}' does not exist", err=True)
-        raise typer.Exit(1)
-    
-    if not input_path_obj.is_dir():
-        typer.echo(f"❌ Error: Input must be a folder containing CSV files, got: '{input_folder}'", err=True)
-        raise typer.Exit(1)
+    # Validate input paths
+    validated_folders = []
+    for input_folder in input_folders:
+        input_path_obj = Path(input_folder)
+        if not input_path_obj.exists():
+            typer.echo(f"❌ Error: Input folder '{input_folder}' does not exist", err=True)
+            raise typer.Exit(1)
+        
+        if not input_path_obj.is_dir():
+            typer.echo(f"❌ Error: Input must be a folder containing CSV files, got: '{input_folder}'", err=True)
+            raise typer.Exit(1)
+        
+        validated_folders.append(input_folder)
     
     # Initialize preprocessor
     if verbose:
         typer.echo("⚙️  Initializing glucose data preprocessor...")
-        typer.echo(f"   📁 Input folder: {input_folder}")
+        if len(validated_folders) == 1:
+            typer.echo(f"   📁 Input folder: {validated_folders[0]}")
+        else:
+            typer.echo(f"   📁 Input folders ({len(validated_folders)}):")
+            for i, folder in enumerate(validated_folders, 1):
+                typer.echo(f"      {i}. {folder}")
         typer.echo(f"   📄 Output file: {output_file}")
         typer.echo(f"   ⏱️  Time interval: {interval_minutes} minutes")
         typer.echo(f"   📏 Gap max: {gap_max_minutes} minutes")
@@ -167,11 +185,20 @@ def main(
         
         # Process data
         if verbose:
-            typer.echo("🔄 Starting glucose data processing pipeline...")
+            if len(validated_folders) == 1:
+                typer.echo("🔄 Starting glucose data processing pipeline...")
+            else:
+                typer.echo(f"🔄 Starting multi-database processing pipeline for {len(validated_folders)} databases...")
         
-        ml_data, statistics = preprocessor.process(
-            input_folder, output_file
-        )
+        # Process single or multiple databases
+        if len(validated_folders) == 1:
+            ml_data, statistics = preprocessor.process(
+                validated_folders[0], output_file
+            )
+        else:
+            ml_data, statistics = preprocessor.process_multiple_databases(
+                validated_folders, output_file
+            )
         
         # Show results
         typer.echo(f"✅ Processing completed successfully!")
