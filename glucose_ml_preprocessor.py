@@ -472,7 +472,7 @@ class GlucoseMLPreprocessor:
                                     new_row['user_id'] = prev_row['user_id']
                                 
                                 # Linear interpolation for numeric columns
-                                numeric_cols = ['Glucose Value (mg/dL)', 'Insulin Value (u)', 'Fast-Acting Insulin Value (u)', 'Long-Acting Insulin Value (u)', 'Carb Value (grams)']
+                                numeric_cols = ['Glucose Value (mg/dL)', 'Fast-Acting Insulin Value (u)', 'Long-Acting Insulin Value (u)', 'Carb Value (grams)']
                                 interpolations_made = 0
                                 for col in numeric_cols:
                                     # Skip columns that don't exist in the data
@@ -721,7 +721,7 @@ class GlucoseMLPreprocessor:
         
         # 2. Shift Events (Nearest Neighbor / Rounding)
         # Include all potential event columns
-        potential_event_cols = ['Insulin Value (u)', 'Fast-Acting Insulin Value (u)', 'Long-Acting Insulin Value (u)', 'Carb Value (grams)', 'Event Type', 'user_id']
+        potential_event_cols = ['Fast-Acting Insulin Value (u)', 'Long-Acting Insulin Value (u)', 'Carb Value (grams)', 'Event Type', 'user_id']
         event_cols = [col for col in potential_event_cols if col in seq_data.columns]
         
         if event_cols:
@@ -815,7 +815,7 @@ class GlucoseMLPreprocessor:
         # Define aggregations
         agg_exprs = []
         for col in cols:
-            if col in ['Carb Value (grams)', 'Insulin Value (u)', 'Fast-Acting Insulin Value (u)', 'Long-Acting Insulin Value (u)']:
+            if col in ['Carb Value (grams)', 'Fast-Acting Insulin Value (u)', 'Long-Acting Insulin Value (u)']:
                 # Sum numeric events (e.g. two small boluses)
                 agg_exprs.append(pl.col(col).sum().alias(col))
                 # Count shifts? Hard to track individual shifts here efficiently without loop
@@ -861,7 +861,7 @@ class GlucoseMLPreprocessor:
         df_filtered = df.filter(pl.col('Glucose Value (mg/dL)').is_not_null())
         
         # Remove specified fields
-        fields_to_remove = ['Event Type', 'Insulin Value (u)', 'Fast-Acting Insulin Value (u)', 'Long-Acting Insulin Value (u)', 'Carb Value (grams)']
+        fields_to_remove = ['Event Type', 'Fast-Acting Insulin Value (u)', 'Long-Acting Insulin Value (u)', 'Carb Value (grams)']
         existing_fields_to_remove = [field for field in fields_to_remove if field in df_filtered.columns]
         
         if existing_fields_to_remove:
@@ -904,8 +904,6 @@ class GlucoseMLPreprocessor:
         # Convert numeric fields to Float64 if they exist
         if 'Glucose Value (mg/dL)' in df.columns:
             columns_to_cast.append(pl.col('Glucose Value (mg/dL)').cast(pl.Float64, strict=False))
-        if 'Insulin Value (u)' in df.columns:
-            columns_to_cast.append(pl.col('Insulin Value (u)').cast(pl.Float64, strict=False))
         if 'Fast-Acting Insulin Value (u)' in df.columns:
             columns_to_cast.append(pl.col('Fast-Acting Insulin Value (u)').cast(pl.Float64, strict=False))
         if 'Long-Acting Insulin Value (u)' in df.columns:
@@ -985,7 +983,6 @@ class GlucoseMLPreprocessor:
             'glucose_filtering_analysis': glucose_filter_stats if glucose_filter_stats else {},
             'data_quality': {
                 'glucose_data_completeness': (1 - df['Glucose Value (mg/dL)'].null_count() / len(df)) * 100 if 'Glucose Value (mg/dL)' in df.columns else 0,
-                'insulin_data_completeness': (1 - df['Insulin Value (u)'].null_count() / len(df)) * 100 if 'Insulin Value (u)' in df.columns else 0,
                 'fast_acting_insulin_data_completeness': (1 - df['Fast-Acting Insulin Value (u)'].null_count() / len(df)) * 100 if 'Fast-Acting Insulin Value (u)' in df.columns else 0,
                 'long_acting_insulin_data_completeness': (1 - df['Long-Acting Insulin Value (u)'].null_count() / len(df)) * 100 if 'Long-Acting Insulin Value (u)' in df.columns else 0,
                 'carb_data_completeness': (1 - df['Carb Value (grams)'].null_count() / len(df)) * 100 if 'Carb Value (grams)' in df.columns else 0,

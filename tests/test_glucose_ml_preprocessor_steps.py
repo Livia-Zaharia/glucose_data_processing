@@ -314,6 +314,74 @@ class TestGlucoseMLPreprocessorSteps:
         assert interp_row["timestamp"][0] == datetime(2023, 1, 1, 10, 5, 0)
         assert interp_row["Glucose Value (mg/dL)"][0] == 110.0
 
+    def test_interpolate_missing_values_two_missing_points(self, preprocessor):
+        """Test interpolation of small gaps with 2 missing values."""
+        # Sequence with two missing points (10:00, 10:15) - 15 min gap -> 2 points missing (expected 5 min)
+        # Should create interpolated points at 10:05 and 10:10
+        timestamps = [
+            datetime(2023, 1, 1, 10, 0, 0),
+            datetime(2023, 1, 1, 10, 15, 0)
+        ]
+        
+        df = pl.DataFrame({
+            "timestamp": timestamps,
+            "sequence_id": [0, 0],
+            "Glucose Value (mg/dL)": [100.0, 130.0],
+            "Event Type": ["EGV", "EGV"]
+        })
+        
+        df_interp, stats = preprocessor.interpolate_missing_values(df)
+        
+        # Should now have 4 rows (10:00, 10:05 interpolated, 10:10 interpolated, 10:15)
+        assert len(df_interp) == 4
+        assert stats["small_gaps_filled"] == 1
+        
+        # Check interpolated values
+        interp_rows = df_interp.filter(pl.col("Event Type") == "Interpolated").sort("timestamp")
+        assert len(interp_rows) == 2
+        
+        # First interpolated point at 10:05: linear interpolation between 100 and 130
+        # alpha = 1/3 for first point (j=1, missing_points=2, so alpha = 1/(2+1) = 1/3)
+        # value = 100 + (1/3) * (130 - 100) = 100 + 10 = 110
+        assert interp_rows["timestamp"][0] == datetime(2023, 1, 1, 10, 5, 0)
+        assert abs(interp_rows["Glucose Value (mg/dL)"][0] - 110.0) < 0.01
+        
+        # Second interpolated point at 10:10: alpha = 2/3 for second point (j=2)
+        # value = 100 + (2/3) * (130 - 100) = 100 + 20 = 120
+        assert interp_rows["timestamp"][1] == datetime(2023, 1, 1, 10, 10, 0)
+        assert abs(interp_rows["Glucose Value (mg/dL)"][1] - 120.0) < 0.01
+
+    def test_interpolate_missing_values_large_gap_skipped(self, preprocessor):
+        """Test that large gaps are skipped and not interpolated."""
+        # Sequence with large gap (10:00, 10:20) - 20 min gap > small_gap_max_minutes (15)
+        # Should be skipped, no interpolation
+        timestamps = [
+            datetime(2023, 1, 1, 10, 0, 0),
+            datetime(2023, 1, 1, 10, 20, 0)
+        ]
+        
+        df = pl.DataFrame({
+            "timestamp": timestamps,
+            "sequence_id": [0, 0],
+            "Glucose Value (mg/dL)": [100.0, 120.0],
+            "Event Type": ["EGV", "EGV"]
+        })
+        
+        df_interp, stats = preprocessor.interpolate_missing_values(df)
+        
+        # Should still have only 2 rows (no interpolation for large gaps)
+        assert len(df_interp) == 2
+        assert stats["small_gaps_filled"] == 0
+        assert stats["large_gaps_skipped"] == 1
+        
+        # No interpolated rows should exist
+        interp_rows = df_interp.filter(pl.col("Event Type") == "Interpolated")
+        assert len(interp_rows) == 0
+        
+        # Original data should remain unchanged
+        assert df_interp["timestamp"].to_list() == timestamps
+        assert df_interp["Glucose Value (mg/dL)"].to_list() == [100.0, 120.0]
+
     def test_filter_sequences_by_length(self, preprocessor):
         """Test filtering short sequences."""
         preprocessor.min_sequence_len = 5
