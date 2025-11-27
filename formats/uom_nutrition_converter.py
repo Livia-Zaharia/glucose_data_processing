@@ -97,7 +97,8 @@ class UoMNutritionConverter(CSVFormatConverter):
             'Timestamp (YYYY-MM-DDThh:mm:ss)': '',
             'Event Type': '',
             'Glucose Value (mg/dL)': '',
-            'Insulin Value (u)': '',
+            'Fast-Acting Insulin Value (u)': '',
+            'Long-Acting Insulin Value (u)': '',
             'Carb Value (grams)': ''
         }
         

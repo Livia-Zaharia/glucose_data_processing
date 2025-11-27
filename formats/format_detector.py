@@ -42,7 +42,7 @@ class CSVFormatDetector:
             Appropriate converter instance, or None if format is not supported
         """
         try:
-            with open(file_path, 'r', encoding='utf-8') as file:
+            with open(file_path, 'r', encoding='utf-8-sig') as file:  # utf-8-sig handles BOM
                 lines = file.readlines()
                 if not lines:
                     return None
@@ -54,7 +54,14 @@ class CSVFormatDetector:
                     if not line:
                         continue
                     
-                    headers = [col.strip() for col in line.split(',')]
+                    # Parse CSV line properly to handle quoted headers
+                    import csv
+                    from io import StringIO
+                    csv_reader = csv.reader(StringIO(line))
+                    headers = next(csv_reader)
+                    
+                    # Clean headers: remove quotes and strip whitespace
+                    headers = [col.strip().strip('"') for col in headers]
                     
                     # Check each converter
                     for converter in self.converters:

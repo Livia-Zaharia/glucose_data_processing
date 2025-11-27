@@ -86,6 +86,8 @@ class UoMBasalConverter(CSVFormatConverter):
         """
         Convert a single row to the standard format.
         
+        Basal insulin is long-acting insulin.
+        
         Args:
             row: Dictionary representing a single CSV row
             
@@ -97,7 +99,8 @@ class UoMBasalConverter(CSVFormatConverter):
             'Timestamp (YYYY-MM-DDThh:mm:ss)': '',
             'Event Type': '',
             'Glucose Value (mg/dL)': '',
-            'Insulin Value (u)': '',
+            'Fast-Acting Insulin Value (u)': '',
+            'Long-Acting Insulin Value (u)': '',
             'Carb Value (grams)': ''
         }
         
@@ -110,7 +113,7 @@ class UoMBasalConverter(CSVFormatConverter):
                 value = row.get(bom_key, '')
             return value
         
-        # Convert basal insulin data
+        # Convert basal insulin data (basal = long-acting)
         timestamp = self._parse_timestamp(get_clean_value('basal_ts'))
         if not timestamp:
             return None
@@ -121,7 +124,7 @@ class UoMBasalConverter(CSVFormatConverter):
         
         result['Timestamp (YYYY-MM-DDThh:mm:ss)'] = timestamp
         result['Event Type'] = 'Basal'
-        result['Insulin Value (u)'] = insulin_value
+        result['Long-Acting Insulin Value (u)'] = insulin_value
         
         return result
     

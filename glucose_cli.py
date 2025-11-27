@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Optional, List
 import sys
 from glucose_ml_preprocessor import GlucoseMLPreprocessor, print_statistics
+from cycle_data_parser import CycleDataParser
 
 def main(
     input_folders: List[str] = typer.Argument(
@@ -81,6 +82,11 @@ def main(
         True,
         "--fixed-frequency/--no-fixed-frequency",
         help="Create fixed-frequency data with consistent intervals (default: enabled)"
+    ),
+    cycle_data_file: Optional[str] = typer.Option(
+        None,
+        "--cycle",
+        help="Path to cycle data CSV file with columns: date, flow_amount. Glucose data will be filtered to cycle data date range."
     )
 ):
     """
@@ -98,7 +104,7 @@ def main(
         glucose-cli ./csv-folder --output ml_data.csv --verbose
         
         # Process multiple databases into one file
-        glucose-cli ./000-csv ./libre3 ./zendo_small --output combined_ml_data.csv
+        glucose-cli ./data/000-csv ./data/libre3 ./data/zendo_small --output combined_ml_data.csv
         
         # Use configuration file with CLI overrides
         glucose-cli ./csv-folder --config glucose_config.yaml --output ml_data.csv
@@ -143,6 +149,8 @@ def main(
         typer.echo(f"   💾 Save intermediate files: {save_intermediate_files}")
         typer.echo(f"   🍯 Glucose only mode: {glucose_only}")
         typer.echo(f"   ⏱️  Fixed-frequency data: {create_fixed_frequency}")
+        if cycle_data_file:
+            typer.echo(f"   🔄 Cycle data file: {cycle_data_file}")
     
     try:
         # Create preprocessor from config file if provided, otherwise use CLI arguments
@@ -183,6 +191,20 @@ def main(
                 create_fixed_frequency=create_fixed_frequency
             )
         
+        # Parse cycle data if provided
+        cycle_parser = None
+        if cycle_data_file:
+            cycle_path_obj = Path(cycle_data_file)
+            if not cycle_path_obj.exists():
+                typer.echo(f"❌ Error: Cycle data file '{cycle_data_file}' does not exist", err=True)
+                raise typer.Exit(1)
+            
+            if verbose:
+                typer.echo("🔄 Parsing cycle data...")
+            
+            cycle_parser = CycleDataParser()
+            cycle_parser.parse_cycle_file(cycle_data_file)
+        
         # Process data
         if verbose:
             if len(validated_folders) == 1:
@@ -199,6 +221,18 @@ def main(
             ml_data, statistics = preprocessor.process_multiple_databases(
                 validated_folders, output_file
             )
+        
+        # Merge cycle data if provided
+        if cycle_parser:
+            if verbose:
+                typer.echo("🔄 Integrating cycle data...")
+            ml_data = preprocessor.merge_cycle_data(ml_data, cycle_parser)
+            
+            # Save the final data with cycle information
+            if output_file:
+                ml_data.write_csv(output_file, null_value="")
+                if verbose:
+                    typer.echo(f"💾 Final data with cycle information saved to: {output_file}")
         
         # Show results
         typer.echo(f"✅ Processing completed successfully!")

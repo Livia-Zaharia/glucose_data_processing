@@ -86,6 +86,8 @@ class UoMBolusConverter(CSVFormatConverter):
         """
         Convert a single row to the standard format.
         
+        Bolus insulin is fast-acting insulin.
+        
         Args:
             row: Dictionary representing a single CSV row
             
@@ -97,7 +99,8 @@ class UoMBolusConverter(CSVFormatConverter):
             'Timestamp (YYYY-MM-DDThh:mm:ss)': '',
             'Event Type': '',
             'Glucose Value (mg/dL)': '',
-            'Insulin Value (u)': '',
+            'Fast-Acting Insulin Value (u)': '',
+            'Long-Acting Insulin Value (u)': '',
             'Carb Value (grams)': ''
         }
         
@@ -110,7 +113,7 @@ class UoMBolusConverter(CSVFormatConverter):
                 value = row.get(bom_key, '')
             return value
         
-        # Convert bolus insulin data
+        # Convert bolus insulin data (bolus = fast-acting)
         timestamp = self._parse_timestamp(get_clean_value('bolus_ts'))
         if not timestamp:
             return None
@@ -121,7 +124,7 @@ class UoMBolusConverter(CSVFormatConverter):
         
         result['Timestamp (YYYY-MM-DDThh:mm:ss)'] = timestamp
         result['Event Type'] = 'Bolus'
-        result['Insulin Value (u)'] = insulin_value
+        result['Fast-Acting Insulin Value (u)'] = insulin_value
         
         return result
     

@@ -207,7 +207,8 @@ class UoMConverter(CSVFormatConverter):
             'Timestamp (YYYY-MM-DDThh:mm:ss)': '',
             'Event Type': '',
             'Glucose Value (mg/dL)': '',
-            'Insulin Value (u)': '',
+            'Fast-Acting Insulin Value (u)': '',
+            'Long-Acting Insulin Value (u)': '',
             'Carb Value (grams)': ''
         }
         
@@ -236,7 +237,7 @@ class UoMConverter(CSVFormatConverter):
             result['Glucose Value (mg/dL)'] = glucose_value
             
         elif self.data_type == 'basal':
-            # Convert basal insulin data
+            # Convert basal insulin data (basal = long-acting)
             timestamp = self._parse_timestamp(get_clean_value('basal_ts'))
             if not timestamp:
                 return None
@@ -247,10 +248,10 @@ class UoMConverter(CSVFormatConverter):
             
             result['Timestamp (YYYY-MM-DDThh:mm:ss)'] = timestamp
             result['Event Type'] = 'Basal'
-            result['Insulin Value (u)'] = insulin_value
+            result['Long-Acting Insulin Value (u)'] = insulin_value
             
         elif self.data_type == 'bolus':
-            # Convert bolus insulin data
+            # Convert bolus insulin data (bolus = fast-acting)
             timestamp = self._parse_timestamp(get_clean_value('bolus_ts'))
             if not timestamp:
                 return None
@@ -261,7 +262,7 @@ class UoMConverter(CSVFormatConverter):
             
             result['Timestamp (YYYY-MM-DDThh:mm:ss)'] = timestamp
             result['Event Type'] = 'Bolus'
-            result['Insulin Value (u)'] = insulin_value
+            result['Fast-Acting Insulin Value (u)'] = insulin_value
             
         elif self.data_type == 'nutrition':
             # Convert nutrition data

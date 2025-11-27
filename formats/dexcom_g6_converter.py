@@ -29,6 +29,10 @@ class DexcomG6Converter(CSVFormatConverter):
         """
         Convert a single row to the standard format.
         
+        Insulin is split into two columns based on Event Subtype:
+        - Fast-Acting → Fast-Acting Insulin Value (u)
+        - Long-Acting → Long-Acting Insulin Value (u)
+        
         Args:
             row: Dictionary representing a single CSV row
             
@@ -40,11 +44,28 @@ class DexcomG6Converter(CSVFormatConverter):
         if not timestamp:
             return None
         
+        # Split insulin based on Event Subtype
+        insulin_value = row.get('Insulin Value (u)', '').strip()
+        event_subtype = row.get('Event Subtype', '').strip()
+        
+        fast_acting_insulin = ''
+        long_acting_insulin = ''
+        
+        if insulin_value:
+            if 'Fast-Acting' in event_subtype:
+                fast_acting_insulin = insulin_value
+            elif 'Long-Acting' in event_subtype:
+                long_acting_insulin = insulin_value
+            else:
+                # If no subtype specified, default to fast-acting
+                fast_acting_insulin = insulin_value
+        
         return {
             'Timestamp (YYYY-MM-DDThh:mm:ss)': timestamp,
             'Event Type': row.get('Event Type', '').strip(),
             'Glucose Value (mg/dL)': row.get('Glucose Value (mg/dL)', '').strip(),
-            'Insulin Value (u)': row.get('Insulin Value (u)', '').strip(),
+            'Fast-Acting Insulin Value (u)': fast_acting_insulin,
+            'Long-Acting Insulin Value (u)': long_acting_insulin,
             'Carb Value (grams)': row.get('Carb Value (grams)', '').strip()
         }
     

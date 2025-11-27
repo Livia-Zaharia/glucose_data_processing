@@ -149,7 +149,7 @@ class MonoUserDatabaseConverter(DatabaseConverter):
             
             print(f"Detected format: {converter.get_format_name()} for {file_path.name}")
             
-            with open(file_path, 'r', encoding='utf-8') as file:
+            with open(file_path, 'r', encoding='utf-8-sig') as file:  # utf-8-sig handles BOM
                 lines = file.readlines()
                 
                 # Find the line with headers
@@ -158,7 +158,16 @@ class MonoUserDatabaseConverter(DatabaseConverter):
                     line = lines[line_num].strip()
                     if not line:
                         continue
-                    headers = [col.strip() for col in line.split(',')]
+                    
+                    # Parse CSV line properly to handle quoted headers
+                    import csv
+                    from io import StringIO
+                    csv_reader = csv.reader(StringIO(line))
+                    headers = next(csv_reader)
+                    
+                    # Clean headers: remove quotes and strip whitespace
+                    headers = [col.strip().strip('"') for col in headers]
+                    
                     if converter.can_handle(headers):
                         header_line_num = line_num
                         break
@@ -372,7 +381,7 @@ class MultiUserDatabaseConverter(DatabaseConverter):
             
             print(f"    Detected format: {converter.get_format_name()} for {file_path.name}")
             
-            with open(file_path, 'r', encoding='utf-8') as file:
+            with open(file_path, 'r', encoding='utf-8-sig') as file:  # utf-8-sig handles BOM
                 lines = file.readlines()
                 
                 # Find the line with headers
@@ -381,7 +390,16 @@ class MultiUserDatabaseConverter(DatabaseConverter):
                     line = lines[line_num].strip()
                     if not line:
                         continue
-                    headers = [col.strip() for col in line.split(',')]
+                    
+                    # Parse CSV line properly to handle quoted headers
+                    import csv
+                    from io import StringIO
+                    csv_reader = csv.reader(StringIO(line))
+                    headers = next(csv_reader)
+                    
+                    # Clean headers: remove quotes and strip whitespace
+                    headers = [col.strip().strip('"') for col in headers]
+                    
                     if converter.can_handle(headers):
                         header_line_num = line_num
                         break

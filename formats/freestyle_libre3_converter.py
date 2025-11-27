@@ -67,11 +67,14 @@ class FreeStyleLibre3Converter(CSVFormatConverter):
         if not glucose_value:
             glucose_value = row.get('Scan Glucose mg/dL', '').strip()
         
-        # Combine insulin values (rapid-acting + meal + correction)
+        # Combine insulin values (rapid-acting + meal + correction = all fast-acting)
         rapid_insulin = self._safe_float(row.get('Rapid-Acting Insulin (units)', ''))
         meal_insulin = self._safe_float(row.get('Meal Insulin (units)', ''))
         correction_insulin = self._safe_float(row.get('Correction Insulin (units)', ''))
-        total_insulin = rapid_insulin + meal_insulin + correction_insulin
+        total_fast_acting = rapid_insulin + meal_insulin + correction_insulin
+        
+        # Long-acting insulin (if available in Libre 3 format)
+        long_acting_insulin = self._safe_float(row.get('Long-Acting Insulin (units)', ''))
         
         # Get carb value
         carb_value = row.get('Carbohydrates (grams)', '').strip()
@@ -80,7 +83,8 @@ class FreeStyleLibre3Converter(CSVFormatConverter):
             'Timestamp (YYYY-MM-DDThh:mm:ss)': formatted_timestamp,
             'Event Type': event_type,
             'Glucose Value (mg/dL)': glucose_value,
-            'Insulin Value (u)': str(total_insulin) if total_insulin > 0 else '',
+            'Fast-Acting Insulin Value (u)': str(total_fast_acting) if total_fast_acting > 0 else '',
+            'Long-Acting Insulin Value (u)': str(long_acting_insulin) if long_acting_insulin > 0 else '',
             'Carb Value (grams)': carb_value
         }
     

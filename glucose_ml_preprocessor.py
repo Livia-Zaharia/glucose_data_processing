@@ -179,7 +179,7 @@ class GlucoseMLPreprocessor:
 
         return df
         
-    
+
     def detect_gaps_and_sequences(self, df: pl.DataFrame) -> Tuple[pl.DataFrame, Dict[str, Any]]:
         """
         Detect time gaps and create sequence IDs, marking calibration periods and sequences for removal.
@@ -192,6 +192,13 @@ class GlucoseMLPreprocessor:
         """
         print("Detecting gaps and creating sequences...")
         
+        # Initialize statistics for calibration period analysis
+        calibration_stats = {
+            'calibration_periods_detected': 0,
+            'sequences_marked_for_removal': 0,  # Not used in current logic but kept for structure
+            'total_records_marked_for_removal': 0
+        }
+        
         # Handle multi-user data by processing each user separately
         if 'user_id' in df.columns:
             print("Processing multi-user data - creating sequences per user...")
@@ -199,65 +206,181 @@ class GlucoseMLPreprocessor:
             
             for user_id in df['user_id'].unique():
                 user_data = df.filter(pl.col('user_id') == user_id).sort('timestamp')
-                user_sequences = self._create_sequences_for_user(user_data, user_id)
+                user_sequences, user_calib_stats = self._create_sequences_for_user(user_data, user_id)
                 all_sequences.append(user_sequences)
+                
+                # Aggregate stats
+                calibration_stats['calibration_periods_detected'] += user_calib_stats['calibration_periods_detected']
+                calibration_stats['total_records_marked_for_removal'] += user_calib_stats['total_records_marked_for_removal']
             
             # Combine all user sequences
-            df = pl.concat(all_sequences).sort(['user_id', 'sequence_id', 'timestamp'])
+            if all_sequences:
+                df = pl.concat(all_sequences).sort(['user_id', 'sequence_id', 'timestamp'])
+            else:
+                df = df.clear()
         else:
             # Single user data - process normally
             df = df.sort('timestamp')
-            df = self._create_sequences_for_user(df)
+            df, calibration_stats = self._create_sequences_for_user(df)
         
         # Calculate statistics
-        sequence_counts = df.group_by(['user_id', 'sequence_id'] if 'user_id' in df.columns else ['sequence_id']).count().sort(['user_id', 'sequence_id'] if 'user_id' in df.columns else 'sequence_id')
+        # Use len() instead of count() for Polars 1.0+ compatibility
+        if 'user_id' in df.columns:
+            sequence_counts = df.group_by(['user_id', 'sequence_id']).len().sort(['user_id', 'sequence_id'])
+        else:
+            sequence_counts = df.group_by(['sequence_id']).len().sort('sequence_id')
+            
         stats = {
-            'total_sequences': df['sequence_id'].max() + 1,
+            'total_sequences': df['sequence_id'].n_unique(),
             'gap_positions': df['is_gap'].sum() if 'is_gap' in df.columns else 0,
             'total_gaps': df['is_gap'].sum() if 'is_gap' in df.columns else 0,
-            'sequence_lengths': dict(zip(sequence_counts['sequence_id'].to_list(), sequence_counts['count'].to_list())),
-            'calibration_period_analysis': {'calibration_periods_detected': 0, 'sequences_marked_for_removal': 0, 'total_records_marked_for_removal': 0}
+            'sequence_lengths': dict(zip(sequence_counts['sequence_id'].to_list(), sequence_counts['len'].to_list())),
+            'calibration_period_analysis': calibration_stats
         }
         
         print(f"Created {stats['total_sequences']} sequences")
         print(f"Found {stats['total_gaps']} gaps > {self.small_gap_max_minutes} minutes")
         
+        if calibration_stats['calibration_periods_detected'] > 0:
+            print(f"Detected {calibration_stats['calibration_periods_detected']} calibration periods")
+            print(f"Removed {calibration_stats['total_records_marked_for_removal']} records after calibration")
+        
         # Remove temporary columns
-        columns_to_remove = ['time_diff_seconds', 'is_gap']
+        columns_to_remove = ['time_diff_seconds', 'is_gap', 'is_calibration_gap', 'remove_due_to_calibration']
         df = df.drop([col for col in columns_to_remove if col in df.columns])
         
         return df, stats
     
-    def _create_sequences_for_user(self, user_df: pl.DataFrame, user_id: str = None) -> pl.DataFrame:
+    def _create_sequences_for_user(self, user_df: pl.DataFrame, user_id: str = None) -> Tuple[pl.DataFrame, Dict[str, int]]:
         """
-        Create sequences for a single user's data.
+        Create sequences for a single user's data and handle calibration periods.
         
         Args:
             user_df: DataFrame with data for a single user
             user_id: User ID (for multi-user data)
             
         Returns:
-            DataFrame with sequence IDs added
+            Tuple of (DataFrame with sequence IDs added and calibration data removed, calibration statistics)
         """
-        # Calculate time differences and create sequence IDs
-        df = user_df.with_columns([
-                    pl.col('timestamp').diff().dt.total_seconds().alias('time_diff_seconds'),
-                ]).with_columns([
-                    (pl.col('time_diff_seconds') > self.small_gap_max_seconds).alias('is_gap'),
-                ]).with_columns([
-                    pl.col('is_gap').cum_sum().alias('sequence_id')
-                ])
+        stats = {
+            'calibration_periods_detected': 0,
+            'total_records_marked_for_removal': 0
+        }
         
-        # For multi-user data, create unique sequence IDs by combining user_id and sequence_id
-        if user_id is not None:
-            # Create global sequence IDs by offsetting based on user
-            max_previous_sequences = 0  # This would need to be tracked across users
-            # For now, we'll use a simpler approach: user_id * 100000 + sequence_id
+        if len(user_df) == 0:
+            return user_df, stats
+
+        # Calculate time differences
+        df = user_df.with_columns([
+            pl.col('timestamp').diff().dt.total_seconds().alias('time_diff_seconds')
+        ])
+        
+        # Identify calibration gaps
+        # A gap is a calibration gap if it exceeds calibration_period_minutes
+        df = df.with_columns([
+            (pl.col('time_diff_seconds') > self.calibration_period_seconds).fill_null(False).alias('is_calibration_gap')
+        ])
+        
+        # Identify standard gaps (for sequence breaking)
+        # Any gap > small_gap_max_minutes breaks a sequence
+        df = df.with_columns([
+            (pl.col('time_diff_seconds') > self.small_gap_max_seconds).fill_null(False).alias('is_gap')
+        ])
+        
+        stats['calibration_periods_detected'] = df['is_calibration_gap'].sum()
+        
+        # If calibration gaps exist, mark data for removal
+        if stats['calibration_periods_detected'] > 0:
+            # Get indices of calibration gaps
+            calibration_indices = df.with_row_index().filter(pl.col('is_calibration_gap'))['index'].to_list()
+            
+            # Create a mask for removal
+            # We can't easily do this fully vectorially in Polars without a complex window function or join
+            # So we'll use a list of timestamps to remove or a boolean mask
+            
+            # Efficient approach: Create a list of removal windows
+            removal_windows = []
+            timestamps = df['timestamp'].to_list()
+            
+            for idx in calibration_indices:
+                # The gap is BEFORE the row at idx. 
+                # So the calibration ended roughly at timestamps[idx] (start of new data segment)
+                # But technically the gap duration is time_diff_seconds.
+                # We want to remove data starting from timestamps[idx] for X hours.
+                
+                start_removal = timestamps[idx]
+                end_removal = start_removal + timedelta(hours=self.remove_after_calibration_hours)
+                removal_windows.append((start_removal, end_removal))
+            
+            # Apply removal windows
+            # We construct a boolean expression for keeping data
+            # Keep if NOT in any removal window
+            
+            # To do this efficiently in Polars without iteration in the filter:
+            # We can create a "remove" column initialized to False
+            # But looping over windows is necessary if we have them.
+            
+            # However, for large datasets, looping might be slow. 
+            # A clearer way:
+            # 1. Extract rows that start a calibration period
+            # 2. Create a validity mask
+            
+            # Let's try a slightly different approach using joins if possible, or just filter
+            # Since number of calibration gaps is likely small, loop is acceptable for constructing filter
+            
+            # We'll create a 'remove_due_to_calibration' column
+            # This part uses Python loop but over gaps, not all rows
+            
+            # Optimization: If too many gaps, this could be slow. But calibration gaps are rare (days/weeks).
+            
+            is_kept = np.ones(len(df), dtype=bool)
+            ts_array = df['timestamp'].to_numpy()
+            
+            for start, end in removal_windows:
+                # Find indices within this window
+                # timestamps >= start and timestamps < end
+                # start is inclusive because that's the first point after the gap
+                mask = (ts_array >= start) & (ts_array < end)
+                is_kept[mask] = False
+                
+            stats['total_records_marked_for_removal'] = (~is_kept).sum()
+            
+            # Apply filter
+            df = df.with_columns(pl.lit(is_kept).alias('keep_record'))
+            df = df.filter(pl.col('keep_record')).drop('keep_record')
+            
+        
+        # Re-calculate gaps and sequences on filtered data
+        # We need to recalculate time_diffs because removing rows might create new adjacent rows 
+        # (though typically we remove blocks so the gap structure changes)
+        # Actually, if we remove the 24h block after a gap, the "gap" effectively becomes larger 
+        # or shifts. But we treat the remaining data as a new sequence start.
+        
+        if len(df) > 0:
             df = df.with_columns([
-                (pl.lit(int(user_id) * 100000) + pl.col('sequence_id')).alias('sequence_id')
+                pl.col('timestamp').diff().dt.total_seconds().alias('time_diff_seconds'),
+            ]).with_columns([
+                (pl.col('time_diff_seconds') > self.small_gap_max_seconds).fill_null(False).alias('is_gap'),
+            ]).with_columns([
+                pl.col('is_gap').cum_sum().alias('sequence_id')
             ])
         
-        return df
+        # For multi-user data, create unique sequence IDs by combining user_id and sequence_id
+        if user_id is not None and len(df) > 0:
+            # Create global sequence IDs by offsetting based on user
+            # user_id * 100000 + sequence_id
+            try:
+                user_num = int(user_id)
+                df = df.with_columns([
+                    (pl.lit(user_num * 100000) + pl.col('sequence_id')).alias('sequence_id')
+                ])
+            except ValueError:
+                # If user_id is not numeric, we can't easily offset. 
+                # Just keep sequence_id as is (this might overlap if combined later without care)
+                # But the main loop handles concatenation.
+                pass
+        
+        return df, stats
     
     def interpolate_missing_values(self, df: pl.DataFrame) -> Tuple[pl.DataFrame, Dict[str, Any]]:
         """
@@ -277,6 +400,8 @@ class GlucoseMLPreprocessor:
             'total_interpolated_data_points': 0,
             'glucose_value_mg/dl_interpolations': 0,
             'insulin_value_u_interpolations': 0,
+            'fast_acting_insulin_value_u_interpolations': 0,
+            'long_acting_insulin_value_u_interpolations': 0,
             'carb_value_grams_interpolations': 0,
             'sequences_processed': 0,
             'small_gaps_filled': 0,
@@ -329,22 +454,31 @@ class GlucoseMLPreprocessor:
                                 # Interpolate numeric values - include all columns from original data
                                 new_row = {
                                     'Timestamp (YYYY-MM-DDThh:mm:ss)': interpolated_time.strftime('%Y-%m-%dT%H:%M:%S'),
-                                    'Event Type': 'Interpolated',
-                                    'Glucose Value (mg/dL)': None,  # Default to None (will be converted to proper type)
-                                    'Insulin Value (u)': None,      # Default to None (will be converted to proper type)
-                                    'Carb Value (grams)': None,     # Default to None (will be converted to proper type)
                                     'timestamp': interpolated_time,
                                     'sequence_id': seq_id
                                 }
+                                
+                                # Initialize all other columns from the original data as None
+                                for col in seq_pandas.columns:
+                                    if col not in new_row:
+                                        new_row[col] = None
+                                        
+                                # Set Event Type to Interpolated if it exists
+                                if 'Event Type' in seq_pandas.columns:
+                                    new_row['Event Type'] = 'Interpolated'
                                 
                                 # Add user_id if it exists in the original data
                                 if 'user_id' in seq_pandas.columns:
                                     new_row['user_id'] = prev_row['user_id']
                                 
                                 # Linear interpolation for numeric columns
-                                numeric_cols = ['Glucose Value (mg/dL)', 'Insulin Value (u)', 'Carb Value (grams)']
+                                numeric_cols = ['Glucose Value (mg/dL)', 'Insulin Value (u)', 'Fast-Acting Insulin Value (u)', 'Long-Acting Insulin Value (u)', 'Carb Value (grams)']
                                 interpolations_made = 0
                                 for col in numeric_cols:
+                                    # Skip columns that don't exist in the data
+                                    if col not in seq_pandas.columns:
+                                        continue
+                                        
                                     prev_val = prev_row[col]
                                     curr_val = current_row[col]
                                     
@@ -358,7 +492,18 @@ class GlucoseMLPreprocessor:
                                             alpha = j / (missing_points + 1)
                                             interpolated_value = prev_numeric + alpha * (curr_numeric - prev_numeric)
                                             new_row[col] = interpolated_value  # Keep as numeric value
-                                            interpolation_stats[f'{col.lower().replace(" ", "_").replace("(", "").replace(")", "")}_interpolations'] += 1
+                                            
+                                            # Update stats for specific column
+                                            stat_key = f'{col.lower().replace(" ", "_").replace("(", "").replace(")", "")}_interpolations'
+                                            # Handle special case for hyphens in fast-acting/long-acting
+                                            if "fast-acting" in col.lower():
+                                                stat_key = "fast_acting_insulin_value_u_interpolations"
+                                            elif "long-acting" in col.lower():
+                                                stat_key = "long_acting_insulin_value_u_interpolations"
+                                                
+                                            if stat_key in interpolation_stats:
+                                                interpolation_stats[stat_key] += 1
+                                                
                                             interpolations_made += 1
                                     except (ValueError, TypeError):
                                         # Keep empty string for non-numeric values
@@ -418,10 +563,11 @@ class GlucoseMLPreprocessor:
         print(f"Filtering sequences with length < {self.min_sequence_len}...")
         
         # Calculate sequence lengths
-        sequence_counts = df.group_by('sequence_id').count().sort('sequence_id')
+        # Use len() instead of count() for Polars 1.0+ compatibility
+        sequence_counts = df.group_by('sequence_id').len().sort('sequence_id')
         
         # Find sequences to keep (longer than or equal to min_sequence_len)
-        sequences_to_keep = sequence_counts.filter(pl.col('count') >= self.min_sequence_len)
+        sequences_to_keep = sequence_counts.filter(pl.col('len') >= self.min_sequence_len)
         
         filtering_stats = {
             'original_sequences': sequence_counts.height,
@@ -453,11 +599,11 @@ class GlucoseMLPreprocessor:
         
         # Show statistics about removed sequences
         if filtering_stats['removed_sequences'] > 0:
-            removed_sequences = sequence_counts.filter(pl.col('count') < self.min_sequence_len)
+            removed_sequences = sequence_counts.filter(pl.col('len') < self.min_sequence_len)
             if len(removed_sequences) > 0:
-                min_len_removed = removed_sequences['count'].min()
-                max_len_removed = removed_sequences['count'].max()
-                avg_len_removed = removed_sequences['count'].mean()
+                min_len_removed = removed_sequences['len'].min()
+                max_len_removed = removed_sequences['len'].max()
+                avg_len_removed = removed_sequences['len'].mean()
                 print(f"Removed sequence lengths - Min: {min_len_removed}, Max: {max_len_removed}, Avg: {avg_len_removed:.1f}")
         
         return filtered_df, filtering_stats
@@ -557,7 +703,6 @@ class GlucoseMLPreprocessor:
         num_intervals = int(total_duration / (self.expected_interval_minutes * 60)) + 1
         
         # Create fixed timestamps using efficient list comprehension
-        # This is more efficient than the old while loop approach
         fixed_timestamps_list = [
             aligned_start + timedelta(minutes=i * self.expected_interval_minutes)
             for i in range(num_intervals)
@@ -571,145 +716,121 @@ class GlucoseMLPreprocessor:
             pl.lit(seq_id).alias('sequence_id')
         ])
         
-        # Use asof_join for efficient nearest neighbor operations
-        result_df = self._interpolate_values_efficiently(fixed_timestamps, seq_data, stats)
+        # 1. Interpolate Glucose (Linear)
+        result_df = self._interpolate_glucose_linear(fixed_timestamps, seq_data, stats)
+        
+        # 2. Shift Events (Nearest Neighbor / Rounding)
+        # Include all potential event columns
+        potential_event_cols = ['Insulin Value (u)', 'Fast-Acting Insulin Value (u)', 'Long-Acting Insulin Value (u)', 'Carb Value (grams)', 'Event Type', 'user_id']
+        event_cols = [col for col in potential_event_cols if col in seq_data.columns]
+        
+        if event_cols:
+            events_df = self._shift_events_rounding(seq_data, event_cols, stats)
+            # Join events with result (left join to keep all fixed timestamps)
+            result_df = result_df.join(events_df, on='timestamp', how='left')
         
         return result_df
     
-    def _interpolate_values_efficiently(self, fixed_timestamps: pl.DataFrame, seq_data: pl.DataFrame, stats: Dict[str, Any]) -> pl.DataFrame:
+    def _interpolate_glucose_linear(self, fixed_timestamps: pl.DataFrame, seq_data: pl.DataFrame, stats: Dict[str, Any]) -> pl.DataFrame:
         """
-        Efficiently interpolate values using Polars asof_join and window functions.
-        
-        Args:
-            fixed_timestamps: DataFrame with fixed timestamps
-            seq_data: Original sequence data
-            stats: Statistics dictionary to update
-            
-        Returns:
-            DataFrame with interpolated values
+        Interpolate glucose values linearly using previous and next data points.
         """
-        # Use asof_join to find nearest neighbors efficiently
-        # First, join with forward direction to get next values
-        forward_join = fixed_timestamps.join_asof(
-            seq_data,
-            left_on='timestamp',
-            right_on='timestamp',
-            strategy='forward',
-            suffix='_next'
-        )
-        
-        # Then, join with backward direction to get previous values
-        backward_join = fixed_timestamps.join_asof(
-            seq_data,
-            left_on='timestamp',
-            right_on='timestamp',
-            strategy='backward',
-            suffix='_prev'
-        )
-        
-        # Combine both joins - only select columns that exist
-        backward_cols = ['timestamp']
-        
-        # Add columns that exist in the backward join
-        if 'Glucose Value (mg/dL)' in backward_join.columns:
-            backward_cols.append(pl.col('Glucose Value (mg/dL)').alias('glucose_prev'))
-        if 'Insulin Value (u)' in backward_join.columns:
-            backward_cols.append(pl.col('Insulin Value (u)').alias('insulin_prev'))
-        if 'Carb Value (grams)' in backward_join.columns:
-            backward_cols.append(pl.col('Carb Value (grams)').alias('carb_prev'))
-        if 'Event Type' in backward_join.columns:
-            backward_cols.append(pl.col('Event Type').alias('event_type_prev'))
-        if 'user_id' in backward_join.columns:
-            backward_cols.append(pl.col('user_id').alias('user_id_prev'))
-        
-        combined = forward_join.join(
-            backward_join.select(backward_cols),
-            on='timestamp',
-            how='left'
-        )
-        
-        # Interpolate glucose values using linear interpolation
-        if 'Glucose Value (mg/dL)' in seq_data.columns:
-            combined = self._interpolate_glucose_efficiently(combined, stats)
-        
-        # For insulin and carbs, use closest value (prev or next)
-        if 'Insulin Value (u)' in seq_data.columns:
-            combined = combined.with_columns(
-                pl.when(pl.col('Insulin Value (u)').is_not_null())
-                .then(pl.col('Insulin Value (u)'))
-                .otherwise(pl.col('insulin_prev'))
-                .alias('Insulin Value (u)')
-            )
-            # Count non-null insulin values
-            stats['insulin_shifted_records'] += combined.filter(pl.col('Insulin Value (u)').is_not_null()).height
-        
-        if 'Carb Value (grams)' in seq_data.columns:
-            combined = combined.with_columns(
-                pl.when(pl.col('Carb Value (grams)').is_not_null())
-                .then(pl.col('Carb Value (grams)'))
-                .otherwise(pl.col('carb_prev'))
-                .alias('Carb Value (grams)')
-            )
-            # Count non-null carb values
-            stats['carb_shifted_records'] += combined.filter(pl.col('Carb Value (grams)').is_not_null()).height
-        
-        # Use closest value for other fields
-        other_cols = [col for col in seq_data.columns 
-                     if col not in ['timestamp', 'sequence_id', 'Glucose Value (mg/dL)', 'Insulin Value (u)', 'Carb Value (grams)', 'Timestamp (YYYY-MM-DDThh:mm:ss)']]
-        
-        for col in other_cols:
-            # Handle column name mapping for backward join
-            if col == 'Event Type':
-                prev_col = 'event_type_prev'
-            elif col == 'user_id':
-                prev_col = 'user_id_prev'
-            else:
-                prev_col = f"{col}_prev"
+        if 'Glucose Value (mg/dL)' not in seq_data.columns:
+            return fixed_timestamps
             
-            # Check if the prev column exists before using it
-            if prev_col in combined.columns:
-                combined = combined.with_columns(
-                    pl.when(pl.col(col).is_not_null())
-                    .then(pl.col(col))
-                    .otherwise(pl.col(prev_col))
-                    .alias(col)
+        # Prepare sequence data with original timestamp preserved
+        # Ensure glucose is float for interpolation
+        seq_data_ts = seq_data.select(['timestamp', 'Glucose Value (mg/dL)']).with_columns([
+            pl.col('timestamp').alias('ts_orig'),
+            pl.col('Glucose Value (mg/dL)').cast(pl.Float64, strict=False)
+        ]).filter(pl.col('Glucose Value (mg/dL)').is_not_null())
+        
+        if len(seq_data_ts) == 0:
+            return fixed_timestamps.with_columns(pl.lit(None).alias('Glucose Value (mg/dL)'))
+
+        # Forward join (finds next point)
+        forward = fixed_timestamps.join_asof(
+            seq_data_ts, 
+            on='timestamp', 
+            strategy='forward'
+        ).rename({'Glucose Value (mg/dL)': 'glucose_next', 'ts_orig': 'ts_next'})
+        
+        # Backward join (finds prev point)
+        backward = fixed_timestamps.join_asof(
+            seq_data_ts, 
+            on='timestamp', 
+            strategy='backward'
+        ).select(['timestamp', 'Glucose Value (mg/dL)', 'ts_orig']).rename({'Glucose Value (mg/dL)': 'glucose_prev', 'ts_orig': 'ts_prev'})
+        
+        # Combine
+        combined = forward.join(backward, on='timestamp', how='left')
+        
+        # Calculate interpolation
+        # y = y_prev + (y_next - y_prev) * (t - t_prev) / (t_next - t_prev)
+        
+        result = combined.with_columns([
+            pl.when(pl.col('ts_prev') == pl.col('ts_next')) # Exact match (or only one point)
+            .then(pl.col('glucose_prev'))
+            .when(pl.col('ts_prev').is_null()) # No prev (start of series)
+            .then(pl.col('glucose_next'))
+            .when(pl.col('ts_next').is_null()) # No next (end of series)
+            .then(pl.col('glucose_prev'))
+            .otherwise(
+                pl.col('glucose_prev') + (
+                    (pl.col('glucose_next') - pl.col('glucose_prev')) * 
+                    (pl.col('timestamp') - pl.col('ts_prev')).dt.total_seconds() / 
+                    (pl.col('ts_next') - pl.col('ts_prev')).dt.total_seconds()
                 )
-        
-        # Clean up temporary columns
-        temp_cols = [col for col in combined.columns if col.endswith('_prev') or col.endswith('_next')]
-        result = combined.drop(temp_cols)
-        
-        return result
-    
-    def _interpolate_glucose_efficiently(self, combined_df: pl.DataFrame, stats: Dict[str, Any]) -> pl.DataFrame:
-        """
-        Efficiently interpolate glucose values using Polars expressions.
-        Simplified approach to avoid data type comparison issues.
-        """
-        # Use a simpler approach - just use the closest available glucose value
-        # This avoids complex data type handling while ensuring every row has a glucose value
-        result_df = combined_df.with_columns([
-            # Use forward glucose value if available, otherwise use backward
-            pl.when(
-                pl.col('Glucose Value (mg/dL)').is_not_null()
-            )
-            .then(pl.col('Glucose Value (mg/dL)').cast(pl.Float64, strict=False))
-            .when(
-                pl.col('glucose_prev').is_not_null()
-            )
-            .then(pl.col('glucose_prev').cast(pl.Float64, strict=False))
-            .otherwise(None)
-            .alias('Glucose Value (mg/dL)')
+            ).alias('Glucose Value (mg/dL)')
         ])
         
-        # Count non-null glucose values as interpolations
-        interpolation_count = result_df.filter(
-            pl.col('Glucose Value (mg/dL)').is_not_null()
+        # Update stats
+        interpolated_count = result.filter(
+            pl.col('Glucose Value (mg/dL)').is_not_null() & 
+            (pl.col('ts_next') != pl.col('timestamp')) # Not an exact match
         ).height
+        stats['glucose_interpolations'] += interpolated_count
         
-        stats['glucose_interpolations'] += interpolation_count
+        return result.select(fixed_timestamps.columns + ['Glucose Value (mg/dL)'])
+
+    def _shift_events_rounding(self, seq_data: pl.DataFrame, cols: List[str], stats: Dict[str, Any]) -> pl.DataFrame:
+        """
+        Shift events to nearest grid point by rounding timestamps.
+        Aggregates multiple events falling into the same bin (sum for numeric, first for string).
+        """
+        # Select relevant columns
+        events = seq_data.select(['timestamp'] + cols)
         
-        return result_df
+        # Filter out rows where all event columns are null
+        # This prevents "empty" rows from creating 0-valued event records
+        events = events.filter(~pl.all_horizontal([pl.col(c).is_null() for c in cols]))
+        
+        # Round timestamp to nearest interval
+        interval_str = f"{self.expected_interval_minutes}m"
+        
+        events_rounded = events.with_columns(
+            pl.col('timestamp').dt.round(interval_str).alias('timestamp')
+        )
+        
+        # Define aggregations
+        agg_exprs = []
+        for col in cols:
+            if col in ['Carb Value (grams)', 'Insulin Value (u)', 'Fast-Acting Insulin Value (u)', 'Long-Acting Insulin Value (u)']:
+                # Sum numeric events (e.g. two small boluses)
+                agg_exprs.append(pl.col(col).sum().alias(col))
+                # Count shifts? Hard to track individual shifts here efficiently without loop
+                if col == 'Carb Value (grams)':
+                    stats['carb_shifted_records'] += 1 
+                elif 'Insulin' in col:
+                    stats['insulin_shifted_records'] += 1
+            else:
+                # For categorical/IDs, take the first (or max?)
+                agg_exprs.append(pl.col(col).first().alias(col))
+        
+        # Group and aggregate
+        shifted = events_rounded.group_by('timestamp').agg(agg_exprs)
+        
+        return shifted
 
     def filter_glucose_only(self, df: pl.DataFrame) -> Tuple[pl.DataFrame, Dict[str, Any]]:
         """
@@ -740,7 +861,7 @@ class GlucoseMLPreprocessor:
         df_filtered = df.filter(pl.col('Glucose Value (mg/dL)').is_not_null())
         
         # Remove specified fields
-        fields_to_remove = ['Event Type', 'Insulin Value (u)', 'Carb Value (grams)']
+        fields_to_remove = ['Event Type', 'Insulin Value (u)', 'Fast-Acting Insulin Value (u)', 'Long-Acting Insulin Value (u)', 'Carb Value (grams)']
         existing_fields_to_remove = [field for field in fields_to_remove if field in df_filtered.columns]
         
         if existing_fields_to_remove:
@@ -785,6 +906,10 @@ class GlucoseMLPreprocessor:
             columns_to_cast.append(pl.col('Glucose Value (mg/dL)').cast(pl.Float64, strict=False))
         if 'Insulin Value (u)' in df.columns:
             columns_to_cast.append(pl.col('Insulin Value (u)').cast(pl.Float64, strict=False))
+        if 'Fast-Acting Insulin Value (u)' in df.columns:
+            columns_to_cast.append(pl.col('Fast-Acting Insulin Value (u)').cast(pl.Float64, strict=False))
+        if 'Long-Acting Insulin Value (u)' in df.columns:
+            columns_to_cast.append(pl.col('Long-Acting Insulin Value (u)').cast(pl.Float64, strict=False))
         if 'Carb Value (grams)' in df.columns:
             columns_to_cast.append(pl.col('Carb Value (grams)').cast(pl.Float64, strict=False))
         
@@ -825,8 +950,9 @@ class GlucoseMLPreprocessor:
                 }
         
         # Calculate sequence statistics
-        sequence_counts = df.group_by('sequence_id').count().sort('sequence_id')
-        sequence_lengths = sequence_counts['count'].to_list()
+        # Use len() instead of count() for Polars 1.0+ compatibility
+        sequence_counts = df.group_by('sequence_id').len().sort('sequence_id')
+        sequence_lengths = sequence_counts['len'].to_list()
         
         stats = {
             'dataset_overview': {
@@ -860,6 +986,8 @@ class GlucoseMLPreprocessor:
             'data_quality': {
                 'glucose_data_completeness': (1 - df['Glucose Value (mg/dL)'].null_count() / len(df)) * 100 if 'Glucose Value (mg/dL)' in df.columns else 0,
                 'insulin_data_completeness': (1 - df['Insulin Value (u)'].null_count() / len(df)) * 100 if 'Insulin Value (u)' in df.columns else 0,
+                'fast_acting_insulin_data_completeness': (1 - df['Fast-Acting Insulin Value (u)'].null_count() / len(df)) * 100 if 'Fast-Acting Insulin Value (u)' in df.columns else 0,
+                'long_acting_insulin_data_completeness': (1 - df['Long-Acting Insulin Value (u)'].null_count() / len(df)) * 100 if 'Long-Acting Insulin Value (u)' in df.columns else 0,
                 'carb_data_completeness': (1 - df['Carb Value (grams)'].null_count() / len(df)) * 100 if 'Carb Value (grams)' in df.columns else 0,
                 'interpolated_records': df.filter(pl.col('Event Type') == 'Interpolated').height if 'Event Type' in df.columns else 0
             }

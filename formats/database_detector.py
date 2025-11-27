@@ -66,7 +66,7 @@ class DatabaseDetector:
             else:
                 # Check file content to determine format
                 try:
-                    with open(csv_file, 'r', encoding='utf-8') as file:
+                    with open(csv_file, 'r', encoding='utf-8-sig') as file:  # utf-8-sig handles BOM
                         first_lines = [file.readline().strip() for _ in range(3)]
                         
                         # Check for Dexcom format headers
