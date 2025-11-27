@@ -389,6 +389,8 @@ class GlucoseMLPreprocessor:
         since they represent occasional events, not persistent measurements.
         Large gaps are treated as sequence boundaries and not interpolated.
         
+        Uses Polars-native operations for better performance.
+        
         Args:
             df: DataFrame with sequence IDs and timestamp data
             
@@ -410,130 +412,176 @@ class GlucoseMLPreprocessor:
             'large_gaps_skipped': 0
         }
         
-        # Process each sequence separately
-        unique_sequences = df['sequence_id'].unique().to_list()
+        glucose_col = 'Glucose Value (mg/dL)'
+        has_glucose = glucose_col in df.columns
         
-        for seq_id in unique_sequences:
-            seq_data = df.filter(pl.col('sequence_id') == seq_id).sort('timestamp')
+        if not has_glucose:
+            print("No glucose column found - skipping interpolation")
+            return df, interpolation_stats
+        
+        # Process each sequence separately       
+        # Add row index and time differences within each sequence
+        df_with_diffs = df.with_row_index('row_idx').with_columns([
+            (pl.col('timestamp').diff().over('sequence_id').dt.total_seconds() / 60.0).alias('time_diff_minutes')
+        ])
+        
+        # Identify small and large gaps
+        df_with_gaps = df_with_diffs.with_columns([
+            (
+                (pl.col('time_diff_minutes') > self.expected_interval_minutes) &
+                (pl.col('time_diff_minutes') <= self.small_gap_max_minutes)
+            ).alias('is_small_gap'),
+            (pl.col('time_diff_minutes') > self.small_gap_max_minutes).alias('is_large_gap')
+        ])
+        
+        # Count statistics
+        small_gaps_df = df_with_gaps.filter(pl.col('is_small_gap'))
+        large_gaps_df = df_with_gaps.filter(pl.col('is_large_gap'))
+        
+        interpolation_stats['small_gaps_filled'] = small_gaps_df.height
+        interpolation_stats['large_gaps_skipped'] = large_gaps_df.height
+        interpolation_stats['sequences_processed'] = df['sequence_id'].n_unique()
+        
+        # Process small gaps to create interpolated rows using fully vectorized Polars operations
+        if small_gaps_df.height > 0:
+            # Get previous row values using window functions
+            prev_cols = [
+                pl.col('timestamp').shift(1).over('sequence_id').alias('prev_timestamp'),
+                pl.col(glucose_col).shift(1).over('sequence_id').alias('prev_glucose')
+            ]
+            if 'user_id' in df_with_gaps.columns:
+                prev_cols.append(pl.col('user_id').shift(1).over('sequence_id').alias('prev_user_id'))
             
-            if len(seq_data) < 2:
-                continue
+            df_with_prev = df_with_gaps.with_columns(prev_cols)
+            
+            # Filter to small gaps only and calculate missing_points
+            gaps_to_process = df_with_prev.filter(pl.col('is_small_gap')).with_columns([
+                ((pl.col('time_diff_minutes') / self.expected_interval_minutes).cast(pl.Int64) - 1)
+                .alias('missing_points')
+            ]).filter(pl.col('missing_points') > 0)
+            
+            if gaps_to_process.height > 0:
+                # Create list column with j values [1, 2, ..., missing_points] for each gap
+                # Using map_elements to create variable-length lists
+                gaps_with_j = gaps_to_process.with_columns([
+                    pl.col('missing_points').map_elements(
+                        lambda mp: list(range(1, int(mp) + 1)) if mp and mp > 0 else [],
+                        return_dtype=pl.List(pl.Int64)
+                    ).alias('j_values')
+                ])
                 
-            interpolation_stats['sequences_processed'] += 1
-            
-            # Get time differences as list for processing
-            time_diffs = seq_data['timestamp'].diff().dt.total_seconds() / 60.0
-            time_diffs_list = time_diffs.to_list()
-            
-            # Find small gaps (1-2 missing data points = expected_interval to small_gap_max_minutes)
-            small_gaps = [(i, diff) for i, diff in enumerate(time_diffs_list) 
-                         if i > 0 and self.expected_interval_minutes < diff <= self.small_gap_max_minutes]
-            large_gaps = [(i, diff) for i, diff in enumerate(time_diffs_list) 
-                         if i > 0 and diff > self.small_gap_max_minutes]
-            
-            interpolation_stats['small_gaps_filled'] += len(small_gaps)
-            interpolation_stats['large_gaps_skipped'] += len(large_gaps)
-            
-            # Only interpolate small gaps
-            if small_gaps:
-                # Convert to pandas for easier interpolation logic, then back to polars
-                seq_pandas = seq_data.to_pandas()
-                new_rows = []
+                # Explode to create one row per interpolated point
+                gaps_exploded = gaps_with_j.explode('j_values').with_columns([
+                    pl.col('j_values').alias('j')
+                ])
                 
-                for gap_idx, time_diff_minutes in small_gaps:
-                    if gap_idx > 0:
-                        prev_row = seq_pandas.iloc[gap_idx-1]
-                        current_row = seq_pandas.iloc[gap_idx]
-                        
-                        # Calculate number of missing points
-                        missing_points = int(time_diff_minutes / self.expected_interval_minutes) - 1
-                        
-                        if missing_points > 0:
-                            # Create interpolated points
-                            for j in range(1, missing_points + 1):
-                                interpolated_time = prev_row['timestamp'] + timedelta(minutes=self.expected_interval_minutes*j)
-                                
-                                # Interpolate numeric values - include all columns from original data
-                                new_row = {
-                                    'Timestamp (YYYY-MM-DDThh:mm:ss)': interpolated_time.strftime('%Y-%m-%dT%H:%M:%S'),
-                                    'timestamp': interpolated_time,
-                                    'sequence_id': seq_id
-                                }
-                                
-                                # Initialize all other columns - use empty strings for string columns, None for numeric
-                                for col in seq_pandas.columns:
-                                    if col not in new_row:
-                                        # For non-glucose numeric columns, use None (will be empty in CSV)
-                                        # For string columns, use empty string
-                                        if col in ['Fast-Acting Insulin Value (u)', 'Long-Acting Insulin Value (u)', 'Carb Value (grams)']:
-                                            new_row[col] = None  # Numeric columns - None becomes empty in CSV
-                                        elif col == 'Glucose Value (mg/dL)':
-                                            new_row[col] = None  # Will be set below if interpolation possible
-                                        elif seq_pandas[col].dtype == 'object' or str(seq_pandas[col].dtype) == 'string':
-                                            new_row[col] = ''  # String columns
-                                        else:
-                                            new_row[col] = None  # Other numeric columns
-                                        
-                                # Set Event Type to Interpolated if it exists
-                                if 'Event Type' in seq_pandas.columns:
-                                    new_row['Event Type'] = 'Interpolated'
-                                
-                                # Add user_id if it exists in the original data
-                                if 'user_id' in seq_pandas.columns:
-                                    new_row['user_id'] = prev_row['user_id']
-                                
-                                # Only interpolate glucose - other columns (insulin, carbs) are occasional events
-                                # and should remain empty for interpolated time points
-                                glucose_col = 'Glucose Value (mg/dL)'
-                                interpolations_made = 0
-                                
-                                if glucose_col in seq_pandas.columns:
-                                    prev_val = prev_row[glucose_col]
-                                    curr_val = current_row[glucose_col]
-                                    
-                                    # Check if both values are valid and numeric
-                                    try:
-                                        prev_numeric = float(prev_val) if prev_val is not None and str(prev_val).strip() != '' else None
-                                        curr_numeric = float(curr_val) if curr_val is not None and str(curr_val).strip() != '' else None
-                                        
-                                        if prev_numeric is not None and curr_numeric is not None:
-                                            # Linear interpolation for glucose only
-                                            alpha = j / (missing_points + 1)
-                                            interpolated_value = prev_numeric + alpha * (curr_numeric - prev_numeric)
-                                            new_row[glucose_col] = interpolated_value
-                                            
-                                            # Update stats
-                                            interpolation_stats['glucose_value_mg/dl_interpolations'] += 1
-                                            interpolations_made += 1
-                                    except (ValueError, TypeError):
-                                        # Keep as None if can't parse
-                                        pass
-                                
-                                # Count this as one interpolated data point if glucose was interpolated
-                                if interpolations_made > 0:
-                                    interpolation_stats['total_interpolations'] += 1
-                                
-                                new_rows.append(new_row)
-                                
-                                # Count this as one interpolated data point (row created)
-                                interpolation_stats['total_interpolated_data_points'] += 1
+                # Calculate all interpolated values using vectorized expressions
+                interpolated_cols = [
+                    # Calculate interpolated timestamp
+                    (pl.col('prev_timestamp') + 
+                     pl.duration(minutes=pl.col('j') * self.expected_interval_minutes))
+                    .alias('timestamp'),
+                    
+                    # Calculate alpha for time-weighted interpolation
+                    # alpha = time_from_start / total_gap_time
+                    # This ensures points closer in time have more influence
+                    ((pl.col('j').cast(pl.Float64) * self.expected_interval_minutes) / 
+                     pl.col('time_diff_minutes').cast(pl.Float64))
+                    .alias('alpha'),
+                    
+                    # Keep sequence_id
+                    pl.col('sequence_id'),
+                    
+                    # Keep prev_glucose and current glucose for interpolation
+                    pl.col('prev_glucose'),
+                    pl.col(glucose_col).alias('curr_glucose'),
+                ]
                 
-                # Add interpolated rows to the sequence
-                if new_rows:
-                    # Create DataFrame with explicit schema based on original sequence
-                    schema = {col: seq_data[col].dtype for col in seq_data.columns}
-                    interpolated_df = pl.DataFrame(new_rows, schema=schema)
-                    # Ensure column order matches original sequence
-                    interpolated_df = interpolated_df.select(seq_data.columns)
-                    # Sort by user_id and timestamp if user_id exists, otherwise just by sequence_id and timestamp
-                    if 'user_id' in seq_data.columns:
-                        seq_data = pl.concat([seq_data, interpolated_df]).sort(['user_id', 'sequence_id', 'timestamp'])
-                    else:
-                        seq_data = pl.concat([seq_data, interpolated_df]).sort(['sequence_id', 'timestamp'])
-            
-            # Update the main DataFrame
-            df = df.filter(pl.col('sequence_id') != seq_id)  # Remove original sequence data
-            df = pl.concat([df, seq_data])
+                # Add user_id if it exists
+                if 'prev_user_id' in gaps_exploded.columns:
+                    interpolated_cols.append(pl.col('prev_user_id'))
+                
+                gaps_calculated = gaps_exploded.select(interpolated_cols)
+                
+                # Calculate interpolated glucose using vectorized expressions
+                # Ensure glucose values are numeric (cast to float, handle nulls)
+                interpolated_df = gaps_calculated.with_columns([
+                    # Cast glucose values to float, handling nulls and strings
+                    pl.col('prev_glucose').cast(pl.Float64, strict=False).alias('prev_glucose_num'),
+                    pl.col('curr_glucose').cast(pl.Float64, strict=False).alias('curr_glucose_num'),
+                ]).with_columns([
+                    # Calculate interpolated glucose using time-weighted interpolation:
+                    # prev + alpha * (curr - prev)
+                    # where alpha = time_from_start / total_gap_time
+                    # This ensures points closer in time have more influence
+                    pl.when(
+                        (pl.col('prev_glucose_num').is_not_null()) & 
+                        (pl.col('curr_glucose_num').is_not_null())
+                    ).then(
+                        pl.col('prev_glucose_num') + 
+                        pl.col('alpha') * (pl.col('curr_glucose_num') - pl.col('prev_glucose_num'))
+                    ).otherwise(None).alias(glucose_col),
+                    
+                    # Create timestamp string column
+                    pl.col('timestamp').dt.strftime('%Y-%m-%dT%H:%M:%S')
+                    .alias('Timestamp (YYYY-MM-DDThh:mm:ss)'),
+                ])
+                
+                # Build final interpolated DataFrame with all required columns
+                # Start with columns we've already calculated
+                final_cols = [
+                    pl.col('Timestamp (YYYY-MM-DDThh:mm:ss)'),
+                    pl.col('timestamp'),
+                    pl.col('sequence_id'),
+                    pl.col(glucose_col),
+                ]
+                
+                # Add Event Type
+                if 'Event Type' in df.columns:
+                    final_cols.append(pl.lit('Interpolated').alias('Event Type'))
+                
+                # Add user_id if it exists
+                if 'prev_user_id' in gaps_calculated.columns:
+                    final_cols.append(
+                        pl.when(pl.col('prev_user_id').is_not_null())
+                        .then(pl.col('prev_user_id'))
+                        .otherwise(pl.lit(''))
+                        .alias('user_id')
+                    )
+                
+                # Initialize all other columns from original schema
+                original_schema = df.schema
+                existing_col_names = ['Timestamp (YYYY-MM-DDThh:mm:ss)', 'timestamp', 'sequence_id', glucose_col]
+                if 'Event Type' in df.columns:
+                    existing_col_names.append('Event Type')
+                if 'prev_user_id' in gaps_calculated.columns:
+                    existing_col_names.append('user_id')
+                
+                for col in df.columns:
+                    if col not in existing_col_names:
+                        col_type = original_schema[col]
+                        if col in ['Fast-Acting Insulin Value (u)', 'Long-Acting Insulin Value (u)', 'Carb Value (grams)']:
+                            final_cols.append(pl.lit(None).cast(col_type).alias(col))
+                        elif col_type == pl.Utf8 or col_type == pl.String:
+                            final_cols.append(pl.lit('').cast(col_type).alias(col))
+                        else:
+                            final_cols.append(pl.lit(None).cast(col_type).alias(col))
+                
+                # Create interpolated DataFrame with all columns
+                interpolated_df = interpolated_df.select(final_cols)
+                
+                # Ensure columns are in same order as original and cast to correct types
+                interpolated_df = interpolated_df.select(df.columns)
+                
+                # Update statistics
+                interpolation_stats['total_interpolated_data_points'] = len(interpolated_df)
+                interpolation_stats['glucose_value_mg/dl_interpolations'] = interpolated_df.filter(
+                    pl.col(glucose_col).is_not_null()
+                ).height
+                interpolation_stats['total_interpolations'] = interpolation_stats['glucose_value_mg/dl_interpolations']
+                
+                # Combine with original data
+                df = pl.concat([df, interpolated_df], how='vertical_relaxed')
         
         # Sort by user_id, sequence_id and timestamp if user_id exists, otherwise just by sequence_id and timestamp
         if 'user_id' in df.columns:

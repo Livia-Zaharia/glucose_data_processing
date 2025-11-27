@@ -340,13 +340,16 @@ class TestGlucoseMLPreprocessorSteps:
         interp_rows = df_interp.filter(pl.col("Event Type") == "Interpolated").sort("timestamp")
         assert len(interp_rows) == 2
         
-        # First interpolated point at 10:05: linear interpolation between 100 and 130
-        # alpha = 1/3 for first point (j=1, missing_points=2, so alpha = 1/(2+1) = 1/3)
+        # First interpolated point at 10:05: time-weighted interpolation
+        # Time from start: 5 minutes, total gap: 15 minutes
+        # alpha = 5/15 = 1/3 (time-weighted)
         # value = 100 + (1/3) * (130 - 100) = 100 + 10 = 110
         assert interp_rows["timestamp"][0] == datetime(2023, 1, 1, 10, 5, 0)
         assert abs(interp_rows["Glucose Value (mg/dL)"][0] - 110.0) < 0.01
         
-        # Second interpolated point at 10:10: alpha = 2/3 for second point (j=2)
+        # Second interpolated point at 10:10: time-weighted interpolation
+        # Time from start: 10 minutes, total gap: 15 minutes
+        # alpha = 10/15 = 2/3 (time-weighted)
         # value = 100 + (2/3) * (130 - 100) = 100 + 20 = 120
         assert interp_rows["timestamp"][1] == datetime(2023, 1, 1, 10, 10, 0)
         assert abs(interp_rows["Glucose Value (mg/dL)"][1] - 120.0) < 0.01
@@ -381,6 +384,161 @@ class TestGlucoseMLPreprocessorSteps:
         # Original data should remain unchanged
         assert df_interp["timestamp"].to_list() == timestamps
         assert df_interp["Glucose Value (mg/dL)"].to_list() == [100.0, 120.0]
+
+    def test_interpolate_missing_values_uneven_gap_14_minutes(self, preprocessor):
+        """Test interpolation with 14-minute gap where interpolated point has uneven time distances.
+        
+        This tests a case where:
+        - Gap is 14 minutes (between 10:00 and 10:14)
+        - Expected interval is 5 minutes
+        - missing_points = (14/5).cast(Int64) - 1 = 2 - 1 = 1
+        - Creates 1 interpolated point at 10:05 (5 min from start, 9 min from end)
+        - Algorithm uses time-weighted interpolation: alpha = time_from_start / total_gap_time
+        - Since the point is closer to the start (5/14 = 0.357), it should be closer to start value
+        
+        If small_gap_max_minutes increases or expected_interval_minutes decreases,
+        this could result in multiple interpolated points with uneven spacing.
+        """
+        # 14-minute gap: 10:00 -> 10:14
+        timestamps = [
+            datetime(2023, 1, 1, 10, 0, 0),
+            datetime(2023, 1, 1, 10, 14, 0)  # 14 min gap (within small_gap_max_minutes=15)
+        ]
+        
+        df = pl.DataFrame({
+            "timestamp": timestamps,
+            "sequence_id": [0, 0],
+            "Glucose Value (mg/dL)": [100.0, 120.0],
+            "Event Type": ["EGV", "EGV"]
+        })
+        
+        df_interp, stats = preprocessor.interpolate_missing_values(df)
+        
+        # Should have 3 rows (original 2 + 1 interpolated)
+        assert len(df_interp) == 3
+        assert stats["small_gaps_filled"] == 1
+        assert stats["glucose_value_mg/dl_interpolations"] == 1
+        
+        # Check interpolated row
+        interp_rows = df_interp.filter(pl.col("Event Type") == "Interpolated").sort("timestamp")
+        assert len(interp_rows) == 1
+        
+        # Interpolated point should be at 10:05 (5 minutes from start)
+        interp_timestamp = interp_rows["timestamp"][0]
+        assert interp_timestamp == datetime(2023, 1, 1, 10, 5, 0)
+        
+        # Verify time-weighted interpolation:
+        # - From start (10:00) to interpolated (10:05): 5 minutes
+        # - Total gap: 14 minutes
+        # - alpha = 5 / 14 = 0.357 (closer to start, so value closer to 100)
+        # - value = 100 + 0.357 * (120 - 100) = 100 + 7.14 = 107.14
+        interp_glucose = interp_rows["Glucose Value (mg/dL)"][0]
+        expected_glucose = 100.0 + (5.0 / 14.0) * (120.0 - 100.0)  # 107.14
+        assert abs(interp_glucose - expected_glucose) < 0.01, \
+            f"Expected glucose ~{expected_glucose} (time-weighted), got {interp_glucose}"
+        
+        # Verify the value is closer to start (100) than end (120) due to time weighting
+        assert interp_glucose < 110.0, \
+            f"Time-weighted interpolation should be closer to start value (100) than midpoint (110), got {interp_glucose}"
+        
+        # Verify final sorted order
+        sorted_df = df_interp.sort("timestamp")
+        assert sorted_df["timestamp"].to_list() == [
+            datetime(2023, 1, 1, 10, 0, 0),
+            datetime(2023, 1, 1, 10, 5, 0),
+            datetime(2023, 1, 1, 10, 14, 0)
+        ]
+        assert sorted_df["Glucose Value (mg/dL)"].to_list() == [100.0, interp_glucose, 120.0]
+
+    def test_interpolate_missing_values_multiple_points_uneven_spacing(self, preprocessor):
+        """Test interpolation with multiple points that have uneven time distances.
+        
+        This demonstrates what happens when a gap creates multiple interpolated points
+        but the actual gap size doesn't align perfectly with expected intervals.
+        
+        Example: 19-minute gap with expected_interval_minutes=5:
+        - missing_points = (19/5).cast(Int64) - 1 = 3 - 1 = 2
+        - Creates 2 interpolated points at 10:05 and 10:10
+        - But the end point is at 10:19, not 10:15
+        - So we have: 5min, 5min, 9min spacing (uneven)
+        - Algorithm uses time-weighted interpolation: alpha = time_from_start / total_gap_time
+        - Point 1: alpha = 5/19 = 0.263 (closer to start)
+        - Point 2: alpha = 10/19 = 0.526 (closer to midpoint but still weighted by time)
+        """
+        # Create a preprocessor with larger small_gap_max_minutes to allow 19-minute gap
+        preprocessor_large = GlucoseMLPreprocessor(
+            expected_interval_minutes=5,
+            small_gap_max_minutes=20,  # Allow up to 20 minutes
+            min_sequence_len=10,
+            create_fixed_frequency=True
+        )
+        
+        # 19-minute gap: 10:00 -> 10:19
+        timestamps = [
+            datetime(2023, 1, 1, 10, 0, 0),
+            datetime(2023, 1, 1, 10, 19, 0)  # 19 min gap
+        ]
+        
+        df = pl.DataFrame({
+            "timestamp": timestamps,
+            "sequence_id": [0, 0],
+            "Glucose Value (mg/dL)": [100.0, 130.0],
+            "Event Type": ["EGV", "EGV"]
+        })
+        
+        df_interp, stats = preprocessor_large.interpolate_missing_values(df)
+        
+        # missing_points = (19/5).cast(Int64) - 1 = 3 - 1 = 2
+        # Should have 4 rows (original 2 + 2 interpolated)
+        assert len(df_interp) == 4
+        assert stats["small_gaps_filled"] == 1
+        assert stats["glucose_value_mg/dl_interpolations"] == 2
+        
+        # Check interpolated rows
+        interp_rows = df_interp.filter(pl.col("Event Type") == "Interpolated").sort("timestamp")
+        assert len(interp_rows) == 2
+        
+        # First interpolated point at 10:05
+        # Time from start: 5 minutes, total gap: 19 minutes
+        # alpha = 5 / 19 = 0.263
+        # value = 100 + 0.263 * (130 - 100) = 100 + 7.89 = 107.89
+        assert interp_rows["timestamp"][0] == datetime(2023, 1, 1, 10, 5, 0)
+        expected_glucose_1 = 100.0 + (5.0 / 19.0) * (130.0 - 100.0)  # 107.89
+        assert abs(interp_rows["Glucose Value (mg/dL)"][0] - expected_glucose_1) < 0.01, \
+            f"Expected glucose ~{expected_glucose_1} (time-weighted), got {interp_rows['Glucose Value (mg/dL)'][0]}"
+        
+        # Second interpolated point at 10:10
+        # Time from start: 10 minutes, total gap: 19 minutes
+        # alpha = 10 / 19 = 0.526
+        # value = 100 + 0.526 * (130 - 100) = 100 + 15.79 = 115.79
+        assert interp_rows["timestamp"][1] == datetime(2023, 1, 1, 10, 10, 0)
+        expected_glucose_2 = 100.0 + (10.0 / 19.0) * (130.0 - 100.0)  # 115.79
+        assert abs(interp_rows["Glucose Value (mg/dL)"][1] - expected_glucose_2) < 0.01, \
+            f"Expected glucose ~{expected_glucose_2} (time-weighted), got {interp_rows['Glucose Value (mg/dL)'][1]}"
+        
+        # Verify time distances are uneven:
+        # - 10:00 -> 10:05: 5 minutes
+        # - 10:05 -> 10:10: 5 minutes
+        # - 10:10 -> 10:19: 9 minutes (uneven!)
+        sorted_df = df_interp.sort("timestamp")
+        timestamps_list = sorted_df["timestamp"].to_list()
+        assert timestamps_list == [
+            datetime(2023, 1, 1, 10, 0, 0),
+            datetime(2023, 1, 1, 10, 5, 0),
+            datetime(2023, 1, 1, 10, 10, 0),
+            datetime(2023, 1, 1, 10, 19, 0)
+        ]
+        
+        # Verify glucose values reflect time-weighted interpolation
+        # Values should be closer to start than equal-interval weighting would give
+        glucose_list = sorted_df["Glucose Value (mg/dL)"].to_list()
+        assert glucose_list == [100.0, expected_glucose_1, expected_glucose_2, 130.0]
+        
+        # Verify that time-weighted values are different from equal-interval weighting
+        # Equal-interval would give: [100, 110, 120, 130]
+        # Time-weighted gives: [100, 107.89, 115.79, 130]
+        assert expected_glucose_1 < 110.0, "First point should be closer to start due to time weighting"
+        assert expected_glucose_2 < 120.0, "Second point should be closer to start due to time weighting"
 
     def test_interpolate_missing_values_only_glucose_interpolated(self, preprocessor):
         """Test that only glucose is interpolated, other columns (insulin, carbs) remain empty."""
