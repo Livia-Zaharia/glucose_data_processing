@@ -382,6 +382,53 @@ class TestGlucoseMLPreprocessorSteps:
         assert df_interp["timestamp"].to_list() == timestamps
         assert df_interp["Glucose Value (mg/dL)"].to_list() == [100.0, 120.0]
 
+    def test_interpolate_missing_values_only_glucose_interpolated(self, preprocessor):
+        """Test that only glucose is interpolated, other columns (insulin, carbs) remain empty."""
+        # Sequence with gap that has insulin and carb values
+        timestamps = [
+            datetime(2023, 1, 1, 10, 0, 0),
+            datetime(2023, 1, 1, 10, 10, 0)  # 10 min gap
+        ]
+        
+        df = pl.DataFrame({
+            "timestamp": timestamps,
+            "sequence_id": [0, 0],
+            "Glucose Value (mg/dL)": [100.0, 120.0],
+            "Fast-Acting Insulin Value (u)": [5.0, 15.0],
+            "Long-Acting Insulin Value (u)": [10.0, 20.0],
+            "Carb Value (grams)": [30.0, 50.0],
+            "Event Type": ["EGV", "EGV"]
+        })
+        
+        df_interp, stats = preprocessor.interpolate_missing_values(df)
+        
+        # Should have 3 rows (original 2 + 1 interpolated)
+        assert len(df_interp) == 3
+        assert stats["small_gaps_filled"] == 1
+        assert stats["glucose_value_mg/dl_interpolations"] == 1
+        
+        # Check interpolated row (10:05)
+        interp_row = df_interp.filter(pl.col("Event Type") == "Interpolated")
+        assert len(interp_row) == 1
+        
+        # Glucose should be interpolated (midpoint: 110.0)
+        assert abs(interp_row["Glucose Value (mg/dL)"][0] - 110.0) < 0.01
+        
+        # Insulin and carb values should be empty strings (not interpolated)
+        fast_acting = interp_row["Fast-Acting Insulin Value (u)"][0]
+        long_acting = interp_row["Long-Acting Insulin Value (u)"][0]
+        carb = interp_row["Carb Value (grams)"][0]
+        
+        # Should be empty string or None (not interpolated)
+        assert fast_acting == '' or fast_acting is None, f"Expected empty string or None for Fast-Acting Insulin, got {fast_acting}"
+        assert long_acting == '' or long_acting is None, f"Expected empty string or None for Long-Acting Insulin, got {long_acting}"
+        assert carb == '' or carb is None, f"Expected empty string or None for Carb Value, got {carb}"
+        
+        # Verify stats - only glucose interpolations, no insulin/carb interpolations
+        assert stats["fast_acting_insulin_value_u_interpolations"] == 0
+        assert stats["long_acting_insulin_value_u_interpolations"] == 0
+        assert stats["carb_value_grams_interpolations"] == 0
+
     def test_filter_sequences_by_length(self, preprocessor):
         """Test filtering short sequences."""
         preprocessor.min_sequence_len = 5
