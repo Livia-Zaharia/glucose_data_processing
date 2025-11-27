@@ -385,6 +385,8 @@ class GlucoseMLPreprocessor:
     def interpolate_missing_values(self, df: pl.DataFrame) -> Tuple[pl.DataFrame, Dict[str, Any]]:
         """
         Interpolate only small gaps (1-2 missing data points) within sequences.
+        Only glucose values are interpolated. Other columns (insulin, carbs) are left as empty
+        since they represent occasional events, not persistent measurements.
         Large gaps are treated as sequence boundaries and not interpolated.
         
         Args:
@@ -393,7 +395,7 @@ class GlucoseMLPreprocessor:
         Returns:
             Tuple of (DataFrame with interpolated values, interpolation statistics)
         """
-        print("Interpolating small gaps only...")
+        print("Interpolating small gaps (glucose only)...")
         
         interpolation_stats = {
             'total_interpolations': 0,
@@ -458,10 +460,19 @@ class GlucoseMLPreprocessor:
                                     'sequence_id': seq_id
                                 }
                                 
-                                # Initialize all other columns from the original data as None
+                                # Initialize all other columns - use empty strings for string columns, None for numeric
                                 for col in seq_pandas.columns:
                                     if col not in new_row:
-                                        new_row[col] = None
+                                        # For non-glucose numeric columns, use None (will be empty in CSV)
+                                        # For string columns, use empty string
+                                        if col in ['Fast-Acting Insulin Value (u)', 'Long-Acting Insulin Value (u)', 'Carb Value (grams)']:
+                                            new_row[col] = None  # Numeric columns - None becomes empty in CSV
+                                        elif col == 'Glucose Value (mg/dL)':
+                                            new_row[col] = None  # Will be set below if interpolation possible
+                                        elif seq_pandas[col].dtype == 'object' or str(seq_pandas[col].dtype) == 'string':
+                                            new_row[col] = ''  # String columns
+                                        else:
+                                            new_row[col] = None  # Other numeric columns
                                         
                                 # Set Event Type to Interpolated if it exists
                                 if 'Event Type' in seq_pandas.columns:
@@ -471,16 +482,14 @@ class GlucoseMLPreprocessor:
                                 if 'user_id' in seq_pandas.columns:
                                     new_row['user_id'] = prev_row['user_id']
                                 
-                                # Linear interpolation for numeric columns
-                                numeric_cols = ['Glucose Value (mg/dL)', 'Fast-Acting Insulin Value (u)', 'Long-Acting Insulin Value (u)', 'Carb Value (grams)']
+                                # Only interpolate glucose - other columns (insulin, carbs) are occasional events
+                                # and should remain empty for interpolated time points
+                                glucose_col = 'Glucose Value (mg/dL)'
                                 interpolations_made = 0
-                                for col in numeric_cols:
-                                    # Skip columns that don't exist in the data
-                                    if col not in seq_pandas.columns:
-                                        continue
-                                        
-                                    prev_val = prev_row[col]
-                                    curr_val = current_row[col]
+                                
+                                if glucose_col in seq_pandas.columns:
+                                    prev_val = prev_row[glucose_col]
+                                    curr_val = current_row[glucose_col]
                                     
                                     # Check if both values are valid and numeric
                                     try:
@@ -488,28 +497,19 @@ class GlucoseMLPreprocessor:
                                         curr_numeric = float(curr_val) if curr_val is not None and str(curr_val).strip() != '' else None
                                         
                                         if prev_numeric is not None and curr_numeric is not None:
-                                            # Linear interpolation
+                                            # Linear interpolation for glucose only
                                             alpha = j / (missing_points + 1)
                                             interpolated_value = prev_numeric + alpha * (curr_numeric - prev_numeric)
-                                            new_row[col] = interpolated_value  # Keep as numeric value
+                                            new_row[glucose_col] = interpolated_value
                                             
-                                            # Update stats for specific column
-                                            stat_key = f'{col.lower().replace(" ", "_").replace("(", "").replace(")", "")}_interpolations'
-                                            # Handle special case for hyphens in fast-acting/long-acting
-                                            if "fast-acting" in col.lower():
-                                                stat_key = "fast_acting_insulin_value_u_interpolations"
-                                            elif "long-acting" in col.lower():
-                                                stat_key = "long_acting_insulin_value_u_interpolations"
-                                                
-                                            if stat_key in interpolation_stats:
-                                                interpolation_stats[stat_key] += 1
-                                                
+                                            # Update stats
+                                            interpolation_stats['glucose_value_mg/dl_interpolations'] += 1
                                             interpolations_made += 1
                                     except (ValueError, TypeError):
-                                        # Keep empty string for non-numeric values
+                                        # Keep as None if can't parse
                                         pass
                                 
-                                # Count this as one interpolated data point if any field was interpolated
+                                # Count this as one interpolated data point if glucose was interpolated
                                 if interpolations_made > 0:
                                     interpolation_stats['total_interpolations'] += 1
                                 
@@ -543,7 +543,7 @@ class GlucoseMLPreprocessor:
         
         print(f"Identified and processed {interpolation_stats['small_gaps_filled']} small gaps")
         print(f"Created {interpolation_stats['total_interpolated_data_points']} interpolated data points")
-        print(f"Interpolated {interpolation_stats['total_interpolations']} missing field values")
+        print(f"Interpolated {interpolation_stats['total_interpolations']} glucose values")
         print(f"Skipped {interpolation_stats['large_gaps_skipped']} large gaps")
         print(f"Processed {interpolation_stats['sequences_processed']} sequences")
         

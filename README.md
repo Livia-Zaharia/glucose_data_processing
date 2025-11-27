@@ -83,9 +83,19 @@ This project is designed to preprocess continuous glucose monitoring (CGM) data 
 
 ### Basic Usage
 
+**Single Database:**
+
 ```bash
 python glucose_cli.py <input_folder> [OPTIONS]
 ```
+
+**Multiple Databases (NEW!):**
+
+```bash
+python glucose_cli.py <input_folder1> <input_folder2> [<input_folder3> ...] [OPTIONS]
+```
+
+You can now process multiple databases with different formats into a single unified output file. The system automatically tracks sequence IDs across databases to ensure consistency.
 
 ### Command Line Options
 
@@ -105,6 +115,8 @@ python glucose_cli.py <input_folder> [OPTIONS]
 | `--fixed-frequency/--no-fixed-frequency` |       | `True`                 | Create fixed-frequency data with consistent intervals   |
 
 ### Examples
+
+#### Single Database Processing
 
 ```bash
 # Basic processing with default settings
@@ -136,6 +148,28 @@ python glucose_cli.py ./000-csv --no-fixed-frequency --output irregular_data.csv
 
 # Enable fixed-frequency with custom interval
 python glucose_cli.py ./000-csv --fixed-frequency --interval 10 --output fixed_10min_data.csv
+```
+
+#### Multi-Database Processing (NEW!)
+
+```bash
+# Combine multiple databases with different formats into one file
+python glucose_cli.py ./000-csv ./libre3 ./zendo_small --output combined_ml_data.csv
+
+# Process two Dexcom databases with verbose output
+python glucose_cli.py ./000-csv ./000_small --output combined_dexcom.csv --verbose
+
+# Combine different database types (Dexcom, Libre3, UoM)
+python glucose_cli.py ./dexcom_data ./libre3_data ./uom_data --output all_formats_combined.csv
+
+# Multi-database with custom parameters
+python glucose_cli.py ./db1 ./db2 ./db3 --interval 5 --min-length 200 --glucose-only
+
+# Use config file with multiple databases
+python glucose_cli.py ./000-csv ./libre3 --config glucose_config.yaml --output combined.csv
+
+# Combine databases with intermediate file saving
+python glucose_cli.py ./db1 ./db2 --save-intermediate --verbose --output multi_db_output.csv
 ```
 
 ## ⚙️ YAML Configuration File
@@ -242,6 +276,96 @@ python glucose_cli.py ./000-csv --config my_custom_config.yaml
 ```
 
 **Note**: The configuration file includes only the essential parameters that are actively used by the preprocessing pipeline. This keeps the configuration simple and focused on the most important settings.
+
+## 🔀 Multi-Database Processing (NEW!)
+
+### Overview
+
+The system now supports processing multiple databases with different formats simultaneously, combining them into a single unified output file. This feature is particularly useful when you have glucose data from multiple sources (Dexcom, Libre3, UoM, etc.) and want to create a comprehensive dataset.
+
+### Key Features
+
+#### **1. Automatic Format Detection**
+
+Each database folder is automatically detected and processed using the appropriate converter:
+
+- Dexcom G6 format
+- FreeStyle Libre 3 format
+- University of Manchester T1D format
+- Other supported formats
+
+#### **2. Consistent Sequence ID Tracking**
+
+The system ensures that sequence IDs remain unique and consistent across all databases:
+
+- Database 1: Sequences 0-99
+- Database 2: Sequences 100-199 (offset by 100)
+- Database 3: Sequences 200-299 (offset by 200)
+- And so on...
+
+This prevents ID conflicts and maintains data integrity.
+
+#### **3. Unified Output**
+
+All processed data is combined into a single CSV file with:
+
+- Consistent column structure
+- Proper chronological ordering (when applicable)
+- Unified sequence IDs across all databases
+- Complete statistics aggregation
+- **Schema Compatibility**: The `user_id` column (present in multi-user databases like UoM) is automatically removed to ensure compatibility when combining databases with different structures
+
+### How It Works
+
+1. **Input**: Provide multiple database folders as command-line arguments
+2. **Processing**: Each database is processed independently with the same preprocessing pipeline
+3. **Schema Normalization**: The `user_id` column is removed from multi-user databases to ensure compatible schemas
+4. **ID Tracking**: Sequence IDs are tracked and offset to ensure uniqueness
+5. **Combination**: All processed DataFrames are combined into a single output
+6. **Statistics**: Statistics are aggregated across all databases for comprehensive reporting
+
+### Example Workflow
+
+```bash
+# You have three different databases:
+# - ./dexcom_2023/     (Dexcom G6 format, 2023 data)
+# - ./libre3_2024/     (Libre 3 format, 2024 data)
+# - ./uom_data/        (UoM T1D format, multi-user)
+
+# Combine them all into one ML-ready file:
+python glucose_cli.py ./dexcom_2023 ./libre3_2024 ./uom_data --output combined_all_data.csv --verbose
+
+# Output will show:
+# - Database 1 (dexcom_2023): Sequences 0-50
+# - Database 2 (libre3_2024): Sequences 51-120
+# - Database 3 (uom_data): Sequences 121-300
+# - Combined: 301 total sequences, all data unified
+```
+
+### Statistics Output
+
+When processing multiple databases, the statistics output includes:
+
+- **Multi-Database Info**: List of all processed databases
+- **Sequence ID Ranges**: Shows the sequence ID range for each database
+- **Aggregated Statistics**: Combined statistics across all databases
+- **Individual Database Details**: Separate statistics for each database
+
+### Use Cases
+
+1. **Combining Multiple Patients**: Merge data from multiple patients using different devices
+2. **Longitudinal Analysis**: Combine data from the same patient across different time periods
+3. **Device Comparison**: Compare and analyze data from different glucose monitoring devices
+4. **Research Studies**: Create comprehensive datasets from multiple data sources
+5. **ML Training**: Build larger training datasets by combining multiple databases
+
+### Best Practices
+
+1. **Consistent Parameters**: Use the same preprocessing parameters for all databases to ensure consistency
+2. **Compatible Formats**: While different formats are supported, ensure data quality is similar across databases
+3. **Sequence Length**: Consider using a consistent `min_sequence_len` parameter for all databases
+4. **Output Naming**: Use descriptive output file names that indicate multi-database processing
+5. **User ID Tracking**: Note that the `user_id` column is automatically removed when combining databases. If you need to track individual users across databases, consider using single-database processing for each user separately
 
 ## 📁 Input File Requirements
 
@@ -832,6 +956,16 @@ If you use this dataset, please cite:
 5. Submit a pull request
 
 ## 🆕 Recent Updates
+
+### Version 2.1 - Multi-Database Processing (NEW!)
+
+#### **Multi-Database Support**
+
+- **Process Multiple Databases**: Combine data from multiple database folders into a single output file
+- **Consistent ID Tracking**: Automatic sequence ID tracking and offsetting across databases
+- **Format-Agnostic**: Mix different database formats (Dexcom, Libre3, UoM) in one command
+- **Aggregated Statistics**: Comprehensive statistics across all processed databases
+- **CLI Enhancement**: Simple command-line interface for multi-database processing
 
 ### Version 2.0 - Major Architecture Overhaul
 
