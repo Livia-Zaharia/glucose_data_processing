@@ -636,6 +636,102 @@ class TestGlucoseMLPreprocessorSteps:
         assert "Glucose Value (mg/dL)" in df_fixed.columns
         assert df_fixed["Glucose Value (mg/dL)"].null_count() == 0
 
+    def test_shift_events_rounding_uses_fixed_timestamps(self, preprocessor):
+        """Test that _shift_events_rounding() assigns events to actual fixed grid points.
+        
+        This test demonstrates the bug: when fixed timestamps are aligned to minutes
+        (e.g., starting at 10:01:00), rounding events to 5-minute intervals can shift
+        them to timestamps that don't exist in the fixed grid.
+        
+        Scenario:
+        - Fixed grid starts at 10:01:00 (aligned to minute, not 5-min boundary)
+        - Fixed grid points: 10:01:00, 10:06:00, 10:11:00, 10:16:00
+        - Event at 10:03:30 (carb intake)
+        - Old behavior: rounds to 10:05:00 (doesn't exist in grid!)
+        - New behavior: assigns to nearest grid point 10:06:00 (correct)
+        """
+        # Create fixed timestamps aligned to minute (not 5-min boundary)
+        # Starting at 10:01:00, then 10:06:00, 10:11:00, 10:16:00
+        aligned_start = datetime(2023, 1, 1, 10, 1, 0)
+        fixed_timestamps_list = [
+            aligned_start + timedelta(minutes=i * 5)
+            for i in range(4)
+        ]
+        
+        # Create event data with carb intake at 10:03:30
+        # This is closer to 10:01:00 (2.5 min) than 10:06:00 (2.5 min), but
+        # the old rounding logic would round to 10:05:00 which doesn't exist!
+        seq_data = pl.DataFrame({
+            "timestamp": [
+                datetime(2023, 1, 1, 10, 1, 0),  # Glucose reading
+                datetime(2023, 1, 1, 10, 3, 30),  # Carb event (should go to 10:01:00 or 10:06:00)
+                datetime(2023, 1, 1, 10, 6, 0),   # Glucose reading
+                datetime(2023, 1, 1, 10, 8, 15),  # Insulin event (should go to 10:06:00 or 10:11:00)
+            ],
+            "Glucose Value (mg/dL)": [100.0, None, 110.0, None],
+            "Carb Value (grams)": [None, 50.0, None, None],
+            "Fast-Acting Insulin Value (u)": [None, None, None, 5.0],
+        })
+        
+        stats = {}
+        event_cols = ['Carb Value (grams)', 'Fast-Acting Insulin Value (u)']
+        
+        # Call the method with fixed timestamps
+        shifted_df = preprocessor._shift_events_rounding(
+            seq_data, 
+            event_cols, 
+            stats,
+            fixed_timestamps_list
+        )
+        
+        # Verify all shifted timestamps exist in the fixed grid
+        shifted_timestamps = set(shifted_df['timestamp'].to_list())
+        fixed_timestamps_set = set(fixed_timestamps_list)
+        
+        # All shifted timestamps must be in the fixed grid
+        assert shifted_timestamps.issubset(fixed_timestamps_set), \
+            f"Shifted timestamps {shifted_timestamps} must all be in fixed grid {fixed_timestamps_set}"
+        
+        # Verify carb event is assigned correctly
+        # The event at 10:03:30 should be assigned to nearest grid point
+        # Distance to 10:01:00 = 2.5 min, distance to 10:06:00 = 2.5 min
+        # Should go to 10:06:00 (or 10:01:00) - either is acceptable, but must be in grid
+        carb_rows = shifted_df.filter(pl.col('Carb Value (grams)').is_not_null())
+        assert len(carb_rows) == 1, "Should have exactly one carb event"
+        carb_timestamp = carb_rows['timestamp'][0]
+        assert carb_timestamp in fixed_timestamps_set, \
+            f"Carb event timestamp {carb_timestamp} must be in fixed grid"
+        assert carb_rows['Carb Value (grams)'][0] == 50.0
+        
+        # Verify insulin event is assigned correctly
+        insulin_rows = shifted_df.filter(pl.col('Fast-Acting Insulin Value (u)').is_not_null())
+        assert len(insulin_rows) == 1, "Should have exactly one insulin event"
+        insulin_timestamp = insulin_rows['timestamp'][0]
+        assert insulin_timestamp in fixed_timestamps_set, \
+            f"Insulin event timestamp {insulin_timestamp} must be in fixed grid"
+        assert insulin_rows['Fast-Acting Insulin Value (u)'][0] == 5.0
+        
+        # Verify events are aggregated if multiple events map to same grid point
+        # Add another carb event close to the first one that should map to same grid point
+        seq_data_multiple = pl.DataFrame({
+            "timestamp": [
+                datetime(2023, 1, 1, 10, 3, 30),  # Carb event 1
+                datetime(2023, 1, 1, 10, 4, 0),   # Carb event 2 (should map to same grid point)
+            ],
+            "Carb Value (grams)": [30.0, 20.0],
+        })
+        
+        shifted_multiple = preprocessor._shift_events_rounding(
+            seq_data_multiple,
+            ['Carb Value (grams)'],
+            {},
+            fixed_timestamps_list
+        )
+        
+        # Should aggregate to single row with sum
+        assert len(shifted_multiple) == 1, "Multiple events mapping to same grid point should aggregate"
+        assert shifted_multiple['Carb Value (grams)'][0] == 50.0, "Should sum carb values"
+
     def test_filter_glucose_only(self, preprocessor):
         """Test filtering to glucose only columns."""
         preprocessor.glucose_only = True

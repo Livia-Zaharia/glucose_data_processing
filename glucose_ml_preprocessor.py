@@ -773,7 +773,7 @@ class GlucoseMLPreprocessor:
         event_cols = [col for col in potential_event_cols if col in seq_data.columns]
         
         if event_cols:
-            events_df = self._shift_events_rounding(seq_data, event_cols, stats)
+            events_df = self._shift_events_rounding(seq_data, event_cols, stats, fixed_timestamps_list)
             # Join events with result (left join to keep all fixed timestamps)
             result_df = result_df.join(events_df, on='timestamp', how='left')
         
@@ -841,11 +841,23 @@ class GlucoseMLPreprocessor:
         
         return result.select(fixed_timestamps.columns + ['Glucose Value (mg/dL)'])
 
-    def _shift_events_rounding(self, seq_data: pl.DataFrame, cols: List[str], stats: Dict[str, Any]) -> pl.DataFrame:
+    def _shift_events_rounding(self, seq_data: pl.DataFrame, cols: List[str], stats: Dict[str, Any], fixed_timestamps_list: List[datetime]) -> pl.DataFrame:
         """
-        Shift events to nearest grid point by rounding timestamps.
+        Shift events to nearest grid point from the fixed timestamps list.
         Aggregates multiple events falling into the same bin (sum for numeric, first for string).
+        
+        Args:
+            seq_data: Sequence data with events
+            cols: List of event columns to shift
+            stats: Statistics dictionary to update
+            fixed_timestamps_list: List of fixed timestamps from the grid (must be sorted)
+            
+        Returns:
+            DataFrame with events shifted to nearest grid points
         """
+        if len(fixed_timestamps_list) == 0:
+            return pl.DataFrame({'timestamp': []})
+        
         # Select relevant columns
         events = seq_data.select(['timestamp'] + cols)
         
@@ -853,12 +865,41 @@ class GlucoseMLPreprocessor:
         # This prevents "empty" rows from creating 0-valued event records
         events = events.filter(~pl.all_horizontal([pl.col(c).is_null() for c in cols]))
         
-        # Round timestamp to nearest interval
-        interval_str = f"{self.expected_interval_minutes}m"
+        if len(events) == 0:
+            return pl.DataFrame({'timestamp': fixed_timestamps_list[:0]})
         
-        events_rounded = events.with_columns(
-            pl.col('timestamp').dt.round(interval_str).alias('timestamp')
-        )
+        # Create a DataFrame with fixed timestamps for nearest neighbor lookup
+        # Sort to ensure join_asof works correctly
+        # Rename to avoid column name conflict
+        fixed_timestamps_df = pl.DataFrame({
+            'fixed_timestamp': fixed_timestamps_list
+        }).sort('fixed_timestamp')
+        
+        # Use join_asof to find nearest fixed timestamp for each event
+        # Strategy 'nearest' finds the closest timestamp
+        # Join on timestamp, matching to fixed_timestamp
+        events_shifted = events.join_asof(
+            fixed_timestamps_df,
+            left_on='timestamp',
+            right_on='fixed_timestamp',
+            strategy='nearest'
+        ).with_columns([
+            # Replace original timestamp with the nearest fixed timestamp
+            pl.col('fixed_timestamp').alias('timestamp')
+        ]).drop('fixed_timestamp')
+        
+        # Update stats - count events shifted
+        # Initialize stats keys if they don't exist
+        if 'carb_shifted_records' not in stats:
+            stats['carb_shifted_records'] = 0
+        if 'insulin_shifted_records' not in stats:
+            stats['insulin_shifted_records'] = 0
+            
+        for col in cols:
+            if col == 'Carb Value (grams)':
+                stats['carb_shifted_records'] += events_shifted.filter(pl.col(col).is_not_null()).height
+            elif 'Insulin' in col:
+                stats['insulin_shifted_records'] += events_shifted.filter(pl.col(col).is_not_null()).height
         
         # Define aggregations
         agg_exprs = []
@@ -866,17 +907,12 @@ class GlucoseMLPreprocessor:
             if col in ['Carb Value (grams)', 'Fast-Acting Insulin Value (u)', 'Long-Acting Insulin Value (u)']:
                 # Sum numeric events (e.g. two small boluses)
                 agg_exprs.append(pl.col(col).sum().alias(col))
-                # Count shifts? Hard to track individual shifts here efficiently without loop
-                if col == 'Carb Value (grams)':
-                    stats['carb_shifted_records'] += 1 
-                elif 'Insulin' in col:
-                    stats['insulin_shifted_records'] += 1
             else:
-                # For categorical/IDs, take the first (or max?)
+                # For categorical/IDs, take the first
                 agg_exprs.append(pl.col(col).first().alias(col))
         
-        # Group and aggregate
-        shifted = events_rounded.group_by('timestamp').agg(agg_exprs)
+        # Group and aggregate by shifted timestamp
+        shifted = events_shifted.group_by('timestamp').agg(agg_exprs)
         
         return shifted
 
