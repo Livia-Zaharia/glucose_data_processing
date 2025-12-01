@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+ #!/usr/bin/env python3
 """
 Glucose Data Preprocessor for Machine Learning
 
@@ -180,15 +180,16 @@ class GlucoseMLPreprocessor:
         return df
         
 
-    def detect_gaps_and_sequences(self, df: pl.DataFrame) -> Tuple[pl.DataFrame, Dict[str, Any]]:
+    def detect_gaps_and_sequences(self, df: pl.DataFrame, last_sequence_id: int = 0) -> Tuple[pl.DataFrame, Dict[str, Any], int]:
         """
         Detect time gaps and create sequence IDs, marking calibration periods and sequences for removal.
         
         Args:
             df: DataFrame with timestamp column and optionally user_id column
+            last_sequence_id: Last sequence ID used (sequences will start from last_sequence_id + 1)
             
         Returns:
-            Tuple of (DataFrame with sequence IDs and removal flags, statistics dictionary)
+            Tuple of (DataFrame with sequence IDs and removal flags, statistics dictionary, last_sequence_id)
         """
         print("Detecting gaps and creating sequences...")
         
@@ -199,6 +200,9 @@ class GlucoseMLPreprocessor:
             'total_records_marked_for_removal': 0
         }
         
+        # Track current last_sequence_id across user processing
+        current_last_sequence_id = last_sequence_id
+        
         # Handle multi-user data by processing each user separately
         if 'user_id' in df.columns:
             print("Processing multi-user data - creating sequences per user...")
@@ -206,7 +210,9 @@ class GlucoseMLPreprocessor:
             
             for user_id in df['user_id'].unique():
                 user_data = df.filter(pl.col('user_id') == user_id).sort('timestamp')
-                user_sequences, user_calib_stats = self._create_sequences_for_user(user_data, user_id)
+                user_sequences, user_calib_stats, current_last_sequence_id = self._create_sequences_for_user(
+                    user_data, current_last_sequence_id, user_id
+                )
                 all_sequences.append(user_sequences)
                 
                 # Aggregate stats
@@ -221,22 +227,33 @@ class GlucoseMLPreprocessor:
         else:
             # Single user data - process normally
             df = df.sort('timestamp')
-            df, calibration_stats = self._create_sequences_for_user(df)
+            df, calibration_stats, current_last_sequence_id = self._create_sequences_for_user(df, current_last_sequence_id)
         
         # Calculate statistics
         # Use len() instead of count() for Polars 1.0+ compatibility
-        if 'user_id' in df.columns:
-            sequence_counts = df.group_by(['user_id', 'sequence_id']).len().sort(['user_id', 'sequence_id'])
-        else:
-            sequence_counts = df.group_by(['sequence_id']).len().sort('sequence_id')
+        # Handle empty DataFrame or DataFrame without sequence_id column
+        if len(df) > 0 and 'sequence_id' in df.columns:
+            if 'user_id' in df.columns:
+                sequence_counts = df.group_by(['user_id', 'sequence_id']).len().sort(['user_id', 'sequence_id'])
+            else:
+                sequence_counts = df.group_by(['sequence_id']).len().sort('sequence_id')
             
-        stats = {
-            'total_sequences': df['sequence_id'].n_unique(),
-            'gap_positions': df['is_gap'].sum() if 'is_gap' in df.columns else 0,
-            'total_gaps': df['is_gap'].sum() if 'is_gap' in df.columns else 0,
-            'sequence_lengths': dict(zip(sequence_counts['sequence_id'].to_list(), sequence_counts['len'].to_list())),
-            'calibration_period_analysis': calibration_stats
-        }
+            stats = {
+                'total_sequences': df['sequence_id'].n_unique(),
+                'gap_positions': df['is_gap'].sum() if 'is_gap' in df.columns else 0,
+                'total_gaps': df['is_gap'].sum() if 'is_gap' in df.columns else 0,
+                'sequence_lengths': dict(zip(sequence_counts['sequence_id'].to_list(), sequence_counts['len'].to_list())) if len(sequence_counts) > 0 else {},
+                'calibration_period_analysis': calibration_stats
+            }
+        else:
+            # Empty DataFrame or no sequence_id column
+            stats = {
+                'total_sequences': 0,
+                'gap_positions': 0,
+                'total_gaps': 0,
+                'sequence_lengths': {},
+                'calibration_period_analysis': calibration_stats
+            }
         
         print(f"Created {stats['total_sequences']} sequences")
         print(f"Found {stats['total_gaps']} gaps > {self.small_gap_max_minutes} minutes")
@@ -249,18 +266,19 @@ class GlucoseMLPreprocessor:
         columns_to_remove = ['time_diff_seconds', 'is_gap', 'is_calibration_gap', 'remove_due_to_calibration']
         df = df.drop([col for col in columns_to_remove if col in df.columns])
         
-        return df, stats
+        return df, stats, current_last_sequence_id
     
-    def _create_sequences_for_user(self, user_df: pl.DataFrame, user_id: str = None) -> Tuple[pl.DataFrame, Dict[str, int]]:
+    def _create_sequences_for_user(self, user_df: pl.DataFrame, last_sequence_id: int = 0, user_id: str = None) -> Tuple[pl.DataFrame, Dict[str, int], int]:
         """
         Create sequences for a single user's data and handle calibration periods.
         
         Args:
             user_df: DataFrame with data for a single user
+            last_sequence_id: Last sequence ID used (sequences will start from last_sequence_id + 1)
             user_id: User ID (for multi-user data)
             
         Returns:
-            Tuple of (DataFrame with sequence IDs added and calibration data removed, calibration statistics)
+            Tuple of (DataFrame with sequence IDs added and calibration data removed, calibration statistics, last_sequence_id)
         """
         stats = {
             'calibration_periods_detected': 0,
@@ -268,7 +286,7 @@ class GlucoseMLPreprocessor:
         }
         
         if len(user_df) == 0:
-            return user_df, stats
+            return user_df, stats, last_sequence_id
 
         # Calculate time differences
         df = user_df.with_columns([
@@ -362,25 +380,21 @@ class GlucoseMLPreprocessor:
             ]).with_columns([
                 (pl.col('time_diff_seconds') > self.small_gap_max_seconds).fill_null(False).alias('is_gap'),
             ]).with_columns([
-                pl.col('is_gap').cum_sum().alias('sequence_id')
+                pl.col('is_gap').cum_sum().alias('local_sequence_id')
             ])
+            
+            # Convert local sequence IDs (0-based) to global sequence IDs starting from last_sequence_id + 1
+            # Since cum_sum() of booleans always produces consecutive integers starting from 0,
+            # we can simply add last_sequence_id + 1 to convert to global IDs
+            df = df.with_columns([
+                (pl.col('local_sequence_id') + last_sequence_id + 1).alias('sequence_id')
+            ]).drop('local_sequence_id')
+            
+            # Update last_sequence_id to the maximum sequence ID used
+            max_sequence_id = df['sequence_id'].max()
+            last_sequence_id = max_sequence_id if max_sequence_id is not None else last_sequence_id
         
-        # For multi-user data, create unique sequence IDs by combining user_id and sequence_id
-        if user_id is not None and len(df) > 0:
-            # Create global sequence IDs by offsetting based on user
-            # user_id * 100000 + sequence_id
-            try:
-                user_num = int(user_id)
-                df = df.with_columns([
-                    (pl.lit(user_num * 100000) + pl.col('sequence_id')).alias('sequence_id')
-                ])
-            except ValueError:
-                # If user_id is not numeric, we can't easily offset. 
-                # Just keep sequence_id as is (this might overlap if combined later without care)
-                # But the main loop handles concatenation.
-                pass
-        
-        return df, stats
+        return df, stats, last_sequence_id
     
     def interpolate_missing_values(self, df: pl.DataFrame) -> Tuple[pl.DataFrame, Dict[str, Any]]:
         """
@@ -1076,16 +1090,17 @@ class GlucoseMLPreprocessor:
         
         return stats
     
-    def process(self, csv_folder: str, output_file: str = None) -> Tuple[pl.DataFrame, Dict[str, Any]]:
+    def process(self, csv_folder: str, output_file: str = None, last_sequence_id: int = 0) -> Tuple[pl.DataFrame, Dict[str, Any], int]:
         """
         Complete preprocessing pipeline with mandatory consolidation.
         
         Args:
             csv_folder: Path to folder containing CSV files (consolidation is mandatory)
             output_file: Optional path to save processed data
+            last_sequence_id: Last sequence ID used (sequences will start from last_sequence_id + 1)
             
         Returns:
-            Tuple of (processed DataFrame, statistics dictionary)
+            Tuple of (processed DataFrame, statistics dictionary, last_sequence_id)
         """
         print("Starting glucose data preprocessing for ML...")
         print(f"Time discretization interval: {self.expected_interval_minutes} minutes")
@@ -1109,7 +1124,7 @@ class GlucoseMLPreprocessor:
         
         # Step 2: Detect gaps and create sequences
         print("STEP 2: Detecting gaps and creating sequences...")
-        df, gap_stats = self.detect_gaps_and_sequences(df)
+        df, gap_stats, last_sequence_id = self.detect_gaps_and_sequences(df, last_sequence_id)
         print("OK: Gap detection and sequence creation complete")
         
         if self.save_intermediate_files:
@@ -1194,12 +1209,12 @@ class GlucoseMLPreprocessor:
         print("-" * 50)
         print("Preprocessing completed successfully!")
         
-        return ml_df, stats
+        return ml_df, stats, last_sequence_id
     
-    def process_multiple_databases(self, csv_folders: List[str], output_file: str = None) -> Tuple[pl.DataFrame, Dict[str, Any]]:
+    def process_multiple_databases(self, csv_folders: List[str], output_file: str = None, last_sequence_id: int = 0) -> Tuple[pl.DataFrame, Dict[str, Any], int]:
         """
         Process multiple databases with different formats and combine them into a single output.
-        Sequence IDs are tracked and offset to ensure consistency across databases.
+        Sequence IDs are tracked consistently across databases using last_sequence_id parameter.
         
         Note: The user_id column (present in multi-user databases like UoM) is automatically 
         removed to ensure schema compatibility when combining databases with different structures.
@@ -1207,9 +1222,10 @@ class GlucoseMLPreprocessor:
         Args:
             csv_folders: List of paths to folders containing CSV files (each can be different format)
             output_file: Optional path to save combined processed data
+            last_sequence_id: Last sequence ID used (sequences will start from last_sequence_id + 1)
             
         Returns:
-            Tuple of (combined DataFrame, aggregated statistics dictionary)
+            Tuple of (combined DataFrame, aggregated statistics dictionary, last_sequence_id)
         """
         print(f"Starting multi-database processing for {len(csv_folders)} databases...")
         print(f"Databases to process: {', '.join(csv_folders)}")
@@ -1217,7 +1233,7 @@ class GlucoseMLPreprocessor:
         
         all_dataframes = []
         all_statistics = []
-        cumulative_sequence_offset = 0
+        current_last_sequence_id = last_sequence_id
         
         for idx, csv_folder in enumerate(csv_folders, 1):
             print(f"\n{'=' * 60}")
@@ -1225,31 +1241,25 @@ class GlucoseMLPreprocessor:
             print(f"{'=' * 60}\n")
             
             # Process this database (without saving final output yet)
-            ml_df, stats = self.process(csv_folder, output_file=None)
+            # Pass current_last_sequence_id to ensure consistent sequence ID tracking
+            ml_df, stats, current_last_sequence_id = self.process(csv_folder, output_file=None, last_sequence_id=current_last_sequence_id)
             
             # Remove user_id column if present (to ensure consistent schema across databases)
             if 'user_id' in ml_df.columns:
                 print(f"\n⚙️  Removing user_id column for multi-database compatibility...")
                 ml_df = ml_df.drop('user_id')
             
-            # Offset sequence IDs to ensure uniqueness across databases
-            if cumulative_sequence_offset > 0:
-                print(f"⚙️  Offsetting sequence IDs by {cumulative_sequence_offset} for database consistency...")
-                ml_df = ml_df.with_columns([
-                    (pl.col('sequence_id') + cumulative_sequence_offset).alias('sequence_id')
-                ])
-            
-            # Track the maximum sequence ID for the next database
-            max_sequence_id = ml_df['sequence_id'].max()
-            cumulative_sequence_offset = max_sequence_id + 1
+            # Get sequence ID range for statistics
+            max_sequence_id = ml_df['sequence_id'].max() if len(ml_df) > 0 else current_last_sequence_id
+            min_sequence_id = ml_df['sequence_id'].min() if len(ml_df) > 0 else current_last_sequence_id
             
             # Add database identifier to statistics
             stats['database_info'] = {
                 'database_index': idx,
                 'database_path': csv_folder,
-                'sequence_id_offset': cumulative_sequence_offset - (max_sequence_id + 1),
+                'sequence_id_start': current_last_sequence_id + 1 if idx == 1 else None,  # Track where this DB started
                 'sequence_id_range': {
-                    'min': ml_df['sequence_id'].min(),
+                    'min': min_sequence_id,
                     'max': max_sequence_id
                 }
             }
@@ -1258,7 +1268,8 @@ class GlucoseMLPreprocessor:
             all_statistics.append(stats)
             
             print(f"\n✅ Database {idx} processed: {len(ml_df):,} records, {ml_df['sequence_id'].n_unique():,} sequences")
-            print(f"   Sequence ID range: {ml_df['sequence_id'].min()} - {max_sequence_id}")
+            print(f"   Sequence ID range: {min_sequence_id} - {max_sequence_id}")
+            print(f"   Last sequence ID after processing: {current_last_sequence_id}")
         
         # Combine all DataFrames
         print(f"\n{'=' * 60}")
@@ -1285,8 +1296,9 @@ class GlucoseMLPreprocessor:
         
         print("-" * 50)
         print(f"Multi-database preprocessing completed successfully!")
+        print(f"Final last sequence ID: {current_last_sequence_id}")
         
-        return combined_df, combined_stats
+        return combined_df, combined_stats, current_last_sequence_id
     
     def _aggregate_statistics(self, all_statistics: List[Dict[str, Any]], csv_folders: List[str]) -> Dict[str, Any]:
         """
@@ -1665,7 +1677,7 @@ if __name__ == "__main__":
         print(f"Output file: {OUTPUT_FILE}")
         print("-" * 50)
        
-        ml_data, statistics = preprocessor.process(DATA_FOLDER, OUTPUT_FILE)
+        ml_data, statistics, _ = preprocessor.process(DATA_FOLDER, OUTPUT_FILE)
         
         # Print statistics
         print_statistics(statistics, preprocessor)

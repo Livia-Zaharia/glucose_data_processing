@@ -87,7 +87,7 @@ class TestGlucoseMLPreprocessorSteps:
             "Glucose Value (mg/dL)": [100.0] * 20
         })
         
-        df_seq, stats = preprocessor.detect_gaps_and_sequences(df)
+        df_seq, stats, _ = preprocessor.detect_gaps_and_sequences(df)
         
         # Should be 1 sequence
         assert df_seq["sequence_id"].n_unique() == 1
@@ -106,14 +106,14 @@ class TestGlucoseMLPreprocessorSteps:
             "Glucose Value (mg/dL)": [100.0] * 10
         })
         
-        df_seq, stats = preprocessor.detect_gaps_and_sequences(df)
+        df_seq, stats, _ = preprocessor.detect_gaps_and_sequences(df)
         
         # Should be 2 sequences
         assert df_seq["sequence_id"].n_unique() == 2
         assert stats["total_sequences"] == 2
-        # First 5 are seq 0, next 5 are seq 1
-        assert df_seq.filter(pl.col("sequence_id") == 0).height == 5
+        # First 5 are seq 1, next 5 are seq 2 (starting from 0 + 1)
         assert df_seq.filter(pl.col("sequence_id") == 1).height == 5
+        assert df_seq.filter(pl.col("sequence_id") == 2).height == 5
 
     def test_detect_gaps_and_sequences_multi_user(self, preprocessor):
         """Test gap detection with multiple users."""
@@ -127,15 +127,14 @@ class TestGlucoseMLPreprocessorSteps:
             "Glucose Value (mg/dL)": [100.0] * 10
         })
         
-        df_seq, stats = preprocessor.detect_gaps_and_sequences(df)
+        df_seq, stats, last_seq_id = preprocessor.detect_gaps_and_sequences(df)
         
         # Should be 2 sequences (1 per user)
         assert df_seq["sequence_id"].n_unique() == 2
-        # Sequence IDs should be distinct/offset
-        seq_ids = df_seq["sequence_id"].unique().sort()
-        # Logic: user_id * 100000 + seq_id
-        assert seq_ids[0] == 100000
-        assert seq_ids[1] == 200000
+        # Sequence IDs should be sequential: 1, 2 (starting from 0 + 1)
+        seq_ids = sorted(df_seq["sequence_id"].unique().to_list())
+        assert seq_ids == [1, 2]
+        assert last_seq_id == 2
 
     def test_detect_gaps_and_sequences_calibration_period_filtering(self, preprocessor):
         """Test that data after calibration periods is filtered out.
@@ -198,7 +197,7 @@ class TestGlucoseMLPreprocessorSteps:
         expected_removed_count = post_calib_within_window_count  # 288
         
         # Run gap detection
-        df_seq, stats = preprocessor.detect_gaps_and_sequences(df)
+        df_seq, stats, _ = preprocessor.detect_gaps_and_sequences(df)
         
         # Check calibration period analysis in stats
         calib_analysis = stats.get("calibration_period_analysis", {})
@@ -781,10 +780,355 @@ class TestGlucoseMLPreprocessorSteps:
                 f.write(csv_content)
                 
             # 2. Process
-            ml_df, stats = preprocessor.process(tmpdir)
+            ml_df, stats, _ = preprocessor.process(tmpdir)
             
             # 3. Verify
             assert len(ml_df) > 0
             assert "sequence_id" in ml_df.columns
             assert stats["dataset_overview"]["total_records"] == 20
+
+    def test_create_sequences_for_user_basic(self, preprocessor):
+        """Test _create_sequences_for_user() with basic continuous data starting from 0."""
+        # Create continuous data (5 min intervals, no gaps)
+        start = datetime(2023, 1, 1, 10, 0, 0)
+        timestamps = [start + timedelta(minutes=5*i) for i in range(10)]
+        
+        df = pl.DataFrame({
+            "timestamp": timestamps,
+            "Glucose Value (mg/dL)": [100.0] * 10
+        })
+        
+        df_seq, stats, last_seq_id = preprocessor._create_sequences_for_user(df, last_sequence_id=0)
+        
+        # Should create 1 sequence with ID 1 (starting from last_sequence_id + 1)
+        assert df_seq["sequence_id"].n_unique() == 1
+        assert df_seq["sequence_id"].unique()[0] == 1
+        assert last_seq_id == 1
+        assert len(df_seq) == 10
+
+    def test_create_sequences_for_user_with_offset(self, preprocessor):
+        """Test _create_sequences_for_user() starting from non-zero last_sequence_id."""
+        # Create continuous data
+        start = datetime(2023, 1, 1, 10, 0, 0)
+        timestamps = [start + timedelta(minutes=5*i) for i in range(10)]
+        
+        df = pl.DataFrame({
+            "timestamp": timestamps,
+            "Glucose Value (mg/dL)": [100.0] * 10
+        })
+        
+        # Start from last_sequence_id = 5
+        df_seq, stats, last_seq_id = preprocessor._create_sequences_for_user(df, last_sequence_id=5)
+        
+        # Should create 1 sequence with ID 6 (5 + 1)
+        assert df_seq["sequence_id"].n_unique() == 1
+        assert df_seq["sequence_id"].unique()[0] == 6
+        assert last_seq_id == 6
+        assert len(df_seq) == 10
+
+    def test_create_sequences_for_user_multiple_sequences(self, preprocessor):
+        """Test _create_sequences_for_user() with multiple sequences (gaps)."""
+        # Create data with a large gap (> 15 minutes)
+        t1 = [datetime(2023, 1, 1, 10, 0, 0) + timedelta(minutes=5*i) for i in range(5)]
+        # Gap of 30 mins
+        t2 = [datetime(2023, 1, 1, 10, 50, 0) + timedelta(minutes=5*i) for i in range(5)]
+        
+        df = pl.DataFrame({
+            "timestamp": t1 + t2,
+            "Glucose Value (mg/dL)": [100.0] * 10
+        })
+        
+        # Start from last_sequence_id = 10
+        df_seq, stats, last_seq_id = preprocessor._create_sequences_for_user(df, last_sequence_id=10)
+        
+        # Should create 2 sequences: 11 and 12
+        assert df_seq["sequence_id"].n_unique() == 2
+        seq_ids = sorted(df_seq["sequence_id"].unique().to_list())
+        assert seq_ids == [11, 12]
+        assert last_seq_id == 12
+        assert len(df_seq) == 10
+
+    def test_create_sequences_for_user_empty_dataframe(self, preprocessor):
+        """Test _create_sequences_for_user() with empty DataFrame."""
+        df = pl.DataFrame({
+            "timestamp": [],
+            "Glucose Value (mg/dL)": []
+        })
+        
+        df_seq, stats, last_seq_id = preprocessor._create_sequences_for_user(df, last_sequence_id=5)
+        
+        # Should return empty DataFrame and preserve last_sequence_id
+        assert len(df_seq) == 0
+        assert last_seq_id == 5  # Unchanged
+
+    def test_create_sequences_for_user_single_row(self, preprocessor):
+        """Test _create_sequences_for_user() with single row."""
+        df = pl.DataFrame({
+            "timestamp": [datetime(2023, 1, 1, 10, 0, 0)],
+            "Glucose Value (mg/dL)": [100.0]
+        })
+        
+        df_seq, stats, last_seq_id = preprocessor._create_sequences_for_user(df, last_sequence_id=3)
+        
+        # Should create 1 sequence with ID 4
+        assert df_seq["sequence_id"].n_unique() == 1
+        assert df_seq["sequence_id"].unique()[0] == 4
+        assert last_seq_id == 4
+        assert len(df_seq) == 1
+
+    def test_create_sequences_for_user_large_offset(self, preprocessor):
+        """Test _create_sequences_for_user() with very large last_sequence_id."""
+        start = datetime(2023, 1, 1, 10, 0, 0)
+        timestamps = [start + timedelta(minutes=5*i) for i in range(5)]
+        
+        df = pl.DataFrame({
+            "timestamp": timestamps,
+            "Glucose Value (mg/dL)": [100.0] * 5
+        })
+        
+        # Start from very large last_sequence_id
+        large_offset = 1000000
+        df_seq, stats, last_seq_id = preprocessor._create_sequences_for_user(df, last_sequence_id=large_offset)
+        
+        # Should create sequence with ID large_offset + 1
+        assert df_seq["sequence_id"].unique()[0] == large_offset + 1
+        assert last_seq_id == large_offset + 1
+
+    def test_create_sequences_for_user_with_user_id(self, preprocessor):
+        """Test _create_sequences_for_user() with user_id parameter (should not affect sequence IDs)."""
+        start = datetime(2023, 1, 1, 10, 0, 0)
+        timestamps = [start + timedelta(minutes=5*i) for i in range(5)]
+        
+        df = pl.DataFrame({
+            "timestamp": timestamps,
+            "Glucose Value (mg/dL)": [100.0] * 5
+        })
+        
+        # Pass user_id but sequence IDs should still start from last_sequence_id + 1
+        df_seq, stats, last_seq_id = preprocessor._create_sequences_for_user(
+            df, last_sequence_id=7, user_id="user123"
+        )
+        
+        # Sequence ID should be 8, not affected by user_id
+        assert df_seq["sequence_id"].unique()[0] == 8
+        assert last_seq_id == 8
+
+    def test_detect_gaps_and_sequences_basic_with_offset(self, preprocessor):
+        """Test detect_gaps_and_sequences() starting from non-zero last_sequence_id."""
+        # Create continuous data
+        start = datetime(2023, 1, 1, 10, 0, 0)
+        timestamps = [start + timedelta(minutes=5*i) for i in range(10)]
+        
+        df = pl.DataFrame({
+            "timestamp": timestamps,
+            "Glucose Value (mg/dL)": [100.0] * 10
+        })
+        
+        df_seq, stats, last_seq_id = preprocessor.detect_gaps_and_sequences(df, last_sequence_id=20)
+        
+        # Should create 1 sequence with ID 21
+        assert df_seq["sequence_id"].n_unique() == 1
+        assert df_seq["sequence_id"].unique()[0] == 21
+        assert last_seq_id == 21
+        assert stats["total_sequences"] == 1
+
+    def test_detect_gaps_and_sequences_multiple_gaps_with_offset(self, preprocessor):
+        """Test detect_gaps_and_sequences() with multiple gaps and offset."""
+        # Create data with multiple gaps
+        t1 = [datetime(2023, 1, 1, 10, 0, 0) + timedelta(minutes=5*i) for i in range(3)]
+        # Gap of 30 mins
+        t2 = [datetime(2023, 1, 1, 10, 30, 0) + timedelta(minutes=5*i) for i in range(3)]
+        # Gap of 30 mins
+        t3 = [datetime(2023, 1, 1, 11, 0, 0) + timedelta(minutes=5*i) for i in range(3)]
+        
+        df = pl.DataFrame({
+            "timestamp": t1 + t2 + t3,
+            "Glucose Value (mg/dL)": [100.0] * 9
+        })
+        
+        df_seq, stats, last_seq_id = preprocessor.detect_gaps_and_sequences(df, last_sequence_id=15)
+        
+        # Should create 3 sequences: 16, 17, 18
+        assert df_seq["sequence_id"].n_unique() == 3
+        seq_ids = sorted(df_seq["sequence_id"].unique().to_list())
+        assert seq_ids == [16, 17, 18]
+        assert last_seq_id == 18
+        assert stats["total_sequences"] == 3
+
+    def test_detect_gaps_and_sequences_multi_user_with_offset(self, preprocessor):
+        """Test detect_gaps_and_sequences() with multiple users and offset tracking."""
+        # User 1: 5 points
+        t1 = [datetime(2023, 1, 1, 10, 0, 0) + timedelta(minutes=5*i) for i in range(5)]
+        # User 2: 5 points
+        t2 = [datetime(2023, 1, 1, 10, 0, 0) + timedelta(minutes=5*i) for i in range(5)]
+        
+        df = pl.DataFrame({
+            "timestamp": t1 + t2,
+            "user_id": ["1"] * 5 + ["2"] * 5,
+            "Glucose Value (mg/dL)": [100.0] * 10
+        })
+        
+        df_seq, stats, last_seq_id = preprocessor.detect_gaps_and_sequences(df, last_sequence_id=50)
+        
+        # Should create 2 sequences: 51 (user 1), 52 (user 2)
+        assert df_seq["sequence_id"].n_unique() == 2
+        seq_ids = sorted(df_seq["sequence_id"].unique().to_list())
+        assert seq_ids == [51, 52]
+        assert last_seq_id == 52
+        assert stats["total_sequences"] == 2
+
+    def test_detect_gaps_and_sequences_multi_user_multiple_sequences(self, preprocessor):
+        """Test detect_gaps_and_sequences() with multiple users, each with multiple sequences."""
+        # User 1: 2 sequences (gap between them)
+        t1a = [datetime(2023, 1, 1, 10, 0, 0) + timedelta(minutes=5*i) for i in range(3)]
+        t1b = [datetime(2023, 1, 1, 10, 30, 0) + timedelta(minutes=5*i) for i in range(3)]
+        
+        # User 2: 2 sequences (gap between them)
+        t2a = [datetime(2023, 1, 1, 11, 0, 0) + timedelta(minutes=5*i) for i in range(3)]
+        t2b = [datetime(2023, 1, 1, 11, 30, 0) + timedelta(minutes=5*i) for i in range(3)]
+        
+        df = pl.DataFrame({
+            "timestamp": t1a + t1b + t2a + t2b,
+            "user_id": ["1"] * 6 + ["2"] * 6,
+            "Glucose Value (mg/dL)": [100.0] * 12
+        })
+        
+        df_seq, stats, last_seq_id = preprocessor.detect_gaps_and_sequences(df, last_sequence_id=100)
+        
+        # Should create 4 sequences: 101, 102 (user 1), 103, 104 (user 2)
+        assert df_seq["sequence_id"].n_unique() == 4
+        seq_ids = sorted(df_seq["sequence_id"].unique().to_list())
+        assert seq_ids == [101, 102, 103, 104]
+        assert last_seq_id == 104
+        assert stats["total_sequences"] == 4
+
+    def test_detect_gaps_and_sequences_empty_dataframe(self, preprocessor):
+        """Test detect_gaps_and_sequences() with empty DataFrame."""
+        df = pl.DataFrame({
+            "timestamp": [],
+            "Glucose Value (mg/dL)": []
+        })
+        
+        df_seq, stats, last_seq_id = preprocessor.detect_gaps_and_sequences(df, last_sequence_id=10)
+        
+        # Should return empty DataFrame and preserve last_sequence_id
+        assert len(df_seq) == 0
+        assert last_seq_id == 10  # Unchanged
+        assert stats["total_sequences"] == 0
+
+    def test_detect_gaps_and_sequences_zero_offset(self, preprocessor):
+        """Test detect_gaps_and_sequences() starting from 0 (default)."""
+        start = datetime(2023, 1, 1, 10, 0, 0)
+        timestamps = [start + timedelta(minutes=5*i) for i in range(5)]
+        
+        df = pl.DataFrame({
+            "timestamp": timestamps,
+            "Glucose Value (mg/dL)": [100.0] * 5
+        })
+        
+        df_seq, stats, last_seq_id = preprocessor.detect_gaps_and_sequences(df)
+        
+        # Should create sequence with ID 1 (starting from 0 + 1)
+        assert df_seq["sequence_id"].unique()[0] == 1
+        assert last_seq_id == 1
+
+    def test_detect_gaps_and_sequences_continuous_sequence_id_tracking(self, preprocessor):
+        """Test that sequence IDs are tracked correctly across multiple calls."""
+        # First call: create 2 sequences
+        t1 = [datetime(2023, 1, 1, 10, 0, 0) + timedelta(minutes=5*i) for i in range(3)]
+        t2 = [datetime(2023, 1, 1, 10, 30, 0) + timedelta(minutes=5*i) for i in range(3)]
+        
+        df1 = pl.DataFrame({
+            "timestamp": t1 + t2,
+            "Glucose Value (mg/dL)": [100.0] * 6
+        })
+        
+        df_seq1, stats1, last_seq_id1 = preprocessor.detect_gaps_and_sequences(df1, last_sequence_id=0)
+        
+        assert last_seq_id1 == 2  # Sequences 1 and 2
+        
+        # Second call: should start from last_seq_id1
+        t3 = [datetime(2023, 1, 1, 11, 0, 0) + timedelta(minutes=5*i) for i in range(3)]
+        t4 = [datetime(2023, 1, 1, 11, 30, 0) + timedelta(minutes=5*i) for i in range(3)]
+        
+        df2 = pl.DataFrame({
+            "timestamp": t3 + t4,
+            "Glucose Value (mg/dL)": [100.0] * 6
+        })
+        
+        df_seq2, stats2, last_seq_id2 = preprocessor.detect_gaps_and_sequences(df2, last_sequence_id=last_seq_id1)
+        
+        # Should create sequences 3 and 4
+        seq_ids2 = sorted(df_seq2["sequence_id"].unique().to_list())
+        assert seq_ids2 == [3, 4]
+        assert last_seq_id2 == 4
+
+    def test_detect_gaps_and_sequences_calibration_filtering_preserves_sequence_ids(self, preprocessor):
+        """Test that calibration filtering doesn't break sequence ID tracking."""
+        preprocessor.calibration_period_minutes = 165
+        preprocessor.remove_after_calibration_hours = 24
+        
+        start_time = datetime(2023, 1, 1, 10, 0, 0)
+        
+        # Pre-calibration: 5 points
+        pre_calib_times = [start_time + timedelta(minutes=5*i) for i in range(5)]
+        
+        # Calibration gap: 3 hours
+        calibration_end = pre_calib_times[-1] + timedelta(hours=3)
+        
+        # Post-calibration: 10 points (within removal window, will be filtered)
+        post_calib_times = [
+            calibration_end + timedelta(minutes=5*i) 
+            for i in range(10)
+        ]
+        
+        all_timestamps = pre_calib_times + post_calib_times
+        
+        df = pl.DataFrame({
+            "timestamp": all_timestamps,
+            "Glucose Value (mg/dL)": [100.0] * len(all_timestamps)
+        })
+        
+        df_seq, stats, last_seq_id = preprocessor.detect_gaps_and_sequences(df, last_sequence_id=25)
+        
+        # Should create sequence 26 (pre-calibration data)
+        # Post-calibration data should be filtered out
+        assert df_seq["sequence_id"].n_unique() == 1
+        assert df_seq["sequence_id"].unique()[0] == 26
+        assert last_seq_id == 26
+        # Should only have pre-calibration data
+        assert len(df_seq) == 5
+
+    def test_detect_gaps_and_sequences_edge_case_single_point(self, preprocessor):
+        """Test detect_gaps_and_sequences() with single data point."""
+        df = pl.DataFrame({
+            "timestamp": [datetime(2023, 1, 1, 10, 0, 0)],
+            "Glucose Value (mg/dL)": [100.0]
+        })
+        
+        df_seq, stats, last_seq_id = preprocessor.detect_gaps_and_sequences(df, last_sequence_id=99)
+        
+        # Should create 1 sequence with ID 100
+        assert df_seq["sequence_id"].unique()[0] == 100
+        assert last_seq_id == 100
+        assert len(df_seq) == 1
+
+    def test_detect_gaps_and_sequences_multi_user_empty_user(self, preprocessor):
+        """Test detect_gaps_and_sequences() with one user having empty data."""
+        # User 1: 5 points
+        t1 = [datetime(2023, 1, 1, 10, 0, 0) + timedelta(minutes=5*i) for i in range(5)]
+        
+        df = pl.DataFrame({
+            "timestamp": t1,
+            "user_id": ["1"] * 5,
+            "Glucose Value (mg/dL)": [100.0] * 5
+        })
+        
+        # Note: We can't easily test empty user in same DataFrame, but we can test
+        # that the method handles it correctly if user data is empty after filtering
+        df_seq, stats, last_seq_id = preprocessor.detect_gaps_and_sequences(df, last_sequence_id=0)
+        
+        # Should create 1 sequence with ID 1
+        assert df_seq["sequence_id"].unique()[0] == 1
+        assert last_seq_id == 1
 
