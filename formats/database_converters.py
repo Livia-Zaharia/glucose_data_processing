@@ -45,6 +45,59 @@ class DatabaseConverter(ABC):
         """
         pass
     
+    def _enforce_output_schema(self, df: pl.DataFrame) -> pl.DataFrame:
+        """
+        Enforce that all default output fields are present in the DataFrame.
+        Adds missing columns with null/empty string values to ensure schema consistency.
+        
+        Args:
+            df: DataFrame to enforce schema on
+            
+        Returns:
+            DataFrame with all default output fields present
+        """
+        # Get default output fields (display names) from CSVFormatConverter
+        default_fields = CSVFormatConverter.DEFAULT_OUTPUT_FIELDS.copy()
+        
+        # Add user_id for multi-user databases (it's added during processing)
+        # Check if user_id column exists - if so, include it in required fields
+        required_fields = default_fields.copy()
+        if 'user_id' in df.columns:
+            # user_id is already present, keep it
+            pass
+        
+        # Add missing columns with appropriate null values
+        for field in required_fields:
+            if field not in df.columns:
+                # Determine appropriate null value based on field type
+                # String fields get empty string, numeric fields get null
+                if 'Value' in field or 'grams' in field.lower():
+                    # Numeric fields: use null (will be cast later)
+                    df = df.with_columns(pl.lit(None).cast(pl.Utf8).alias(field))
+                else:
+                    # String fields: use empty string
+                    df = df.with_columns(pl.lit("").alias(field))
+        
+        # Ensure columns are in the correct order: timestamp first, then other fields
+        # Keep any extra columns (like user_id) at the end
+        existing_columns = df.columns
+        ordered_columns = []
+        
+        # Add required fields in order
+        for field in required_fields:
+            if field in existing_columns:
+                ordered_columns.append(field)
+        
+        # Add any remaining columns (like user_id, timestamp internal column, etc.)
+        for col in existing_columns:
+            if col not in ordered_columns:
+                ordered_columns.append(col)
+        
+        # Reorder columns
+        df = df.select(ordered_columns)
+        
+        return df
+    
     @abstractmethod
     def get_database_name(self) -> str:
         """
@@ -99,8 +152,21 @@ class MonoUserDatabaseConverter(DatabaseConverter):
         if not all_data:
             raise ValueError("No valid data found in CSV files!")
         
+        # Ensure all records have all required fields before DataFrame creation
+        # This prevents Polars from dropping columns when some records don't have them
+        # Use empty strings for all fields to ensure consistent string type
+        default_fields = CSVFormatConverter.DEFAULT_OUTPUT_FIELDS.copy()
+        for record in all_data:
+            for field in default_fields:
+                if field not in record:
+                    # Add missing field with empty string (consistent string type)
+                    record[field] = ""
+        
         # Convert to DataFrame for easier sorting
         df = pl.DataFrame(all_data)
+        
+        # Enforce output schema to ensure all default fields are present
+        df = self._enforce_output_schema(df)
         
         # Parse timestamps and sort
         print("Parsing timestamps and sorting...")
@@ -278,8 +344,21 @@ class MultiUserDatabaseConverter(DatabaseConverter):
         if not all_user_data:
             raise ValueError("No valid data found in data files!")
         
+        # Ensure all records have all required fields before DataFrame creation
+        # This prevents Polars from dropping columns when some records don't have them
+        # Use empty strings for all fields to ensure consistent string type
+        default_fields = CSVFormatConverter.DEFAULT_OUTPUT_FIELDS.copy()
+        for record in all_user_data:
+            for field in default_fields:
+                if field not in record:
+                    # Add missing field with empty string (consistent string type)
+                    record[field] = ""
+        
         # Convert to DataFrame
         df = pl.DataFrame(all_user_data)
+        
+        # Enforce output schema to ensure all default fields are present (should already be there, but double-check)
+        df = self._enforce_output_schema(df)
         
         # Parse timestamps and sort by user and timestamp
         print("Parsing timestamps and sorting by user and time...")

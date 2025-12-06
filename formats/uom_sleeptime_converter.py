@@ -122,6 +122,11 @@ class UoMSleeptimeConverter(CSVFormatConverter):
             if source_field in source_fields and standard_field in self.output_fields_standard:
                 result[standard_field] = self._get_clean_value(row, source_field)
         
+        # Skip records that only have timestamp and event_type (no meaningful data for default fields)
+        meaningful_fields = set(result.keys()) - {'timestamp', 'event_type'}
+        if not meaningful_fields:
+            return None
+        
         # Filter and convert to display names
         return self._filter_output(result)
     

@@ -214,11 +214,11 @@ def main(
         
         # Process single or multiple databases
         if len(validated_folders) == 1:
-            ml_data, statistics = preprocessor.process(
+            ml_data, statistics, _ = preprocessor.process(
                 validated_folders[0], output_file
             )
         else:
-            ml_data, statistics = preprocessor.process_multiple_databases(
+            ml_data, statistics, _ = preprocessor.process_multiple_databases(
                 validated_folders, output_file
             )
         
