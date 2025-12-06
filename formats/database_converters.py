@@ -18,15 +18,18 @@ from .format_detector import CSVFormatDetector
 class DatabaseConverter(ABC):
     """Base class for database converters."""
     
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any], output_fields: Optional[List[str]] = None):
         """
         Initialize the database converter.
         
         Args:
             config: Configuration dictionary with database-specific settings
+            output_fields: List of field names to include in converter output.
+                          If None, uses default fields matching current usage.
         """
         self.config = config
-        self.format_detector = CSVFormatDetector()
+        self.output_fields = output_fields
+        self.format_detector = CSVFormatDetector(output_fields)
     
     @abstractmethod
     def consolidate_data(self, data_folder: str, output_file: Optional[str] = None) -> pl.DataFrame:

@@ -13,6 +13,20 @@ from .base_converter import CSVFormatConverter
 class DexcomG6Converter(CSVFormatConverter):
     """Converter for Dexcom G6 format (standard format)."""
     
+    def __init__(self, output_fields: Optional[List[str]] = None):
+        """
+        Initialize the Dexcom G6 converter.
+        
+        Args:
+            output_fields: List of standard field names to include in output. 
+                          Uses standard field names (e.g., 'timestamp', 'glucose_value_mgdl').
+                          If None, uses default fields.
+        """
+        super().__init__(output_fields)
+        # Load database schema
+        self.db_schema = self._load_schema('dexcom_schema.json')
+        self.converter_schema = self.db_schema['converters']['g6']
+    
     def can_handle(self, headers: List[str]) -> bool:
         """
         Check if this converter can handle the given CSV headers.
@@ -27,26 +41,31 @@ class DexcomG6Converter(CSVFormatConverter):
     
     def convert_row(self, row: Dict[str, str]) -> Optional[Dict[str, str]]:
         """
-        Convert a single row to the standard format.
+        Convert a single row to the configured output format.
         
-        Insulin is split into two columns based on Event Subtype:
-        - Fast-Acting → Fast-Acting Insulin Value (u)
-        - Long-Acting → Long-Acting Insulin Value (u)
+        Maps source fields to standard fields using schema and outputs only requested fields.
+        Always includes timestamp first, then other requested fields.
+        
+        Business logic: Insulin is split into two columns based on Event Subtype:
+        - Fast-Acting → fast_acting_insulin_u
+        - Long-Acting → long_acting_insulin_u
+        - If no subtype specified, default to fast-acting
         
         Args:
             row: Dictionary representing a single CSV row
             
         Returns:
-            Dictionary in standard format, or None if row should be skipped
+            Dictionary with standard field names, filtered to requested fields
         """
         # Skip rows without timestamp
-        timestamp = row.get('Timestamp (YYYY-MM-DDThh:mm:ss)', '').strip()
+        timestamp_field = self.converter_schema['timestamp_field']
+        timestamp = self._get_clean_value(row, timestamp_field)
         if not timestamp:
             return None
         
-        # Split insulin based on Event Subtype
-        insulin_value = row.get('Insulin Value (u)', '').strip()
-        event_subtype = row.get('Event Subtype', '').strip()
+        # Business logic: Split insulin based on Event Subtype
+        insulin_value = self._get_clean_value(row, 'Insulin Value (u)')
+        event_subtype = self._get_clean_value(row, 'Event Subtype')
         
         fast_acting_insulin = ''
         long_acting_insulin = ''
@@ -57,17 +76,35 @@ class DexcomG6Converter(CSVFormatConverter):
             elif 'Long-Acting' in event_subtype:
                 long_acting_insulin = insulin_value
             else:
-                # If no subtype specified, default to fast-acting
+                # Business logic: If no subtype specified, default to fast-acting
                 fast_acting_insulin = insulin_value
         
-        return {
-            'Timestamp (YYYY-MM-DDThh:mm:ss)': timestamp,
-            'Event Type': row.get('Event Type', '').strip(),
-            'Glucose Value (mg/dL)': row.get('Glucose Value (mg/dL)', '').strip(),
-            'Fast-Acting Insulin Value (u)': fast_acting_insulin,
-            'Long-Acting Insulin Value (u)': long_acting_insulin,
-            'Carb Value (grams)': row.get('Carb Value (grams)', '').strip()
-        }
+        # Build result dictionary with standard field names
+        result = {}
+        
+        # Always add timestamp first (using standard name)
+        result['timestamp'] = timestamp
+        
+        # Map insulin values (business logic: split by subtype)
+        if 'fast_acting_insulin_u' in self.output_fields_standard:
+            result['fast_acting_insulin_u'] = fast_acting_insulin
+        
+        if 'long_acting_insulin_u' in self.output_fields_standard:
+            result['long_acting_insulin_u'] = long_acting_insulin
+        
+        # Map source fields to standard fields using schema
+        field_mappings = self.converter_schema['field_mappings']
+        source_fields = self._get_source_fields(row)
+        
+        # Map source fields to standard fields (skip insulin fields as they're already handled)
+        for source_field, standard_field in field_mappings.items():
+            if source_field in ['Insulin Value (u)', 'Event Subtype']:
+                continue  # Skip insulin fields, already handled with business logic
+            if source_field in source_fields and standard_field in self.output_fields_standard:
+                result[standard_field] = self._get_clean_value(row, source_field)
+        
+        # Filter and convert to display names
+        return self._filter_output(result)
     
     def get_format_name(self) -> str:
         """

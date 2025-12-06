@@ -6,7 +6,7 @@ This module provides the format detection system that automatically identifies
 CSV formats and returns the appropriate converter.
 """
 
-from typing import Optional
+from typing import Optional, List
 from pathlib import Path
 from .base_converter import CSVFormatConverter
 from .dexcom_g6_converter import DexcomG6Converter
@@ -15,21 +15,38 @@ from .uom_glucose_converter import UoMGlucoseConverter
 from .uom_basal_converter import UoMBasalConverter
 from .uom_bolus_converter import UoMBolusConverter
 from .uom_nutrition_converter import UoMNutritionConverter
+from .uom_activity_converter import UoMActivityConverter
+from .uom_sleep_converter import UoMSleepConverter
+from .uom_sleeptime_converter import UoMSleeptimeConverter
 
 
 class CSVFormatDetector:
     """Detects CSV format and returns appropriate converter."""
     
-    def __init__(self):
-        """Initialize the format detector with available converters."""
-        self.converters = [
-            DexcomG6Converter(),
-            FreeStyleLibre3Converter(),
-            UoMGlucoseConverter(),
-            UoMBasalConverter(),
-            UoMBolusConverter(),
-            UoMNutritionConverter()
+    def __init__(self, output_fields: Optional[List[str]] = None):
+        """
+        Initialize the format detector.
+        
+        Args:
+            output_fields: List of field names to include in converter output.
+                          If None, uses default fields.
+        """
+        self.output_fields = output_fields
+    
+    def _get_converters(self) -> List[CSVFormatConverter]:
+        """Get list of converter instances with configured output_fields."""
+        converters = [
+            DexcomG6Converter(self.output_fields),
+            FreeStyleLibre3Converter(self.output_fields),
+            UoMGlucoseConverter(self.output_fields),
+            UoMBasalConverter(self.output_fields),
+            UoMBolusConverter(self.output_fields),
+            UoMNutritionConverter(self.output_fields),
+            UoMActivityConverter(self.output_fields),
+            UoMSleepConverter(self.output_fields),
+            UoMSleeptimeConverter(self.output_fields)
         ]
+        return converters
     
     def detect_format(self, file_path: Path) -> Optional[CSVFormatConverter]:
         """
@@ -64,7 +81,7 @@ class CSVFormatDetector:
                     headers = [col.strip().strip('"') for col in headers]
                     
                     # Check each converter
-                    for converter in self.converters:
+                    for converter in self._get_converters():
                         if converter.can_handle(headers):
                             # Set context for UoM converter if needed
                             if hasattr(converter, 'set_context'):
@@ -93,4 +110,4 @@ class CSVFormatDetector:
         Returns:
             List of format names supported by this detector
         """
-        return [converter.get_format_name() for converter in self.converters]
+        return [converter.get_format_name() for converter in self._get_converters()]

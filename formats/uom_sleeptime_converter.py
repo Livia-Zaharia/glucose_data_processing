@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-University of Manchester (UoM) basal insulin data format converter.
+University of Manchester (UoM) sleeptime data format converter.
 
-This module provides the converter for UoM basal insulin data format.
+This module provides the converter for UoM sleeptime data format (UoM*sleeptime.csv).
 """
 
 from typing import List, Dict, Optional
@@ -10,22 +10,22 @@ from datetime import datetime
 from .base_converter import CSVFormatConverter
 
 
-class UoMBasalConverter(CSVFormatConverter):
-    """Converter for University of Manchester basal insulin data format."""
+class UoMSleeptimeConverter(CSVFormatConverter):
+    """Converter for University of Manchester sleeptime data format (UoM*sleeptime.csv)."""
     
     def __init__(self, output_fields: Optional[List[str]] = None):
         """
-        Initialize the UoM basal converter.
+        Initialize the UoM sleeptime converter.
         
         Args:
             output_fields: List of standard field names to include in output. 
-                          Uses standard field names (e.g., 'timestamp', 'long_acting_insulin_u').
+                          Uses standard field names (e.g., 'timestamp', 'duration_seconds').
                           If None, uses default fields.
         """
         super().__init__(output_fields)
         # Load database schema
         self.db_schema = self._load_schema('uom_schema.json')
-        self.converter_schema = self.db_schema['converters']['basal']
+        self.converter_schema = self.db_schema['converters']['sleeptime']
     
     def can_handle(self, headers: List[str]) -> bool:
         """
@@ -40,14 +40,15 @@ class UoMBasalConverter(CSVFormatConverter):
         # Clean headers (remove empty strings and BOM characters)
         clean_headers = [h.strip().lstrip('\ufeff') for h in headers if h.strip()]
         
-        # Check for UoM basal format headers
-        uom_basal_headers = ['basal_ts', 'basal_dose', 'insulin_kind']
+        # Check for UoM sleeptime format headers (UoM*sleeptime.csv format)
+        uom_sleeptime_headers = ['calendar_date', 'start_date_ts', 'duration_in_sec']
         
-        return all(header in clean_headers for header in uom_basal_headers)
+        return all(header in clean_headers for header in uom_sleeptime_headers)
     
     def _parse_timestamp(self, timestamp_str: str) -> Optional[str]:
         """
         Parse timestamp using schema-defined formats.
+        Business logic: if no time component, default to midnight.
         
         Args:
             timestamp_str: Timestamp string from source
@@ -64,33 +65,20 @@ class UoMBasalConverter(CSVFormatConverter):
         formats = self.db_schema['timestamp_formats']
         output_format = self.db_schema['timestamp_output_format']
         
-        for fmt in formats:
+        # Add date-only formats for calendar_date field
+        date_only_formats = ["%d/%m/%Y", "%m/%d/%Y"]
+        
+        for fmt in formats + date_only_formats:
             try:
                 dt = datetime.strptime(timestamp_str, fmt)
+                # Business logic: if no time component, default to midnight
+                if fmt.endswith('%Y'):
+                    return dt.strftime('%Y-%m-%dT00:00:00')
                 return dt.strftime(output_format)
             except ValueError:
                 continue
         
         return None
-    
-    def _convert_insulin_value(self, value_str: str) -> Optional[str]:
-        """
-        Convert insulin value to standard format.
-        
-        Args:
-            value_str: Insulin value string
-            
-        Returns:
-            Insulin value string or None if conversion fails
-        """
-        if not value_str or value_str.strip() == "":
-            return None
-        
-        try:
-            value = float(value_str.strip())
-            return str(round(value, 3))
-        except (ValueError, TypeError):
-            return None
     
     def convert_row(self, row: Dict[str, str]) -> Optional[Dict[str, str]]:
         """
@@ -99,7 +87,7 @@ class UoMBasalConverter(CSVFormatConverter):
         Maps source fields to standard fields using schema and outputs only requested fields.
         Always includes timestamp first, then other requested fields.
         
-        Basal insulin is long-acting insulin (business logic in code).
+        Uses start_date_ts as the primary timestamp for the sleep event (business logic in code).
         
         Args:
             row: Dictionary representing a single CSV row
@@ -107,15 +95,10 @@ class UoMBasalConverter(CSVFormatConverter):
         Returns:
             Dictionary with standard field names, filtered to requested fields
         """
-        # Parse timestamp - required for all rows
+        # Parse timestamp - required for all rows (use start_date_ts)
         timestamp_field = self.converter_schema['timestamp_field']
         timestamp = self._parse_timestamp(self._get_clean_value(row, timestamp_field))
         if not timestamp:
-            return None
-        
-        # Convert insulin value (business logic: round to 3 decimal places)
-        insulin_value = self._convert_insulin_value(self._get_clean_value(row, 'basal_dose'))
-        if insulin_value is None:
             return None
         
         # Build result dictionary with standard field names
@@ -128,18 +111,14 @@ class UoMBasalConverter(CSVFormatConverter):
         if 'event_type' in self.output_fields_standard:
             result['event_type'] = self.converter_schema['event_type']
         
-        # Map insulin value (business logic: basal = long-acting)
-        if 'long_acting_insulin_u' in self.output_fields_standard:
-            result['long_acting_insulin_u'] = insulin_value
-        
         # Map source fields to standard fields using schema
         field_mappings = self.converter_schema['field_mappings']
         source_fields = self._get_source_fields(row)
         
-        # Map source fields to standard fields (skip timestamp and basal_dose as they're already handled)
+        # Map source fields to standard fields (skip timestamp as it's already handled)
         for source_field, standard_field in field_mappings.items():
-            if source_field in ['basal_ts', 'basal_dose']:
-                continue  # Skip timestamp and insulin dose fields, already handled
+            if source_field == self.converter_schema['timestamp_field']:
+                continue  # Skip timestamp field, already handled
             if source_field in source_fields and standard_field in self.output_fields_standard:
                 result[standard_field] = self._get_clean_value(row, source_field)
         
@@ -153,4 +132,5 @@ class UoMBasalConverter(CSVFormatConverter):
         Returns:
             String name of the format
         """
-        return "UoM Basal Insulin Data"
+        return "UoM SleepTime Data"
+
