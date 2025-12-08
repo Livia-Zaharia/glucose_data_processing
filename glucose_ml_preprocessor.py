@@ -685,6 +685,9 @@ class GlucoseMLPreprocessor:
         """
         print(f"Creating fixed-frequency data with {self.expected_interval_minutes}-minute intervals...")
         
+        # Calculate data density metrics BEFORE processing
+        before_density_stats = self._calculate_data_density(df, self.expected_interval_minutes)
+        
         fixed_freq_stats = {
             'sequences_processed': 0,
             'total_records_before': len(df),
@@ -692,7 +695,10 @@ class GlucoseMLPreprocessor:
             'glucose_interpolations': 0,
             'carb_shifted_records': 0,
             'insulin_shifted_records': 0,
-            'time_adjustments': 0
+            'time_adjustments': 0,
+            'data_density_before': before_density_stats,
+            'data_density_after': {},
+            'density_change_explanation': {}
         }
         
         # Process each sequence using Polars-native operations
@@ -721,6 +727,20 @@ class GlucoseMLPreprocessor:
         
         fixed_freq_stats['total_records_after'] = len(df_fixed)
         
+        # Calculate data density metrics AFTER processing
+        after_density_stats = self._calculate_data_density(df_fixed, self.expected_interval_minutes)
+        fixed_freq_stats['data_density_after'] = after_density_stats
+        
+        # Calculate percentage of change explained by density change
+        density_change_explanation = self._calculate_density_change_explanation(
+            fixed_freq_stats['data_density_before'],
+            fixed_freq_stats['data_density_after'],
+            fixed_freq_stats['total_records_before'],
+            fixed_freq_stats['total_records_after']
+        )
+        fixed_freq_stats['density_change_explanation'] = density_change_explanation
+        
+        # Print statistics
         print(f"Processed {fixed_freq_stats['sequences_processed']} sequences")
         print(f"Time adjustments made: {fixed_freq_stats['time_adjustments']}")
         print(f"Glucose interpolations: {fixed_freq_stats['glucose_interpolations']}")
@@ -728,9 +748,121 @@ class GlucoseMLPreprocessor:
         print(f"Carb records shifted: {fixed_freq_stats['carb_shifted_records']}")
         print(f"Records before: {fixed_freq_stats['total_records_before']:,}")
         print(f"Records after: {fixed_freq_stats['total_records_after']:,}")
+        
+        # Print data density and change explanation
+        before_density = fixed_freq_stats['data_density_before']
+        after_density = fixed_freq_stats['data_density_after']
+        explanation = fixed_freq_stats['density_change_explanation']
+        
+        print(f"Data density: {before_density['avg_points_per_interval']:.2f} -> {after_density['avg_points_per_interval']:.2f} points/interval ({explanation.get('density_change_pct', 0):+.1f}%)")
+        print(f"Change explained by density: {explanation.get('explained_pct', 0):.1f}%")
+        
         print("Fixed-frequency data creation complete")
         
         return df_fixed, fixed_freq_stats
+    
+    def _calculate_data_density(self, df: pl.DataFrame, interval_minutes: int) -> Dict[str, Any]:
+        """
+        Calculate data density metrics: average number of data points per interval.
+        Simplified version for performance - only calculates average.
+        
+        Args:
+            df: DataFrame with timestamp column
+            interval_minutes: Interval size in minutes
+            
+        Returns:
+            Dictionary with density statistics
+        """
+        if len(df) == 0:
+            return {
+                'avg_points_per_interval': 0.0,
+                'total_intervals': 0,
+                'total_points': 0
+            }
+        
+        # Group by sequence and calculate intervals per sequence
+        interval_seconds = interval_minutes * 60
+        total_points = 0
+        total_intervals = 0
+        
+        for seq_id in df['sequence_id'].unique().to_list():
+            seq_data = df.filter(pl.col('sequence_id') == seq_id).sort('timestamp')
+            
+            if len(seq_data) < 2:
+                # Single point sequence - density is 1
+                total_points += 1
+                total_intervals += 1
+                continue
+            
+            first_ts = seq_data['timestamp'].min()
+            last_ts = seq_data['timestamp'].max()
+            duration_seconds = (last_ts - first_ts).total_seconds()
+            
+            # Calculate number of intervals
+            num_intervals = max(1, int(duration_seconds / interval_seconds) + 1)
+            num_points = len(seq_data)
+            
+            total_points += num_points
+            total_intervals += num_intervals
+        
+        return {
+            'avg_points_per_interval': total_points / total_intervals if total_intervals > 0 else 0.0,
+            'total_intervals': total_intervals,
+            'total_points': total_points
+        }
+    
+    def _calculate_density_change_explanation(self, before_density: Dict[str, Any], after_density: Dict[str, Any], 
+                                             records_before: int, records_after: int) -> Dict[str, Any]:
+        """
+        Calculate how much of the record count change can be explained by density change.
+        
+        Args:
+            before_density: Density statistics before processing
+            after_density: Density statistics after processing
+            records_before: Number of records before
+            records_after: Number of records after
+            
+        Returns:
+            Dictionary with explanation statistics
+        """
+        if before_density['avg_points_per_interval'] == 0:
+            return {
+                'records_change_pct': 0.0,
+                'expected_change_pct': 0.0,
+                'explained_pct': 0.0,
+                'unexplained_pct': 0.0,
+                'expected_records_after': records_before,
+                'unexplained_records': 0
+            }
+        
+        # Calculate percentage changes
+        records_change_pct = ((records_after - records_before) / records_before * 100) if records_before > 0 else 0.0
+        density_change_pct = ((after_density['avg_points_per_interval'] - before_density['avg_points_per_interval']) / 
+                              before_density['avg_points_per_interval'] * 100) if before_density['avg_points_per_interval'] > 0 else 0.0
+        
+        # Expected records after based on density change
+        # If density goes from 2.5 to 1.0, we expect records to go from 1000 to 400 (1000 * 1.0/2.5)
+        density_ratio = after_density['avg_points_per_interval'] / before_density['avg_points_per_interval'] if before_density['avg_points_per_interval'] > 0 else 1.0
+        expected_records_after = int(records_before * density_ratio)
+        expected_change_pct = (density_ratio - 1) * 100
+        
+        # Calculate explained vs unexplained change
+        actual_change = records_after - records_before
+        expected_change = expected_records_after - records_before
+        unexplained_change = actual_change - expected_change
+        
+        explained_pct = (abs(expected_change) / abs(actual_change) * 100) if actual_change != 0 else 100.0
+        unexplained_pct = 100.0 - explained_pct if actual_change != 0 else 0.0
+        
+        return {
+            'records_change_pct': records_change_pct,
+            'expected_change_pct': expected_change_pct,
+            'explained_pct': explained_pct,
+            'unexplained_pct': unexplained_pct,
+            'expected_records_after': expected_records_after,
+            'unexplained_records': unexplained_change,
+            'density_change_pct': density_change_pct
+        }
     
     def _create_fixed_frequency_sequence(self, seq_data: pl.DataFrame, seq_id: int, stats: Dict[str, Any]) -> pl.DataFrame:
         """
@@ -902,7 +1034,22 @@ class GlucoseMLPreprocessor:
             pl.col('fixed_timestamp').alias('timestamp')
         ]).drop('fixed_timestamp')
         
-        # Update stats - count events shifted
+        # Cast numeric columns to Float64 before aggregation to ensure proper type handling
+        # This is critical because values might be strings from CSV or have inconsistent types
+        numeric_cols = ['Carb Value (grams)', 'Fast-Acting Insulin Value (u)', 'Long-Acting Insulin Value (u)']
+        cast_exprs = []
+        for col in cols:
+            if col in numeric_cols:
+                # Cast to Float64, handling nulls and strings
+                cast_exprs.append(pl.col(col).cast(pl.Float64, strict=False).alias(col))
+            else:
+                # Keep non-numeric columns as-is
+                cast_exprs.append(pl.col(col))
+        
+        if cast_exprs:
+            events_shifted = events_shifted.with_columns(cast_exprs)
+        
+        # Update stats - count events shifted (after casting to ensure proper null detection)
         # Initialize stats keys if they don't exist
         if 'carb_shifted_records' not in stats:
             stats['carb_shifted_records'] = 0
@@ -918,9 +1065,17 @@ class GlucoseMLPreprocessor:
         # Define aggregations
         agg_exprs = []
         for col in cols:
-            if col in ['Carb Value (grams)', 'Fast-Acting Insulin Value (u)', 'Long-Acting Insulin Value (u)']:
+            if col in numeric_cols:
                 # Sum numeric events (e.g. two small boluses)
-                agg_exprs.append(pl.col(col).sum().alias(col))
+                # Use sum() which handles nulls correctly (nulls are ignored in sum)
+                # But we need to return null if all values in the group are null
+                # So we use: if any non-null values exist, sum them; otherwise null
+                agg_exprs.append(
+                    pl.when(pl.col(col).is_not_null().any())
+                    .then(pl.col(col).sum())
+                    .otherwise(None)
+                    .alias(col)
+                )
             else:
                 # For categorical/IDs, take the first
                 agg_exprs.append(pl.col(col).first().alias(col))
@@ -1482,6 +1637,52 @@ class GlucoseMLPreprocessor:
                 aggregated['fixed_frequency_analysis']['carb_shifted_records'] += fixed_freq_analysis.get('carb_shifted_records', 0)
                 aggregated['fixed_frequency_analysis']['insulin_shifted_records'] += fixed_freq_analysis.get('insulin_shifted_records', 0)
                 aggregated['fixed_frequency_analysis']['time_adjustments'] += fixed_freq_analysis.get('time_adjustments', 0)
+                
+                # Aggregate data density (weighted average)
+                if 'data_density_before' in fixed_freq_analysis and 'data_density_after' in fixed_freq_analysis:
+                    before_density = fixed_freq_analysis['data_density_before']
+                    after_density = fixed_freq_analysis['data_density_after']
+                    
+                    if 'data_density_before' not in aggregated['fixed_frequency_analysis']:
+                        aggregated['fixed_frequency_analysis']['data_density_before'] = {
+                            'total_points': 0,
+                            'total_intervals': 0
+                        }
+                    if 'data_density_after' not in aggregated['fixed_frequency_analysis']:
+                        aggregated['fixed_frequency_analysis']['data_density_after'] = {
+                            'total_points': 0,
+                            'total_intervals': 0
+                        }
+                    
+                    agg_before = aggregated['fixed_frequency_analysis']['data_density_before']
+                    agg_after = aggregated['fixed_frequency_analysis']['data_density_after']
+                    
+                    agg_before['total_points'] += before_density.get('total_points', 0)
+                    agg_before['total_intervals'] += before_density.get('total_intervals', 0)
+                    
+                    agg_after['total_points'] += after_density.get('total_points', 0)
+                    agg_after['total_intervals'] += after_density.get('total_intervals', 0)
+        
+        # Recalculate aggregated density metrics
+        if 'fixed_frequency_analysis' in aggregated and 'data_density_before' in aggregated['fixed_frequency_analysis']:
+            before_density = aggregated['fixed_frequency_analysis']['data_density_before']
+            after_density = aggregated['fixed_frequency_analysis']['data_density_after']
+            
+            # Calculate final averages
+            if before_density.get('total_intervals', 0) > 0:
+                before_density['avg_points_per_interval'] = before_density['total_points'] / before_density['total_intervals']
+            
+            if after_density.get('total_intervals', 0) > 0:
+                after_density['avg_points_per_interval'] = after_density['total_points'] / after_density['total_intervals']
+            
+            # Recalculate density change explanation for aggregated data
+            if before_density.get('total_intervals', 0) > 0 and after_density.get('total_intervals', 0) > 0:
+                aggregated['fixed_frequency_analysis']['density_change_explanation'] = self._calculate_density_change_explanation(
+                    before_density,
+                    after_density,
+                    aggregated['fixed_frequency_analysis'].get('total_records_before', 0),
+                    aggregated['fixed_frequency_analysis'].get('total_records_after', 0)
+                )
         
         # Calculate aggregated sequence statistics
         if all_sequence_lengths:
@@ -1624,6 +1825,22 @@ def print_statistics(stats: Dict[str, Any], preprocessor: 'GlucoseMLPreprocessor
         print(f"   Carb Records Shifted: {fixed_freq_analysis.get('carb_shifted_records', 0):,}")
         print(f"   Records Before: {fixed_freq_analysis.get('total_records_before', 0):,}")
         print(f"   Records After: {fixed_freq_analysis.get('total_records_after', 0):,}")
+        
+        # Data Density Analysis and Change Explanation
+        if 'data_density_before' in fixed_freq_analysis and 'data_density_after' in fixed_freq_analysis:
+            before_density = fixed_freq_analysis['data_density_before']
+            after_density = fixed_freq_analysis['data_density_after']
+            interval_minutes = preprocessor.expected_interval_minutes
+            
+            print(f"\n   DATA DENSITY ({interval_minutes}-minute intervals):")
+            print(f"      Before: {before_density.get('avg_points_per_interval', 0.0):.2f} points/interval")
+            print(f"      After: {after_density.get('avg_points_per_interval', 0.0):.2f} points/interval")
+            
+            if 'density_change_explanation' in fixed_freq_analysis:
+                explanation = fixed_freq_analysis['density_change_explanation']
+                density_change = explanation.get('density_change_pct', 0.0)
+                print(f"      Density Change: {density_change:+.1f}%")
+                print(f"      Change Explained by Density: {explanation.get('explained_pct', 0.0):.1f}%")
     
     # Glucose Filtering Analysis
     if 'glucose_filtering_analysis' in stats and stats['glucose_filtering_analysis']:
@@ -1639,10 +1856,22 @@ def print_statistics(stats: Dict[str, Any], preprocessor: 'GlucoseMLPreprocessor
     # Data Quality
     quality = stats['data_quality']
     print(f"\nDATA QUALITY:")
-    print(f"   Glucose Data Completeness: {quality['glucose_data_completeness']:.1f}%")
-    print(f"   Insulin Data Completeness: {quality['insulin_data_completeness']:.1f}%")
-    print(f"   Carb Data Completeness: {quality['carb_data_completeness']:.1f}%")
-    print(f"   Interpolated Records: {quality['interpolated_records']:,}")
+    print(f"   Glucose Data Completeness: {quality.get('glucose_data_completeness', 0):.1f}%")
+    
+    # Handle both insulin completeness formats
+    if 'insulin_data_completeness' in quality:
+        print(f"   Insulin Data Completeness: {quality['insulin_data_completeness']:.1f}%")
+    else:
+        fast_acting = quality.get('fast_acting_insulin_data_completeness', 0)
+        long_acting = quality.get('long_acting_insulin_data_completeness', 0)
+        if fast_acting > 0 or long_acting > 0:
+            print(f"   Fast-Acting Insulin Data Completeness: {fast_acting:.1f}%")
+            print(f"   Long-Acting Insulin Data Completeness: {long_acting:.1f}%")
+        else:
+            print(f"   Insulin Data Completeness: 0.0%")
+    
+    print(f"   Carb Data Completeness: {quality.get('carb_data_completeness', 0):.1f}%")
+    print(f"   Interpolated Records: {quality.get('interpolated_records', 0):,}")
     
     print("\n" + "="*60)
 
