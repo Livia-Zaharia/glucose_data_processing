@@ -5,6 +5,14 @@
     "%d/%m/%Y %H:%M"
   ],
   "timestamp_output_format": "%Y-%m-%dT%H:%M:%S",
+  "field_categories": {
+    "timestamp": "service",
+    "event_type": "service",
+    "glucose_value_mgdl": "continuous",
+    "fast_acting_insulin_u": "occasional",
+    "long_acting_insulin_u": "occasional",
+    "carb_grams": "occasional"
+  },
   "converters": {
     "activity": {
       "timestamp_field": "activity_ts",

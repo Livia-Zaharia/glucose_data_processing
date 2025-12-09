@@ -20,9 +20,11 @@ import csv
 import warnings
 import yaml
 import sys
+import json
 
 # Import database detection and conversion classes
 from formats import DatabaseDetector
+from formats.base_converter import CSVFormatConverter
 
 warnings.filterwarnings('ignore')
 
@@ -119,6 +121,71 @@ class GlucoseMLPreprocessor:
         self.expected_interval_seconds = expected_interval_minutes * 60
         self.small_gap_max_seconds = small_gap_max_minutes * 60
         self.calibration_period_seconds = calibration_period_minutes * 60
+    
+    @staticmethod
+    def extract_field_categories(database_type: str) -> Dict[str, List[str]]:
+        """
+        Extract field categories from schema file and map to display column names.
+        
+        Args:
+            database_type: Database type (e.g., 'uom', 'dexcom', 'freestyle_libre3')
+            
+        Returns:
+            Dictionary with categories as keys and lists of display column names as values
+        """
+        # Map database type to schema file name
+        schema_files = {
+            'uom': 'uom_schema.json',
+            'dexcom': 'dexcom_schema.json',
+            'freestyle_libre3': 'freestyle_libre3_schema.json'
+        }
+        
+        schema_file = schema_files.get(database_type)
+        if not schema_file:
+            # Return default with only glucose as continuous
+            return {
+                'continuous': ['Glucose Value (mg/dL)'],
+                'occasional': [],
+                'service': []
+            }
+        
+        # Load schema file
+        schema_path = Path(__file__).parent / 'formats' / schema_file
+        if not schema_path.exists():
+            # Return default if schema file doesn't exist
+            return {
+                'continuous': ['Glucose Value (mg/dL)'],
+                'occasional': [],
+                'service': []
+            }
+        
+        with open(schema_path, 'r', encoding='utf-8') as f:
+            schema = json.load(f)
+        
+        # Get field_categories from schema
+        field_categories = schema.get('field_categories', {})
+        
+        # Map standard field names to display names using STANDARD_FIELDS
+        standard_to_display = CSVFormatConverter.STANDARD_FIELDS
+        
+        # Build result dictionary
+        result = {
+            'continuous': [],
+            'occasional': [],
+            'service': []
+        }
+        
+        for standard_name, category in field_categories.items():
+            display_name = standard_to_display.get(standard_name)
+            if display_name and category in result:
+                result[category].append(display_name)
+        
+        # Always ensure glucose is in continuous (if it exists)
+        glucose_col = 'Glucose Value (mg/dL)'
+        if glucose_col not in result['continuous'] and glucose_col in standard_to_display.values():
+            result['continuous'].append(glucose_col)
+        
+        return result
     
     def parse_timestamp(self, timestamp_str: str) -> datetime:
         """Parse timestamp string to datetime object for sorting."""
@@ -396,42 +463,73 @@ class GlucoseMLPreprocessor:
         
         return df, stats, last_sequence_id
     
-    def interpolate_missing_values(self, df: pl.DataFrame) -> Tuple[pl.DataFrame, Dict[str, Any]]:
+    def interpolate_missing_values(self, df: pl.DataFrame, field_categories_dict: Optional[Dict[str, List[str]]] = None) -> Tuple[pl.DataFrame, Dict[str, Any]]:
         """
         Interpolate only small gaps (1-2 missing data points) within sequences.
-        Only glucose values are interpolated. Other columns (insulin, carbs) are left as empty
-        since they represent occasional events, not persistent measurements.
+        Interpolates glucose values and all fields in the 'continuous' category from field_categories_dict.
+        Other columns (occasional, service) are left as empty since they represent discrete events.
         Large gaps are treated as sequence boundaries and not interpolated.
         
         Uses Polars-native operations for better performance.
         
         Args:
             df: DataFrame with sequence IDs and timestamp data
+            field_categories_dict: Dictionary mapping categories to lists of column names.
+                                  If None, only glucose will be interpolated.
             
         Returns:
             Tuple of (DataFrame with interpolated values, interpolation statistics)
         """
-        print("Interpolating small gaps (glucose only)...")
+        # Determine which fields to interpolate
+        if field_categories_dict is None:
+            field_categories_dict = {
+                'continuous': ['Glucose Value (mg/dL)'],
+                'occasional': [],
+                'service': []
+            }
+        
+        continuous_fields = field_categories_dict.get('continuous', [])
+        # Always include glucose if it exists
+        glucose_col = 'Glucose Value (mg/dL)'
+        if glucose_col in df.columns and glucose_col not in continuous_fields:
+            continuous_fields.append(glucose_col)
+        
+        # Filter to only fields that exist in the DataFrame
+        fields_to_interpolate = [f for f in continuous_fields if f in df.columns]
+        
+        if not fields_to_interpolate:
+            print("No continuous fields found - skipping interpolation")
+            return df, {
+                'total_interpolations': 0,
+                'total_interpolated_data_points': 0,
+                'sequences_processed': 0,
+                'small_gaps_filled': 0,
+                'large_gaps_skipped': 0
+            }
+        
+        print(f"Interpolating small gaps for fields: {', '.join(fields_to_interpolate)}...")
+        
+        # Precalculate safe field names (for use in column aliases)
+        # Maps original field name -> safe field name (without spaces, parentheses, slashes)
+        field_safe_names = {}
+        field_stats_keys = {}
+        for field in fields_to_interpolate:
+            safe_name = field.replace(" ", "_").replace("(", "").replace(")", "").replace("/", "_")
+            field_safe_names[field] = safe_name
+            # For statistics keys, also lowercase
+            field_stats_keys[field] = safe_name.lower()
         
         interpolation_stats = {
             'total_interpolations': 0,
             'total_interpolated_data_points': 0,
-            'glucose_value_mg/dl_interpolations': 0,
-            'insulin_value_u_interpolations': 0,
-            'fast_acting_insulin_value_u_interpolations': 0,
-            'long_acting_insulin_value_u_interpolations': 0,
-            'carb_value_grams_interpolations': 0,
             'sequences_processed': 0,
             'small_gaps_filled': 0,
             'large_gaps_skipped': 0
         }
         
-        glucose_col = 'Glucose Value (mg/dL)'
-        has_glucose = glucose_col in df.columns
-        
-        if not has_glucose:
-            print("No glucose column found - skipping interpolation")
-            return df, interpolation_stats
+        # Add per-field interpolation counts
+        for field in fields_to_interpolate:
+            interpolation_stats[f'{field_stats_keys[field]}_interpolations'] = 0
         
         # Process each sequence separately       
         # Add row index and time differences within each sequence
@@ -458,11 +556,16 @@ class GlucoseMLPreprocessor:
         
         # Process small gaps to create interpolated rows using fully vectorized Polars operations
         if small_gaps_df.height > 0:
-            # Get previous row values using window functions
+            # Get previous row values using window functions for all fields to interpolate
             prev_cols = [
-                pl.col('timestamp').shift(1).over('sequence_id').alias('prev_timestamp'),
-                pl.col(glucose_col).shift(1).over('sequence_id').alias('prev_glucose')
+                pl.col('timestamp').shift(1).over('sequence_id').alias('prev_timestamp')
             ]
+            
+            # Add previous values for all fields to interpolate
+            for field in fields_to_interpolate:
+                safe_name = field_safe_names[field]
+                prev_cols.append(pl.col(field).shift(1).over('sequence_id').alias(f'prev_{safe_name}'))
+            
             if 'user_id' in df_with_gaps.columns:
                 prev_cols.append(pl.col('user_id').shift(1).over('sequence_id').alias('prev_user_id'))
             
@@ -506,10 +609,15 @@ class GlucoseMLPreprocessor:
                     # Keep sequence_id
                     pl.col('sequence_id'),
                     
-                    # Keep prev_glucose and current glucose for interpolation
-                    pl.col('prev_glucose'),
-                    pl.col(glucose_col).alias('curr_glucose'),
                 ]
+                
+                # Add previous and current values for all fields to interpolate
+                for field in fields_to_interpolate:
+                    safe_name = field_safe_names[field]
+                    interpolated_cols.extend([
+                        pl.col(f'prev_{safe_name}'),
+                        pl.col(field).alias(f'curr_{safe_name}'),
+                    ])
                 
                 # Add user_id if it exists
                 if 'prev_user_id' in gaps_exploded.columns:
@@ -517,29 +625,44 @@ class GlucoseMLPreprocessor:
                 
                 gaps_calculated = gaps_exploded.select(interpolated_cols)
                 
-                # Calculate interpolated glucose using vectorized expressions
-                # Ensure glucose values are numeric (cast to float, handle nulls)
-                interpolated_df = gaps_calculated.with_columns([
-                    # Cast glucose values to float, handling nulls and strings
-                    pl.col('prev_glucose').cast(pl.Float64, strict=False).alias('prev_glucose_num'),
-                    pl.col('curr_glucose').cast(pl.Float64, strict=False).alias('curr_glucose_num'),
-                ]).with_columns([
-                    # Calculate interpolated glucose using time-weighted interpolation:
-                    # prev + alpha * (curr - prev)
-                    # where alpha = time_from_start / total_gap_time
-                    # This ensures points closer in time have more influence
-                    pl.when(
-                        (pl.col('prev_glucose_num').is_not_null()) & 
-                        (pl.col('curr_glucose_num').is_not_null())
-                    ).then(
-                        pl.col('prev_glucose_num') + 
-                        pl.col('alpha') * (pl.col('curr_glucose_num') - pl.col('prev_glucose_num'))
-                    ).otherwise(None).alias(glucose_col),
+                # Calculate interpolated values for all continuous fields
+                # First, cast all values to float
+                cast_exprs = []
+                for field in fields_to_interpolate:
+                    safe_name = field_safe_names[field]
+                    cast_exprs.extend([
+                        pl.col(f'prev_{safe_name}').cast(pl.Float64, strict=False).alias(f'prev_{safe_name}_num'),
+                        pl.col(f'curr_{safe_name}').cast(pl.Float64, strict=False).alias(f'curr_{safe_name}_num'),
+                    ])
+                
+                gaps_calculated = gaps_calculated.with_columns(cast_exprs)
+                
+                # Now calculate interpolated values for all fields
+                interpolated_field_exprs = []
+                for field in fields_to_interpolate:
+                    safe_name = field_safe_names[field]
+                    prev_col_num = f'prev_{safe_name}_num'
+                    curr_col_num = f'curr_{safe_name}_num'
                     
-                    # Create timestamp string column
+                    # Calculate interpolated value using time-weighted interpolation:
+                    # prev + alpha * (curr - prev)
+                    interpolated_field_exprs.append(
+                        pl.when(
+                            (pl.col(prev_col_num).is_not_null()) & 
+                            (pl.col(curr_col_num).is_not_null())
+                        ).then(
+                            pl.col(prev_col_num) + 
+                            pl.col('alpha') * (pl.col(curr_col_num) - pl.col(prev_col_num))
+                        ).otherwise(None).alias(field)
+                    )
+                
+                # Add timestamp string column
+                interpolated_field_exprs.append(
                     pl.col('timestamp').dt.strftime('%Y-%m-%dT%H:%M:%S')
-                    .alias('Timestamp (YYYY-MM-DDThh:mm:ss)'),
-                ])
+                    .alias('Timestamp (YYYY-MM-DDThh:mm:ss)')
+                )
+                
+                interpolated_df = gaps_calculated.with_columns(interpolated_field_exprs)
                 
                 # Build final interpolated DataFrame with all required columns
                 # Start with columns we've already calculated
@@ -547,8 +670,11 @@ class GlucoseMLPreprocessor:
                     pl.col('Timestamp (YYYY-MM-DDThh:mm:ss)'),
                     pl.col('timestamp'),
                     pl.col('sequence_id'),
-                    pl.col(glucose_col),
                 ]
+                
+                # Add all interpolated fields
+                for field in fields_to_interpolate:
+                    final_cols.append(pl.col(field))
                 
                 # Add Event Type
                 if 'Event Type' in df.columns:
@@ -565,7 +691,7 @@ class GlucoseMLPreprocessor:
                 
                 # Initialize all other columns from original schema
                 original_schema = df.schema
-                existing_col_names = ['Timestamp (YYYY-MM-DDThh:mm:ss)', 'timestamp', 'sequence_id', glucose_col]
+                existing_col_names = ['Timestamp (YYYY-MM-DDThh:mm:ss)', 'timestamp', 'sequence_id'] + fields_to_interpolate
                 if 'Event Type' in df.columns:
                     existing_col_names.append('Event Type')
                 if 'prev_user_id' in gaps_calculated.columns:
@@ -574,12 +700,22 @@ class GlucoseMLPreprocessor:
                 for col in df.columns:
                     if col not in existing_col_names:
                         col_type = original_schema[col]
-                        if col in ['Fast-Acting Insulin Value (u)', 'Long-Acting Insulin Value (u)', 'Carb Value (grams)']:
-                            final_cols.append(pl.lit(None).cast(col_type).alias(col))
-                        elif col_type == pl.Utf8 or col_type == pl.String:
-                            final_cols.append(pl.lit('').cast(col_type).alias(col))
+                        # Check if this column is in occasional or service category
+                        is_occasional = col in field_categories_dict.get('occasional', [])
+                        is_service = col in field_categories_dict.get('service', [])
+                        
+                        if is_occasional or is_service:
+                            # Leave occasional/service fields as null/empty
+                            if col_type == pl.Utf8 or col_type == pl.String:
+                                final_cols.append(pl.lit('').cast(col_type).alias(col))
+                            else:
+                                final_cols.append(pl.lit(None).cast(col_type).alias(col))
                         else:
-                            final_cols.append(pl.lit(None).cast(col_type).alias(col))
+                            # Unknown field - leave as null/empty
+                            if col_type == pl.Utf8 or col_type == pl.String:
+                                final_cols.append(pl.lit('').cast(col_type).alias(col))
+                            else:
+                                final_cols.append(pl.lit(None).cast(col_type).alias(col))
                 
                 # Create interpolated DataFrame with all columns
                 interpolated_df = interpolated_df.select(final_cols)
@@ -589,10 +725,16 @@ class GlucoseMLPreprocessor:
                 
                 # Update statistics
                 interpolation_stats['total_interpolated_data_points'] = len(interpolated_df)
-                interpolation_stats['glucose_value_mg/dl_interpolations'] = interpolated_df.filter(
-                    pl.col(glucose_col).is_not_null()
-                ).height
-                interpolation_stats['total_interpolations'] = interpolation_stats['glucose_value_mg/dl_interpolations']
+                
+                # Count interpolations for each field
+                total_interpolations = 0
+                for field in fields_to_interpolate:
+                    stats_key = field_stats_keys[field]
+                    field_interpolations = interpolated_df.filter(pl.col(field).is_not_null()).height
+                    interpolation_stats[f'{stats_key}_interpolations'] = field_interpolations
+                    total_interpolations += field_interpolations
+                
+                interpolation_stats['total_interpolations'] = total_interpolations
                 
                 # Combine with original data
                 df = pl.concat([df, interpolated_df], how='vertical_relaxed')
@@ -1263,6 +1405,11 @@ class GlucoseMLPreprocessor:
         print(f"Save intermediate files: {self.save_intermediate_files}")
         print("-" * 50)
         
+        # Detect database type to extract field categories for interpolation
+        db_detector = DatabaseDetector()
+        database_type = db_detector.detect_database_type(csv_folder)
+        field_categories_dict = self.extract_field_categories(database_type) if database_type != 'unknown' else None
+        
         # Step 1: Consolidate CSV files (mandatory step)
         if self.save_intermediate_files:
             consolidated_file = "consolidated_data.csv"
@@ -1291,7 +1438,7 @@ class GlucoseMLPreprocessor:
         
         # Step 3: Interpolate missing values
         print("STEP 3: Interpolating missing values...")
-        df, interp_stats = self.interpolate_missing_values(df)
+        df, interp_stats = self.interpolate_missing_values(df, field_categories_dict)
         print("OK: Missing value interpolation complete")
         
         if self.save_intermediate_files:
