@@ -133,15 +133,15 @@ class MonoUserDatabaseConverter(DatabaseConverter):
         
         all_data = []
         
-        # Get all CSV files (including in subdirectories)
-        csv_files = list(csv_path.glob("**/*.csv"))
+        # Get all CSV files (including in subdirectories, sorted for deterministic processing order)
+        csv_files = sorted(csv_path.glob("**/*.csv"))
         
         if not csv_files:
             raise ValueError(f"No CSV files found in directory: {data_folder}")
         
         print(f"Found {len(csv_files)} CSV files to consolidate")
         
-        for csv_file in sorted(csv_files):
+        for csv_file in csv_files:
             print(f"Processing: {csv_file.name}")
             file_data = self._process_csv_file(csv_file)
             all_data.extend(file_data)
@@ -328,11 +328,11 @@ class MultiUserDatabaseConverter(DatabaseConverter):
         
         all_user_data = []
         
-        # Process each user separately
+        # Process each user separately (sorted for deterministic processing order)
         users_processed = self._identify_users(data_path)
         print(f"Found {len(users_processed)} users to process")
         
-        for user_id, user_files in users_processed.items():
+        for user_id, user_files in sorted(users_processed.items()):
             print(f"\nProcessing user: {user_id}")
             user_data = self._process_user_data(user_id, user_files)
             if user_data:
@@ -405,8 +405,8 @@ class MultiUserDatabaseConverter(DatabaseConverter):
         """
         users = {}
         
-        # Get all CSV files
-        csv_files = list(data_path.glob("**/*.csv"))
+        # Get all CSV files (sorted for deterministic processing order)
+        csv_files = sorted(data_path.glob("**/*.csv"))
         
         for csv_file in csv_files:
             user_id = self._extract_user_id_from_filename(csv_file)
@@ -414,6 +414,10 @@ class MultiUserDatabaseConverter(DatabaseConverter):
                 if user_id not in users:
                     users[user_id] = []
                 users[user_id].append(csv_file)
+        
+        # Sort files within each user for deterministic processing
+        for user_id in users:
+            users[user_id] = sorted(users[user_id])
         
         return users
     
@@ -442,7 +446,8 @@ class MultiUserDatabaseConverter(DatabaseConverter):
         """
         user_data = []
         
-        for file_path in user_files:
+        # Sort files for deterministic processing order
+        for file_path in sorted(user_files):
             print(f"  Processing: {file_path.name}")
             file_data = self._process_csv_file(file_path, user_id)
             user_data.extend(file_data)

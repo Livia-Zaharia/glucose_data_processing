@@ -275,7 +275,7 @@ class GlucoseMLPreprocessor:
             print("Processing multi-user data - creating sequences per user...")
             all_sequences = []
             
-            for user_id in df['user_id'].unique():
+            for user_id in sorted(df['user_id'].unique()):
                 user_data = df.filter(pl.col('user_id') == user_id).sort('timestamp')
                 user_sequences, user_calib_stats, current_last_sequence_id = self._create_sequences_for_user(
                     user_data, current_last_sequence_id, user_id
