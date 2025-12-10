@@ -247,13 +247,18 @@ class GlucoseMLPreprocessor:
         return df
         
 
-    def detect_gaps_and_sequences(self, df: pl.DataFrame, last_sequence_id: int = 0) -> Tuple[pl.DataFrame, Dict[str, Any], int]:
+    def detect_gaps_and_sequences(self, df: pl.DataFrame, last_sequence_id: int = 0, field_categories_dict: Optional[Dict[str, List[str]]] = None) -> Tuple[pl.DataFrame, Dict[str, Any], int]:
         """
         Detect time gaps and create sequence IDs, marking calibration periods and sequences for removal.
+        
+        If field_categories_dict is provided, gaps are detected for all continuous fields.
+        Sequences are broken if ANY continuous field has a gap > small_gap_max_minutes.
         
         Args:
             df: DataFrame with timestamp column and optionally user_id column
             last_sequence_id: Last sequence ID used (sequences will start from last_sequence_id + 1)
+            field_categories_dict: Optional dictionary mapping categories to lists of column names.
+                                  If provided, gaps are checked for all continuous fields.
             
         Returns:
             Tuple of (DataFrame with sequence IDs and removal flags, statistics dictionary, last_sequence_id)
@@ -278,7 +283,7 @@ class GlucoseMLPreprocessor:
             for user_id in sorted(df['user_id'].unique()):
                 user_data = df.filter(pl.col('user_id') == user_id).sort('timestamp')
                 user_sequences, user_calib_stats, current_last_sequence_id = self._create_sequences_for_user(
-                    user_data, current_last_sequence_id, user_id
+                    user_data, current_last_sequence_id, user_id, field_categories_dict
                 )
                 all_sequences.append(user_sequences)
                 
@@ -294,7 +299,7 @@ class GlucoseMLPreprocessor:
         else:
             # Single user data - process normally
             df = df.sort('timestamp')
-            df, calibration_stats, current_last_sequence_id = self._create_sequences_for_user(df, current_last_sequence_id)
+            df, calibration_stats, current_last_sequence_id = self._create_sequences_for_user(df, current_last_sequence_id, None, field_categories_dict)
         
         # Calculate statistics
         # Use len() instead of count() for Polars 1.0+ compatibility
@@ -335,14 +340,19 @@ class GlucoseMLPreprocessor:
         
         return df, stats, current_last_sequence_id
     
-    def _create_sequences_for_user(self, user_df: pl.DataFrame, last_sequence_id: int = 0, user_id: str = None) -> Tuple[pl.DataFrame, Dict[str, int], int]:
+    def _create_sequences_for_user(self, user_df: pl.DataFrame, last_sequence_id: int = 0, user_id: str = None, field_categories_dict: Optional[Dict[str, List[str]]] = None) -> Tuple[pl.DataFrame, Dict[str, int], int]:
         """
         Create sequences for a single user's data and handle calibration periods.
+        
+        If field_categories_dict is provided, gaps are detected for all continuous fields.
+        Sequences are broken if ANY continuous field has a gap > small_gap_max_minutes.
         
         Args:
             user_df: DataFrame with data for a single user
             last_sequence_id: Last sequence ID used (sequences will start from last_sequence_id + 1)
             user_id: User ID (for multi-user data)
+            field_categories_dict: Optional dictionary mapping categories to lists of column names.
+                                  If provided, gaps are checked for all continuous fields.
             
         Returns:
             Tuple of (DataFrame with sequence IDs added and calibration data removed, calibration statistics, last_sequence_id)
@@ -355,22 +365,109 @@ class GlucoseMLPreprocessor:
         if len(user_df) == 0:
             return user_df, stats, last_sequence_id
 
-        # Calculate time differences
+        # Calculate time differences between consecutive timestamps
         df = user_df.with_columns([
             pl.col('timestamp').diff().dt.total_seconds().alias('time_diff_seconds')
         ])
         
-        # Identify calibration gaps
+        # Identify calibration gaps (based on timestamp differences)
         # A gap is a calibration gap if it exceeds calibration_period_minutes
         df = df.with_columns([
             (pl.col('time_diff_seconds') > self.calibration_period_seconds).fill_null(False).alias('is_calibration_gap')
         ])
         
         # Identify standard gaps (for sequence breaking)
-        # Any gap > small_gap_max_minutes breaks a sequence
+        # Start with timestamp-based gaps (original logic)
         df = df.with_columns([
             (pl.col('time_diff_seconds') > self.small_gap_max_seconds).fill_null(False).alias('is_gap')
         ])
+        
+        # If field_categories_dict is provided, also check gaps for continuous fields
+        # For backward compatibility: if only glucose is in continuous fields, use timestamp-based gaps only
+        # If there are OTHER continuous fields besides glucose, include glucose in continuous field gap detection
+        if field_categories_dict is not None:
+            continuous_fields = field_categories_dict.get('continuous', [])
+            # Filter to only fields that exist in the DataFrame
+            continuous_fields = [f for f in continuous_fields if f in df.columns]
+            
+            # Check if there are other continuous fields besides glucose
+            glucose_col = 'Glucose Value (mg/dL)'
+            continuous_fields_other = [f for f in continuous_fields if f != glucose_col]
+            
+            # Only use continuous field gap detection if there are OTHER continuous fields
+            # This maintains backward compatibility for glucose-only cases
+            if continuous_fields_other:
+                # Include glucose in gap detection when there are other continuous fields
+                # This ensures we detect gaps in all continuous fields, including glucose
+                continuous_fields_to_check = continuous_fields  # Include glucose
+            else:
+                # Only glucose - use timestamp-based gaps only (backward compatibility)
+                continuous_fields_to_check = []
+            
+            if continuous_fields_to_check:
+                # For each continuous field, check for gaps between consecutive non-null values
+                # A gap exists if the time difference between consecutive non-null values > small_gap_max_minutes
+                
+                # Create gap indicators for each continuous field
+                # For each continuous field, identify gaps between consecutive non-null values
+                gap_columns = []
+                for field in continuous_fields_to_check:
+                    # Filter DataFrame to rows where this field is not null
+                    non_null_rows = df.filter(pl.col(field).is_not_null()).sort('timestamp')
+                    
+                    if len(non_null_rows) > 1:
+                        # Calculate time differences between consecutive non-null values
+                        non_null_with_diff = non_null_rows.with_columns([
+                            pl.col('timestamp').diff().dt.total_seconds().alias('field_time_diff')
+                        ])
+                        
+                        # Find rows where time difference > small_gap_max_minutes
+                        # These are the rows where a gap ends (where field becomes non-null after a gap)
+                        gap_rows = non_null_with_diff.filter(
+                            pl.col('field_time_diff') > self.small_gap_max_seconds
+                        )
+                        
+                        if len(gap_rows) > 0:
+                            # Get timestamps where gaps end
+                            gap_timestamps = set(gap_rows['timestamp'].to_list())
+                            
+                            # Create a column that marks rows where this field has a gap
+                            # A gap exists at rows where field is not null AND timestamp is in gap_timestamps
+                            field_gap = (
+                                pl.col(field).is_not_null() & 
+                                pl.col('timestamp').is_in(list(gap_timestamps))
+                            )
+                        else:
+                            # No gaps found for this field
+                            field_gap = pl.lit(False)
+                    else:
+                        # Not enough non-null values to detect gaps
+                        field_gap = pl.lit(False)
+                    
+                    gap_columns.append(field_gap.alias(f'is_gap_{field.replace(" ", "_").replace("(", "").replace(")", "").replace("/", "_")}'))
+                
+                # Add gap columns
+                if gap_columns:
+                    df = df.with_columns(gap_columns)
+                    
+                    # Combine all gap indicators: if ANY continuous field has a gap, mark as gap
+                    gap_exprs = [pl.col('is_gap')]  # Start with timestamp-based gaps
+                    for field in continuous_fields_to_check:
+                        safe_name = field.replace(" ", "_").replace("(", "").replace(")", "").replace("/", "_")
+                        gap_exprs.append(pl.col(f'is_gap_{safe_name}'))
+                    
+                    # Combine: is_gap OR any field gap
+                    combined_gap = gap_exprs[0]
+                    for expr in gap_exprs[1:]:
+                        combined_gap = combined_gap | expr
+                    
+                    df = df.with_columns([
+                        combined_gap.fill_null(False).alias('is_gap')
+                    ])
+                    
+                    # Remove temporary gap columns
+                    temp_gap_cols = [f'is_gap_{field.replace(" ", "_").replace("(", "").replace(")", "").replace("/", "_")}' for field in continuous_fields_to_check]
+                    df = df.drop([col for col in temp_gap_cols if col in df.columns])
         
         stats['calibration_periods_detected'] = df['is_calibration_gap'].sum()
         
@@ -442,11 +539,98 @@ class GlucoseMLPreprocessor:
         # or shifts. But we treat the remaining data as a new sequence start.
         
         if len(df) > 0:
+            # Recalculate timestamp-based gaps
             df = df.with_columns([
                 pl.col('timestamp').diff().dt.total_seconds().alias('time_diff_seconds'),
             ]).with_columns([
                 (pl.col('time_diff_seconds') > self.small_gap_max_seconds).fill_null(False).alias('is_gap'),
-            ]).with_columns([
+            ])
+            
+            # If field_categories_dict is provided, also recalculate gaps for continuous fields
+            # For backward compatibility: if only glucose is in continuous fields, use timestamp-based gaps only
+            # If there are OTHER continuous fields besides glucose, include glucose in continuous field gap detection
+            if field_categories_dict is not None:
+                continuous_fields = field_categories_dict.get('continuous', [])
+                # Filter to only fields that exist in the DataFrame
+                continuous_fields = [f for f in continuous_fields if f in df.columns]
+                
+                # Check if there are other continuous fields besides glucose
+                glucose_col = 'Glucose Value (mg/dL)'
+                continuous_fields_other = [f for f in continuous_fields if f != glucose_col]
+                
+                # Only use continuous field gap detection if there are OTHER continuous fields
+                # This maintains backward compatibility for glucose-only cases
+                if continuous_fields_other:
+                    # Include glucose in gap detection when there are other continuous fields
+                    # This ensures we detect gaps in all continuous fields, including glucose
+                    continuous_fields_to_check = continuous_fields  # Include glucose
+                else:
+                    # Only glucose - use timestamp-based gaps only (backward compatibility)
+                    continuous_fields_to_check = []
+                
+                if continuous_fields_to_check:
+                    # Recalculate gaps for continuous fields (same logic as before)
+                    gap_columns = []
+                    for field in continuous_fields_to_check:
+                        # Filter DataFrame to rows where this field is not null
+                        non_null_rows = df.filter(pl.col(field).is_not_null()).sort('timestamp')
+                        
+                        if len(non_null_rows) > 1:
+                            # Calculate time differences between consecutive non-null values
+                            non_null_with_diff = non_null_rows.with_columns([
+                                pl.col('timestamp').diff().dt.total_seconds().alias('field_time_diff')
+                            ])
+                            
+                            # Find rows where time difference > small_gap_max_minutes
+                            # These are the rows where a gap ends (where field becomes non-null after a gap)
+                            gap_rows = non_null_with_diff.filter(
+                                pl.col('field_time_diff') > self.small_gap_max_seconds
+                            )
+                            
+                            if len(gap_rows) > 0:
+                                # Get timestamps where gaps end
+                                gap_timestamps = set(gap_rows['timestamp'].to_list())
+                                
+                                # Create a column that marks rows where this field has a gap
+                                # A gap exists at rows where field is not null AND timestamp is in gap_timestamps
+                                field_gap = (
+                                    pl.col(field).is_not_null() & 
+                                    pl.col('timestamp').is_in(list(gap_timestamps))
+                                )
+                            else:
+                                # No gaps found for this field
+                                field_gap = pl.lit(False)
+                        else:
+                            # Not enough non-null values to detect gaps
+                            field_gap = pl.lit(False)
+                        
+                        gap_columns.append(field_gap.alias(f'is_gap_{field.replace(" ", "_").replace("(", "").replace(")", "").replace("/", "_")}'))
+                    
+                    # Add gap columns
+                    if gap_columns:
+                        df = df.with_columns(gap_columns)
+                        
+                        # Combine all gap indicators: if ANY continuous field has a gap, mark as gap
+                        gap_exprs = [pl.col('is_gap')]  # Start with timestamp-based gaps
+                        for field in continuous_fields_to_check:
+                            safe_name = field.replace(" ", "_").replace("(", "").replace(")", "").replace("/", "_")
+                            gap_exprs.append(pl.col(f'is_gap_{safe_name}'))
+                        
+                        # Combine: is_gap OR any field gap
+                        combined_gap = gap_exprs[0]
+                        for expr in gap_exprs[1:]:
+                            combined_gap = combined_gap | expr
+                        
+                        df = df.with_columns([
+                            combined_gap.fill_null(False).alias('is_gap')
+                        ])
+                        
+                        # Remove temporary gap columns
+                        temp_gap_cols = [f'is_gap_{field.replace(" ", "_").replace("(", "").replace(")", "").replace("/", "_")}' for field in continuous_fields_to_check]
+                        df = df.drop([col for col in temp_gap_cols if col in df.columns])
+            
+            # Create sequence IDs based on gaps
+            df = df.with_columns([
                 pl.col('is_gap').cum_sum().alias('local_sequence_id')
             ])
             
@@ -1426,7 +1610,7 @@ class GlucoseMLPreprocessor:
         
         # Step 2: Detect gaps and create sequences
         print("STEP 2: Detecting gaps and creating sequences...")
-        df, gap_stats, last_sequence_id = self.detect_gaps_and_sequences(df, last_sequence_id)
+        df, gap_stats, last_sequence_id = self.detect_gaps_and_sequences(df, last_sequence_id, field_categories_dict)
         print("OK: Gap detection and sequence creation complete")
         
         if self.save_intermediate_files:

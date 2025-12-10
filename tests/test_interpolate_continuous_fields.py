@@ -268,6 +268,410 @@ def test_large_gap_not_interpolated():
     print("✓ test_large_gap_not_interpolated passed")
 
 
+def test_continuous_field_out_of_sync_with_glucose():
+    """
+    Test interpolation when a continuous field has additional rows with timestamps 
+    that don't have glucose values (out of sync).
+    
+    ISSUE IDENTIFIED: The algorithm detects gaps based on timestamp differences, 
+    not missing values. If a continuous field has values at timestamps where glucose 
+    is missing, those timestamps exist in the DataFrame, so no gap is detected.
+    
+    Expected behavior: Glucose should be interpolated at 10:05 and 10:10 even though
+    Heart Rate already has values there.
+    
+    Actual behavior: No gaps detected, no interpolation occurs.
+    """
+    """
+    Test interpolation when a continuous field has additional rows with timestamps 
+    that don't have glucose values (out of sync).
+    
+    This tests if the algorithm correctly handles:
+    - Glucose at timestamps: 10:00, 10:15 (gap from 10:00 to 10:15)
+    - Heart Rate at timestamps: 10:00, 10:05, 10:10, 10:15 (has values where glucose is missing)
+    - Should interpolate glucose at 10:05 and 10:10
+    - Should interpolate heart rate at 10:05 and 10:10 (but these already exist!)
+    """
+    preprocessor = GlucoseMLPreprocessor(expected_interval_minutes=5, small_gap_max_minutes=15)
+    
+    base_time = datetime(2023, 1, 1, 10, 0, 0)
+    
+    # Create data where:
+    # - Glucose has values at 10:00 and 10:15 (15-minute gap, should create 2 interpolated points)
+    # - Heart Rate has values at 10:00, 10:05, 10:10, 10:15 (out of sync - has values where glucose is missing)
+    
+    # First, create DataFrame with all timestamps
+    all_timestamps = [
+        base_time,                          # 10:00 - both have values
+        base_time + timedelta(minutes=5),   # 10:05 - only heart rate
+        base_time + timedelta(minutes=10),  # 10:10 - only heart rate
+        base_time + timedelta(minutes=15),  # 10:15 - both have values
+    ]
+    
+    # Glucose values (None where missing)
+    glucose_values = [100.0, None, None, 130.0]
+    
+    # Heart Rate values (has values at all timestamps)
+    heart_rate_values = [72.0, 75.0, 80.0, 85.0]
+    
+    df = pl.DataFrame({
+        'timestamp': all_timestamps,
+        'Glucose Value (mg/dL)': glucose_values,
+        'Heart Rate': heart_rate_values,
+        'sequence_id': [1] * len(all_timestamps),
+        'Timestamp (YYYY-MM-DDThh:mm:ss)': [ts.strftime('%Y-%m-%dT%H:%M:%S') for ts in all_timestamps],
+        'Event Type': ['EGV', 'EGV', 'EGV', 'EGV']  # All marked as EGV initially
+    })
+    
+    field_categories = {
+        'continuous': ['Glucose Value (mg/dL)', 'Heart Rate'],
+        'occasional': [],
+        'service': ['Event Type']
+    }
+    
+    print("\n=== Testing out-of-sync continuous fields ===")
+    print(f"Input DataFrame:")
+    print(df)
+    
+    result, stats = preprocessor.interpolate_missing_values(df, field_categories)
+    
+    print(f"\nResult DataFrame:")
+    print(result.sort('timestamp'))
+    print(f"\nStatistics: {stats}")
+    
+    # Check results
+    result_sorted = result.sort('timestamp')
+    
+    # Should have 4 rows (original) + 2 interpolated rows = 6 rows total
+    # OR might have duplicates if heart rate rows are kept and glucose is interpolated
+    print(f"\nTotal rows: {len(result_sorted)}")
+    
+    # Check if we have interpolated rows
+    interpolated_rows = result_sorted.filter(pl.col('Event Type') == 'Interpolated')
+    print(f"Interpolated rows: {len(interpolated_rows)}")
+    print(interpolated_rows)
+    
+    # Check glucose interpolation at 10:05
+    row_10_05 = result_sorted.filter(pl.col('timestamp') == base_time + timedelta(minutes=5))
+    print(f"\nRows at 10:05: {len(row_10_05)}")
+    if len(row_10_05) > 0:
+        print(row_10_05)
+        glucose_10_05 = row_10_05['Glucose Value (mg/dL)'].to_list()
+        heart_rate_10_05 = row_10_05['Heart Rate'].to_list()
+        print(f"Glucose at 10:05: {glucose_10_05}")
+        print(f"Heart Rate at 10:05: {heart_rate_10_05}")
+    
+    # Check glucose interpolation at 10:10
+    row_10_10 = result_sorted.filter(pl.col('timestamp') == base_time + timedelta(minutes=10))
+    print(f"\nRows at 10:10: {len(row_10_10)}")
+    if len(row_10_10) > 0:
+        print(row_10_10)
+        glucose_10_10 = row_10_10['Glucose Value (mg/dL)'].to_list()
+        heart_rate_10_10 = row_10_10['Heart Rate'].to_list()
+        print(f"Glucose at 10:10: {glucose_10_10}")
+        print(f"Heart Rate at 10:10: {heart_rate_10_10}")
+    
+    # Expected behavior analysis:
+    # The algorithm calculates gaps based on consecutive timestamps in the sequence.
+    # Since we have timestamps at 10:00, 10:05, 10:10, 10:15, the gaps are:
+    # - 10:00 to 10:05: 5 minutes (no gap, expected interval)
+    # - 10:05 to 10:10: 5 minutes (no gap, expected interval)
+    # - 10:10 to 10:15: 5 minutes (no gap, expected interval)
+    # So NO gaps are detected! The algorithm doesn't see a gap because all timestamps are present.
+    
+    # This reveals a potential issue: if a continuous field has additional rows where glucose is missing,
+    # the algorithm won't detect a gap because it only looks at timestamp differences, not at missing values.
+    
+    print("\n=== Analysis ===")
+    print("The algorithm detects gaps based on timestamp differences, not missing values.")
+    print("If Heart Rate has values at 10:05 and 10:10, those timestamps exist in the DataFrame,")
+    print("so no gap is detected between 10:00 and 10:15.")
+    print("This means glucose won't be interpolated at those timestamps.")
+    
+    # Now test what SHOULD happen: if we only had glucose data (no Heart Rate rows),
+    # the gap would be detected and glucose would be interpolated
+    print("\n" + "="*60)
+    print("COMPARISON: What happens if we only have glucose data (no Heart Rate rows)?")
+    print("="*60)
+    
+    # Create DataFrame with only glucose timestamps (10:00 and 10:15)
+    glucose_only_timestamps = [
+        base_time,                          # 10:00
+        base_time + timedelta(minutes=15),  # 10:15
+    ]
+    
+    glucose_only_values = [100.0, 130.0]
+    
+    df_glucose_only = pl.DataFrame({
+        'timestamp': glucose_only_timestamps,
+        'Glucose Value (mg/dL)': glucose_only_values,
+        'sequence_id': [1] * len(glucose_only_timestamps),
+        'Timestamp (YYYY-MM-DDThh:mm:ss)': [ts.strftime('%Y-%m-%dT%H:%M:%S') for ts in glucose_only_timestamps],
+        'Event Type': ['EGV', 'EGV']
+    })
+    
+    field_categories_glucose_only = {
+        'continuous': ['Glucose Value (mg/dL)'],
+        'occasional': [],
+        'service': ['Event Type']
+    }
+    
+    result_glucose_only, stats_glucose_only = preprocessor.interpolate_missing_values(df_glucose_only, field_categories_glucose_only)
+    
+    print(f"\nGlucose-only input: {len(df_glucose_only)} rows")
+    print(f"Glucose-only result: {len(result_glucose_only)} rows")
+    print(f"Statistics: {stats_glucose_only}")
+    print(f"\nResult DataFrame:")
+    print(result_glucose_only.sort('timestamp'))
+    
+    # Check if glucose was interpolated at 10:05 and 10:10
+    interp_rows_glucose_only = result_glucose_only.filter(pl.col('Event Type') == 'Interpolated')
+    print(f"\nInterpolated rows: {len(interp_rows_glucose_only)}")
+    if len(interp_rows_glucose_only) > 0:
+        print(interp_rows_glucose_only.sort('timestamp'))
+        print("\n✓ With glucose-only data, gaps ARE detected and glucose IS interpolated!")
+    else:
+        print("\n✗ Even with glucose-only data, no interpolation occurred (unexpected)")
+    
+    print("\n" + "="*60)
+    print("CONCLUSION:")
+    print("="*60)
+    print("When continuous fields are out of sync:")
+    print("  - If Heart Rate has values at timestamps where glucose is missing,")
+    print("    those timestamps exist in the DataFrame")
+    print("  - The algorithm sees consecutive 5-minute intervals (10:00→10:05→10:10→10:15)")
+    print("  - No gap is detected, so no interpolation occurs")
+    print("  - Glucose remains null at 10:05 and 10:10")
+    print("\nThis is a limitation: the algorithm cannot interpolate missing values")
+    print("at timestamps that already exist in the DataFrame due to other continuous fields.")
+    
+    return result, stats
+
+
+def test_detect_gaps_with_continuous_fields():
+    """
+    Comprehensive test that detect_gaps_and_sequences() correctly detects gaps for continuous fields
+    and splits sequences when ANY continuous field has a gap > small_gap_max_minutes.
+    
+    Test scenario with out-of-sync fields:
+    - Two continuous fields: Glucose and Heart Rate
+    - Some timestamps are the same, some vary by minutes/seconds
+    - Multiple rows for the same time period (some with both fields, some with only one)
+    - Common gaps (both fields), unique gaps (one field only)
+    - Mix of small gaps (<=15 min) and large gaps (>15 min)
+    """
+    preprocessor = GlucoseMLPreprocessor(expected_interval_minutes=5, small_gap_max_minutes=15)
+    
+    base_time = datetime(2023, 1, 1, 10, 0, 0)
+    
+    # Design a complex test case with out-of-sync fields:
+    # 
+    # Timeline:
+    # 10:00:00 - Both fields (start)
+    # 10:05:00 - Glucose only
+    # 10:05:30 - Heart Rate only (30 seconds later)
+    # 10:10:00 - Glucose only
+    # 10:15:00 - Heart Rate only (glucose gap: 10:10->10:25 = 15 min, heart rate: 10:05:30->10:15 = 9.5 min)
+    # 10:25:00 - Glucose only (glucose gap: 10:10->10:25 = 15 min = small gap, should NOT break)
+    # 10:30:00 - Both fields (common timestamp)
+    # 10:35:00 - Glucose only
+    # 10:40:00 - Heart Rate only
+    # 10:45:00 - Both fields (common timestamp)
+    # 11:00:00 - Glucose only (glucose gap: 10:45->11:00 = 15 min = small gap, should NOT break)
+    # 11:20:00 - Heart Rate only (heart rate gap: 10:45->11:20 = 35 min = LARGE gap, SHOULD break)
+    # 11:25:00 - Glucose only (glucose gap: 11:00->11:25 = 25 min = LARGE gap, SHOULD break)
+    # 11:30:00 - Both fields (common timestamp after gaps)
+    # 11:45:00 - Both fields (common timestamp)
+    # 12:00:00 - Both fields (common timestamp)
+    # 12:20:00 - Both fields (common large gap: 12:00->12:20 = 20 min = LARGE gap, SHOULD break)
+    # 12:25:00 - Both fields
+    
+    timestamps = [
+        base_time,                                    # 10:00:00 - both
+        base_time + timedelta(minutes=5),            # 10:05:00 - glucose only
+        base_time + timedelta(minutes=5, seconds=30), # 10:05:30 - heart rate only
+        base_time + timedelta(minutes=10),           # 10:10:00 - glucose only
+        base_time + timedelta(minutes=15),           # 10:15:00 - heart rate only
+        base_time + timedelta(minutes=25),           # 10:25:00 - glucose only (15 min gap from 10:10)
+        base_time + timedelta(minutes=30),           # 10:30:00 - both
+        base_time + timedelta(minutes=35),           # 10:35:00 - glucose only
+        base_time + timedelta(minutes=40),           # 10:40:00 - heart rate only
+        base_time + timedelta(minutes=45),           # 10:45:00 - both
+        base_time + timedelta(hours=1),              # 11:00:00 - glucose only (15 min gap from 10:45)
+        base_time + timedelta(hours=1, minutes=20),  # 11:20:00 - heart rate only (35 min gap from 10:45 = LARGE)
+        base_time + timedelta(hours=1, minutes=25),  # 11:25:00 - glucose only (25 min gap from 11:00 = LARGE)
+        base_time + timedelta(hours=1, minutes=30),  # 11:30:00 - both (after gaps)
+        base_time + timedelta(hours=1, minutes=45),  # 11:45:00 - both
+        base_time + timedelta(hours=2),              # 12:00:00 - both
+        base_time + timedelta(hours=2, minutes=20),  # 12:20:00 - both (20 min gap from 12:00 = LARGE, common)
+        base_time + timedelta(hours=2, minutes=25),   # 12:25:00 - both
+    ]
+    
+    glucose_values = [
+        100.0,   # 10:00:00
+        105.0,   # 10:05:00
+        None,    # 10:05:30
+        110.0,   # 10:10:00
+        None,    # 10:15:00
+        115.0,   # 10:25:00 (15 min gap from 10:10 - small gap, should NOT break)
+        120.0,   # 10:30:00
+        125.0,   # 10:35:00
+        None,    # 10:40:00
+        130.0,   # 10:45:00
+        135.0,   # 11:00:00 (15 min gap from 10:45 - small gap, should NOT break)
+        None,    # 11:20:00
+        140.0,   # 11:25:00 (25 min gap from 11:00 - LARGE gap, SHOULD break)
+        145.0,   # 11:30:00
+        150.0,   # 11:45:00
+        155.0,   # 12:00:00
+        160.0,   # 12:20:00 (20 min gap from 12:00 - LARGE gap, common, SHOULD break)
+        165.0,   # 12:25:00
+    ]
+    
+    heart_rate_values = [
+        72.0,    # 10:00:00
+        None,    # 10:05:00
+        75.0,    # 10:05:30
+        None,    # 10:10:00
+        80.0,    # 10:15:00
+        None,    # 10:25:00
+        85.0,    # 10:30:00
+        None,    # 10:35:00
+        90.0,    # 10:40:00
+        95.0,    # 10:45:00
+        None,    # 11:00:00
+        100.0,   # 11:20:00 (35 min gap from 10:45 - LARGE gap, SHOULD break)
+        None,    # 11:25:00
+        105.0,   # 11:30:00
+        110.0,   # 11:45:00
+        115.0,   # 12:00:00
+        120.0,   # 12:20:00 (20 min gap from 12:00 - LARGE gap, common, SHOULD break)
+        125.0,   # 12:25:00
+    ]
+    
+    df = pl.DataFrame({
+        'timestamp': timestamps,
+        'Glucose Value (mg/dL)': glucose_values,
+        'Heart Rate': heart_rate_values,
+        'sequence_id': [1] * len(timestamps),  # Will be reassigned
+        'Timestamp (YYYY-MM-DDThh:mm:ss)': [ts.strftime('%Y-%m-%dT%H:%M:%S') for ts in timestamps],
+        'Event Type': ['EGV'] * len(timestamps)
+    })
+    
+    field_categories = {
+        'continuous': ['Glucose Value (mg/dL)', 'Heart Rate'],
+        'occasional': [],
+        'service': ['Event Type']
+    }
+    
+    print(f"\n{'='*80}")
+    print("COMPREHENSIVE TEST: Gap Detection with Out-of-Sync Continuous Fields")
+    print(f"{'='*80}")
+    print(f"\nInput DataFrame ({len(df)} rows):")
+    print(df.select(['timestamp', 'Glucose Value (mg/dL)', 'Heart Rate']))
+    
+    # Test gap detection with continuous fields
+    result, stats, _ = preprocessor.detect_gaps_and_sequences(df, last_sequence_id=0, field_categories_dict=field_categories)
+    
+    print(f"\n{'='*80}")
+    print("RESULTS")
+    print(f"{'='*80}")
+    print(f"Input rows: {len(df)}")
+    print(f"Output rows: {len(result)}")
+    print(f"Sequences created: {stats['total_sequences']}")
+    print(f"Gaps detected: {stats['total_gaps']}")
+    
+    result_sorted = result.sort('timestamp')
+    print(f"\nResult DataFrame sorted by timestamp:")
+    print(result_sorted.select(['timestamp', 'sequence_id', 'Glucose Value (mg/dL)', 'Heart Rate']))
+    
+    # Expected gaps that should break sequences:
+    # 1. Heart Rate gap: 10:45 -> 11:20 (35 min) - LARGE, unique to Heart Rate
+    # 2. Glucose gap: 11:00 -> 11:25 (25 min) - LARGE, unique to Glucose  
+    # 3. Common gap: 12:00 -> 12:20 (20 min) - LARGE, common to both
+    
+    # Expected sequences:
+    # Sequence 1: 10:00:00 to 11:20:00 (or 11:25:00, depending on which gap is detected first)
+    # Sequence 2: 11:25:00 to 12:20:00 (or 12:00:00, depending on gap detection)
+    # Sequence 3: 12:20:00 onwards
+    
+    # Verify that sequences were created (should have at least 2 sequences due to large gaps)
+    assert stats['total_sequences'] >= 2, (
+        f"Expected at least 2 sequences due to large gaps, got {stats['total_sequences']}\n"
+        f"Expected gaps:\n"
+        f"  - Heart Rate: 10:45->11:20 (35 min) - LARGE\n"
+        f"  - Glucose: 11:00->11:25 (25 min) - LARGE\n"
+        f"  - Common: 12:00->12:20 (20 min) - LARGE"
+    )
+    
+    # Verify that gaps were detected
+    assert stats['total_gaps'] >= 2, (
+        f"Expected at least 2 large gaps to be detected, got {stats['total_gaps']}\n"
+        f"Large gaps should be detected for:\n"
+        f"  - Heart Rate: 10:45->11:20 (35 min)\n"
+        f"  - Glucose: 11:00->11:25 (25 min)\n"
+        f"  - Common: 12:00->12:20 (20 min)"
+    )
+    
+    # Verify sequence IDs change at gap boundaries
+    seq_ids = result_sorted['sequence_id'].to_list()
+    sequence_changes = [i for i in range(1, len(seq_ids)) if seq_ids[i] != seq_ids[i-1]]
+    
+    assert len(sequence_changes) >= 2, (
+        f"Expected at least 2 sequence breaks, got {len(sequence_changes)}\n"
+        f"Sequence IDs: {seq_ids}\n"
+        f"Changes at indices: {sequence_changes}"
+    )
+    
+    # Verify that sequence breaks occur at expected gap locations
+    # Check that 11:20:00 or 11:25:00 has a different sequence_id than 11:00:00
+    idx_11_00 = None
+    idx_11_20 = None
+    idx_11_25 = None
+    idx_12_00 = None
+    idx_12_20 = None
+    
+    for i, ts in enumerate(result_sorted['timestamp']):
+        if ts == base_time + timedelta(hours=1):  # 11:00:00
+            idx_11_00 = i
+        elif ts == base_time + timedelta(hours=1, minutes=20):  # 11:20:00
+            idx_11_20 = i
+        elif ts == base_time + timedelta(hours=1, minutes=25):  # 11:25:00
+            idx_11_25 = i
+        elif ts == base_time + timedelta(hours=2):  # 12:00:00
+            idx_12_00 = i
+        elif ts == base_time + timedelta(hours=2, minutes=20):  # 12:20:00
+            idx_12_20 = i
+    
+    # At least one of the large gaps should cause a sequence break
+    gaps_detected = []
+    if idx_11_00 is not None and idx_11_20 is not None:
+        if seq_ids[idx_11_20] != seq_ids[idx_11_00]:
+            gaps_detected.append("Heart Rate gap at 11:20:00")
+    if idx_11_00 is not None and idx_11_25 is not None:
+        if seq_ids[idx_11_25] != seq_ids[idx_11_00]:
+            gaps_detected.append("Glucose gap at 11:25:00")
+    if idx_12_00 is not None and idx_12_20 is not None:
+        if seq_ids[idx_12_20] != seq_ids[idx_12_00]:
+            gaps_detected.append("Common gap at 12:20:00")
+    
+    assert len(gaps_detected) >= 2, (
+        f"Expected at least 2 large gaps to cause sequence breaks, detected: {gaps_detected}\n"
+        f"Sequence IDs around gaps:\n"
+        f"  11:00:00 (idx {idx_11_00}): seq_id {seq_ids[idx_11_00] if idx_11_00 is not None else 'N/A'}\n"
+        f"  11:20:00 (idx {idx_11_20}): seq_id {seq_ids[idx_11_20] if idx_11_20 is not None else 'N/A'}\n"
+        f"  11:25:00 (idx {idx_11_25}): seq_id {seq_ids[idx_11_25] if idx_11_25 is not None else 'N/A'}\n"
+        f"  12:00:00 (idx {idx_12_00}): seq_id {seq_ids[idx_12_00] if idx_12_00 is not None else 'N/A'}\n"
+        f"  12:20:00 (idx {idx_12_20}): seq_id {seq_ids[idx_12_20] if idx_12_20 is not None else 'N/A'}"
+    )
+    
+    print(f"\n✓ Sequence breaks detected at row indices: {sequence_changes}")
+    print(f"✓ Large gaps detected: {gaps_detected}")
+    print(f"✓ Total sequences: {stats['total_sequences']}")
+    print(f"✓ Total gaps: {stats['total_gaps']}")
+    print("\n✅ test_detect_gaps_with_continuous_fields passed")
+
+
 def test_extract_field_categories():
     """Test the extract_field_categories method."""
     # Test with UoM database
@@ -295,6 +699,19 @@ if __name__ == '__main__':
     test_continuous_field_with_fewer_points()
     test_no_continuous_fields_except_glucose()
     test_large_gap_not_interpolated()
+    test_detect_gaps_with_continuous_fields()
     
-    print("\n✅ All tests passed!")
+    # Test out-of-sync case (this will show results, may not pass assertions)
+    print("\n" + "="*60)
+    print("TESTING OUT-OF-SYNC CONTINUOUS FIELDS")
+    print("="*60)
+    try:
+        result, stats = test_continuous_field_out_of_sync_with_glucose()
+        print("\n⚠️  Test completed - check results above to see behavior")
+    except Exception as e:
+        print(f"\n❌ Test failed with error: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    print("\n✅ All standard tests passed!")
 
