@@ -716,6 +716,127 @@ class GlucoseMLPreprocessor:
             interpolation_stats[f'{field_stats_keys[field]}_interpolations'] = 0
         
         # Process each sequence separately       
+        # First, fill missing values at existing timestamps for each continuous field
+        # Then, detect timestamp-based gaps and create new rows
+        
+        # Step 1: For each continuous field, fill missing values at existing timestamps
+        # This handles out-of-sync data where different fields have values at different timestamps
+        from datetime import timedelta
+        
+        interpolation_stats['sequences_processed'] = df['sequence_id'].n_unique()
+        
+        # Track per-field interpolations for statistics
+        per_field_interpolations = {field: 0 for field in fields_to_interpolate}
+        
+        # Process each continuous field to fill missing values at existing timestamps
+        for field in fields_to_interpolate:
+            # For each sequence, find gaps in this specific field and fill missing values
+            sequences = df['sequence_id'].unique().to_list()
+            
+            for seq_id in sequences:
+                seq_mask = pl.col('sequence_id') == seq_id
+                seq_df = df.filter(seq_mask).sort('timestamp')
+                
+                # Filter to rows where this field is not null
+                non_null_rows = seq_df.filter(pl.col(field).is_not_null())
+                
+                if len(non_null_rows) < 2:
+                    continue
+                
+                # Calculate time differences between consecutive non-null values
+                non_null_with_diff = non_null_rows.with_columns([
+                    (pl.col('timestamp').diff().dt.total_seconds() / 60.0)
+                    .alias('time_diff_minutes')
+                ])
+                
+                # Find gaps: time_diff > expected_interval_minutes but <= small_gap_max_minutes
+                small_gaps = non_null_with_diff.filter(
+                    (pl.col('time_diff_minutes') > self.expected_interval_minutes) &
+                    (pl.col('time_diff_minutes') <= self.small_gap_max_minutes)
+                )
+                
+                if small_gaps.height == 0:
+                    continue
+                
+                # For each gap, collect updates for missing values at existing timestamps
+                # Build a list of (timestamp, value) pairs to update
+                updates = []
+                
+                for gap_idx in range(len(small_gaps)):
+                    gap_row = small_gaps[gap_idx]
+                    curr_timestamp = gap_row['timestamp'][0]
+                    time_diff = gap_row['time_diff_minutes'][0]
+                    curr_value = gap_row[field][0]
+                    
+                    # Find previous non-null value
+                    prev_non_null = non_null_rows.filter(pl.col('timestamp') < curr_timestamp).sort('timestamp', descending=True)
+                    if len(prev_non_null) == 0:
+                        continue
+                    prev_timestamp = prev_non_null['timestamp'][0]
+                    prev_value = prev_non_null[field][0]
+                    
+                    # Skip if previous value is None (can't interpolate without both prev and curr)
+                    if prev_value is None:
+                        continue
+                    
+                    # Check the row immediately before the gap end - if it has a value (even None),
+                    # we should use that as the "previous" value for interpolation purposes
+                    # This handles the case where there's a None value right before the gap
+                    row_before_gap = seq_df.filter(pl.col('timestamp') < curr_timestamp).sort('timestamp', descending=True)
+                    if len(row_before_gap) > 0:
+                        immediate_prev_timestamp = row_before_gap['timestamp'][0]
+                        immediate_prev_value = row_before_gap[field][0]
+                        # If the immediate previous row has None, don't interpolate
+                        # (use the non-null value further back only if immediate prev is also non-null)
+                        if immediate_prev_value is None:
+                            continue
+                    
+                    # Calculate number of missing points
+                    missing_points = int((time_diff / self.expected_interval_minutes) - 1)
+                    if missing_points <= 0:
+                        continue
+                    
+                    # Fill missing values at existing timestamps
+                    for j in range(1, missing_points + 1):
+                        interp_timestamp = prev_timestamp + timedelta(minutes=j * self.expected_interval_minutes)
+                        
+                        # Check if a row exists at this timestamp and field is missing
+                        existing_rows = seq_df.filter(pl.col('timestamp') == interp_timestamp)
+                        if existing_rows.height > 0 and existing_rows[field][0] is None:
+                            # Interpolate the value
+                            alpha = (j * self.expected_interval_minutes) / time_diff
+                            interp_value = prev_value + alpha * (curr_value - prev_value)
+                            updates.append((interp_timestamp, interp_value))
+                
+                # Apply all updates for this field in this sequence at once
+                if updates:
+                    # Count interpolations for statistics
+                    per_field_interpolations[field] += len(updates)
+                    
+                    # Build conditional expression to update the field
+                    update_expr = pl.col(field)
+                    for ts, val in updates:
+                        update_expr = pl.when(
+                            (pl.col('sequence_id') == seq_id) & (pl.col('timestamp') == ts) & (pl.col(field).is_null())
+                        ).then(pl.lit(val)).otherwise(update_expr)
+                    
+                    df = df.with_columns([update_expr.alias(field)])
+                    
+                    # Update Event Type for interpolated rows
+                    if 'Event Type' in df.columns:
+                        event_update_expr = pl.col('Event Type')
+                        for ts, _ in updates:
+                            event_update_expr = pl.when(
+                                (pl.col('sequence_id') == seq_id) & (pl.col('timestamp') == ts) & (pl.col('Event Type') != 'Interpolated')
+                            ).then(pl.lit('Interpolated')).otherwise(event_update_expr)
+                        df = df.with_columns([event_update_expr.alias('Event Type')])
+        
+        # Update statistics for per-field interpolations
+        for field in fields_to_interpolate:
+            stats_key = field_stats_keys[field]
+            interpolation_stats[f'{stats_key}_interpolations'] = per_field_interpolations[field]
+        
+        # Step 2: Process timestamp-based gaps (original logic)
         # Add row index and time differences within each sequence
         df_with_diffs = df.with_row_index('row_idx').with_columns([
             (pl.col('timestamp').diff().over('sequence_id').dt.total_seconds() / 60.0).alias('time_diff_minutes')
@@ -734,9 +855,14 @@ class GlucoseMLPreprocessor:
         small_gaps_df = df_with_gaps.filter(pl.col('is_small_gap'))
         large_gaps_df = df_with_gaps.filter(pl.col('is_large_gap'))
         
-        interpolation_stats['small_gaps_filled'] = small_gaps_df.height
+        # Count timestamp-based gaps (add to existing per-field gap count)
+        timestamp_based_gaps = small_gaps_df.height
+        interpolation_stats['small_gaps_filled'] = timestamp_based_gaps
         interpolation_stats['large_gaps_skipped'] = large_gaps_df.height
-        interpolation_stats['sequences_processed'] = df['sequence_id'].n_unique()
+        
+        # Update total interpolations
+        total_interpolations = sum(per_field_interpolations.values())
+        interpolation_stats['total_interpolations'] = total_interpolations
         
         # Process small gaps to create interpolated rows using fully vectorized Polars operations
         if small_gaps_df.height > 0:
@@ -745,7 +871,9 @@ class GlucoseMLPreprocessor:
                 pl.col('timestamp').shift(1).over('sequence_id').alias('prev_timestamp')
             ]
             
-            # Add previous values for all fields to interpolate
+            # Add previous row values for all fields to interpolate
+            # Note: We use shift(1) which gets the previous row's value
+            # The interpolation logic will check if prev is None and skip interpolation if so
             for field in fields_to_interpolate:
                 safe_name = field_safe_names[field]
                 prev_cols.append(pl.col(field).shift(1).over('sequence_id').alias(f'prev_{safe_name}'))
@@ -830,6 +958,7 @@ class GlucoseMLPreprocessor:
                     
                     # Calculate interpolated value using time-weighted interpolation:
                     # prev + alpha * (curr - prev)
+                    # Only interpolate if both prev and curr are not null
                     interpolated_field_exprs.append(
                         pl.when(
                             (pl.col(prev_col_num).is_not_null()) & 
@@ -907,18 +1036,20 @@ class GlucoseMLPreprocessor:
                 # Ensure columns are in same order as original and cast to correct types
                 interpolated_df = interpolated_df.select(df.columns)
                 
-                # Update statistics
+                # Update statistics for timestamp-based gaps
                 interpolation_stats['total_interpolated_data_points'] = len(interpolated_df)
                 
-                # Count interpolations for each field
-                total_interpolations = 0
+                # Count interpolations for each field from timestamp-based gaps
+                timestamp_based_interpolations = 0
                 for field in fields_to_interpolate:
                     stats_key = field_stats_keys[field]
                     field_interpolations = interpolated_df.filter(pl.col(field).is_not_null()).height
-                    interpolation_stats[f'{stats_key}_interpolations'] = field_interpolations
-                    total_interpolations += field_interpolations
+                    # Add to existing per-field interpolations (from Step 1)
+                    interpolation_stats[f'{stats_key}_interpolations'] = interpolation_stats.get(f'{stats_key}_interpolations', 0) + field_interpolations
+                    timestamp_based_interpolations += field_interpolations
                 
-                interpolation_stats['total_interpolations'] = total_interpolations
+                # Update total interpolations (add timestamp-based to per-field)
+                interpolation_stats['total_interpolations'] = interpolation_stats.get('total_interpolations', 0) + timestamp_based_interpolations
                 
                 # Combine with original data
                 df = pl.concat([df, interpolated_df], how='vertical_relaxed')
