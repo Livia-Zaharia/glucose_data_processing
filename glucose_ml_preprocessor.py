@@ -1127,7 +1127,7 @@ class GlucoseMLPreprocessor:
         
         return filtered_df, filtering_stats
     
-    def create_fixed_frequency_data(self, df: pl.DataFrame) -> Tuple[pl.DataFrame, Dict[str, Any]]:
+    def create_fixed_frequency_data(self, df: pl.DataFrame, field_categories_dict: Optional[Dict[str, List[str]]] = None) -> Tuple[pl.DataFrame, Dict[str, Any]]:
         """
         Create fixed-frequency data by aligning sequences to round minutes and ensuring consistent intervals.
         Glucose values are interpolated, while carbs and insulin are shifted to closest datapoints.
@@ -1136,6 +1136,9 @@ class GlucoseMLPreprocessor:
         
         Args:
             df: DataFrame with processed data and sequence IDs
+            field_categories_dict: Dictionary mapping categories to lists of column names.
+                                  Currently not implemented - added for test compatibility.
+                                  Will be used to handle multiple continuous fields in the future.
             
         Returns:
             Tuple of (DataFrame with fixed-frequency data, statistics dictionary)
@@ -1173,7 +1176,7 @@ class GlucoseMLPreprocessor:
             fixed_freq_stats['sequences_processed'] += 1
             
             # Create fixed-frequency timestamps using Polars operations
-            fixed_seq_data = self._create_fixed_frequency_sequence(seq_data, seq_id, fixed_freq_stats)
+            fixed_seq_data = self._create_fixed_frequency_sequence(seq_data, seq_id, fixed_freq_stats, field_categories_dict)
             all_fixed_sequences.append(fixed_seq_data)
         
         # Combine all fixed sequences
@@ -1321,7 +1324,7 @@ class GlucoseMLPreprocessor:
             'density_change_pct': density_change_pct
         }
     
-    def _create_fixed_frequency_sequence(self, seq_data: pl.DataFrame, seq_id: int, stats: Dict[str, Any]) -> pl.DataFrame:
+    def _create_fixed_frequency_sequence(self, seq_data: pl.DataFrame, seq_id: int, stats: Dict[str, Any], field_categories_dict: Optional[Dict[str, List[str]]] = None) -> pl.DataFrame:
         """
         Create fixed-frequency data for a single sequence using efficient Polars operations.
         
@@ -1329,6 +1332,8 @@ class GlucoseMLPreprocessor:
             seq_data: Sequence data as Polars DataFrame
             seq_id: Sequence ID
             stats: Statistics dictionary to update
+            field_categories_dict: Dictionary mapping categories to lists of column names.
+                                  Used to determine which fields are continuous and need interpolation.
             
         Returns:
             Fixed-frequency sequence as Polars DataFrame
@@ -1367,82 +1372,176 @@ class GlucoseMLPreprocessor:
             pl.lit(seq_id).alias('sequence_id')
         ])
         
-        # 1. Interpolate Glucose (Linear)
-        result_df = self._interpolate_glucose_linear(fixed_timestamps, seq_data, stats)
+        # 1. Interpolate Continuous Fields (Linear interpolation)
+        # Determine which fields to interpolate
+        if field_categories_dict is None:
+            # Default: only glucose
+            continuous_fields = ['Glucose Value (mg/dL)'] if 'Glucose Value (mg/dL)' in seq_data.columns else []
+        else:
+            continuous_fields = field_categories_dict.get('continuous', [])
+            # Always include glucose if it exists
+            glucose_col = 'Glucose Value (mg/dL)'
+            if glucose_col in seq_data.columns and glucose_col not in continuous_fields:
+                continuous_fields.append(glucose_col)
+        
+        # Filter to only fields that exist in the DataFrame
+        continuous_fields = [f for f in continuous_fields if f in seq_data.columns]
+        
+        # Interpolate all continuous fields
+        result_df = self._interpolate_continuous_fields_linear(fixed_timestamps, seq_data, stats, continuous_fields)
         
         # 2. Shift Events (Nearest Neighbor / Rounding)
-        # Include all potential event columns
-        potential_event_cols = ['Fast-Acting Insulin Value (u)', 'Long-Acting Insulin Value (u)', 'Carb Value (grams)', 'Event Type', 'user_id']
-        event_cols = [col for col in potential_event_cols if col in seq_data.columns]
+        # Determine which fields are occasional (for shifting)
+        if field_categories_dict is None:
+            # Default: use known occasional fields
+            occasional_fields = ['Fast-Acting Insulin Value (u)', 'Long-Acting Insulin Value (u)', 'Carb Value (grams)']
+        else:
+            occasional_fields = field_categories_dict.get('occasional', [])
+            # Also include known occasional fields if they exist
+            known_occasional = ['Fast-Acting Insulin Value (u)', 'Long-Acting Insulin Value (u)', 'Carb Value (grams)']
+            for field in known_occasional:
+                if field in seq_data.columns and field not in occasional_fields:
+                    occasional_fields.append(field)
+        
+        # Also include service fields that should be preserved
+        service_fields = []
+        if field_categories_dict is not None:
+            service_fields = field_categories_dict.get('service', [])
+        
+        # Include Event Type and user_id if they exist
+        event_cols = []
+        seen_cols = set()
+        for col in occasional_fields + service_fields + ['Event Type', 'user_id']:
+            if col in seq_data.columns and col not in continuous_fields and col not in seen_cols:
+                event_cols.append(col)
+                seen_cols.add(col)
         
         if event_cols:
             events_df = self._shift_events_rounding(seq_data, event_cols, stats, fixed_timestamps_list)
             # Join events with result (left join to keep all fixed timestamps)
             result_df = result_df.join(events_df, on='timestamp', how='left')
         
+        # Ensure all columns from original schema are present
+        # Add any missing columns as None/empty
+        original_cols = set(seq_data.columns)
+        result_cols = set(result_df.columns)
+        missing_cols = original_cols - result_cols
+        
+        if missing_cols:
+            for col in missing_cols:
+                col_type = seq_data.schema[col]
+                if col_type == pl.Utf8 or col_type == pl.String:
+                    result_df = result_df.with_columns([pl.lit('').cast(col_type).alias(col)])
+                else:
+                    result_df = result_df.with_columns([pl.lit(None).cast(col_type).alias(col)])
+        
+        # Ensure columns are in same order as original (or at least include all original columns)
         return result_df
     
-    def _interpolate_glucose_linear(self, fixed_timestamps: pl.DataFrame, seq_data: pl.DataFrame, stats: Dict[str, Any]) -> pl.DataFrame:
+    def _interpolate_continuous_fields_linear(self, fixed_timestamps: pl.DataFrame, seq_data: pl.DataFrame, stats: Dict[str, Any], continuous_fields: List[str]) -> pl.DataFrame:
         """
-        Interpolate glucose values linearly using previous and next data points.
-        """
-        if 'Glucose Value (mg/dL)' not in seq_data.columns:
-            return fixed_timestamps
+        Interpolate all continuous fields linearly using previous and next data points.
+        
+        Args:
+            fixed_timestamps: DataFrame with fixed-frequency timestamps
+            seq_data: Sequence data with original timestamps and values
+            stats: Statistics dictionary to update
+            continuous_fields: List of field names to interpolate
             
-        # Prepare sequence data with original timestamp preserved
-        # Ensure glucose is float for interpolation
-        seq_data_ts = seq_data.select(['timestamp', 'Glucose Value (mg/dL)']).with_columns([
-            pl.col('timestamp').alias('ts_orig'),
-            pl.col('Glucose Value (mg/dL)').cast(pl.Float64, strict=False)
-        ]).filter(pl.col('Glucose Value (mg/dL)').is_not_null())
+        Returns:
+            DataFrame with all continuous fields interpolated
+        """
+        if not continuous_fields:
+            return fixed_timestamps
         
-        if len(seq_data_ts) == 0:
-            return fixed_timestamps.with_columns(pl.lit(None).alias('Glucose Value (mg/dL)'))
-
-        # Forward join (finds next point)
-        forward = fixed_timestamps.join_asof(
-            seq_data_ts, 
-            on='timestamp', 
-            strategy='forward'
-        ).rename({'Glucose Value (mg/dL)': 'glucose_next', 'ts_orig': 'ts_next'})
+        result_df = fixed_timestamps
         
-        # Backward join (finds prev point)
-        backward = fixed_timestamps.join_asof(
-            seq_data_ts, 
-            on='timestamp', 
-            strategy='backward'
-        ).select(['timestamp', 'Glucose Value (mg/dL)', 'ts_orig']).rename({'Glucose Value (mg/dL)': 'glucose_prev', 'ts_orig': 'ts_prev'})
-        
-        # Combine
-        combined = forward.join(backward, on='timestamp', how='left')
-        
-        # Calculate interpolation
-        # y = y_prev + (y_next - y_prev) * (t - t_prev) / (t_next - t_prev)
-        
-        result = combined.with_columns([
-            pl.when(pl.col('ts_prev') == pl.col('ts_next')) # Exact match (or only one point)
-            .then(pl.col('glucose_prev'))
-            .when(pl.col('ts_prev').is_null()) # No prev (start of series)
-            .then(pl.col('glucose_next'))
-            .when(pl.col('ts_next').is_null()) # No next (end of series)
-            .then(pl.col('glucose_prev'))
-            .otherwise(
-                pl.col('glucose_prev') + (
-                    (pl.col('glucose_next') - pl.col('glucose_prev')) * 
-                    (pl.col('timestamp') - pl.col('ts_prev')).dt.total_seconds() / 
-                    (pl.col('ts_next') - pl.col('ts_prev')).dt.total_seconds()
+        # Interpolate each continuous field
+        for field in continuous_fields:
+            if field not in seq_data.columns:
+                # Field doesn't exist - add as None
+                result_df = result_df.with_columns([pl.lit(None).alias(field)])
+                continue
+            
+            # Prepare sequence data with original timestamp preserved
+            # Ensure field is float for interpolation
+            seq_data_ts = seq_data.select(['timestamp', field]).with_columns([
+                pl.col('timestamp').alias('ts_orig'),
+                pl.col(field).cast(pl.Float64, strict=False)
+            ]).filter(pl.col(field).is_not_null())
+            
+            if len(seq_data_ts) == 0:
+                # No non-null values - add as None
+                result_df = result_df.with_columns([pl.lit(None).alias(field)])
+                continue
+            
+            # Create safe field name for temporary columns
+            safe_name = field.replace(" ", "_").replace("(", "").replace(")", "").replace("/", "_")
+            
+            # Forward join (finds next point)
+            forward = result_df.join_asof(
+                seq_data_ts, 
+                on='timestamp', 
+                strategy='forward'
+            ).rename({field: f'{safe_name}_next', 'ts_orig': f'ts_{safe_name}_next'})
+            
+            # Backward join (finds prev point)
+            backward = result_df.join_asof(
+                seq_data_ts, 
+                on='timestamp', 
+                strategy='backward'
+            ).select(['timestamp', field, 'ts_orig']).rename({field: f'{safe_name}_prev', 'ts_orig': f'ts_{safe_name}_prev'})
+            
+            # Combine
+            combined = forward.join(backward.select(['timestamp', f'{safe_name}_prev', f'ts_{safe_name}_prev']), on='timestamp', how='left')
+            
+            # Calculate interpolation
+            # y = y_prev + (y_next - y_prev) * (t - t_prev) / (t_next - t_prev)
+            
+            combined = combined.with_columns([
+                pl.when(pl.col(f'ts_{safe_name}_prev') == pl.col(f'ts_{safe_name}_next')) # Exact match (or only one point)
+                .then(pl.col(f'{safe_name}_prev'))
+                .when(pl.col(f'ts_{safe_name}_prev').is_null()) # No prev (start of series)
+                .then(pl.col(f'{safe_name}_next'))
+                .when(pl.col(f'ts_{safe_name}_next').is_null()) # No next (end of series)
+                .then(pl.col(f'{safe_name}_prev'))
+                .otherwise(
+                    pl.col(f'{safe_name}_prev') + (
+                        (pl.col(f'{safe_name}_next') - pl.col(f'{safe_name}_prev')) * 
+                        (pl.col('timestamp') - pl.col(f'ts_{safe_name}_prev')).dt.total_seconds() / 
+                        (pl.col(f'ts_{safe_name}_next') - pl.col(f'ts_{safe_name}_prev')).dt.total_seconds()
+                    )
+                ).alias(field)
+            ])
+            
+            # Update result_df with interpolated field
+            # Select only the interpolated field from combined
+            interpolated_field = combined.select(['timestamp', field])
+            
+            # Join and update result_df
+            # If field already exists in result_df, we need to replace it
+            if field in result_df.columns:
+                result_df = result_df.drop(field).join(
+                    interpolated_field,
+                    on='timestamp',
+                    how='left'
                 )
-            ).alias('Glucose Value (mg/dL)')
-        ])
+            else:
+                result_df = result_df.join(
+                    interpolated_field,
+                    on='timestamp',
+                    how='left'
+                )
+            
+            # Update stats for glucose (backward compatibility)
+            if field == 'Glucose Value (mg/dL)':
+                interpolated_count = combined.filter(
+                    pl.col(field).is_not_null() & 
+                    (pl.col(f'ts_{safe_name}_next') != pl.col('timestamp')) # Not an exact match
+                ).height
+                stats['glucose_interpolations'] += interpolated_count
         
-        # Update stats
-        interpolated_count = result.filter(
-            pl.col('Glucose Value (mg/dL)').is_not_null() & 
-            (pl.col('ts_next') != pl.col('timestamp')) # Not an exact match
-        ).height
-        stats['glucose_interpolations'] += interpolated_count
-        
-        return result.select(fixed_timestamps.columns + ['Glucose Value (mg/dL)'])
+        return result_df
 
     def _shift_events_rounding(self, seq_data: pl.DataFrame, cols: List[str], stats: Dict[str, Any], fixed_timestamps_list: List[datetime]) -> pl.DataFrame:
         """
