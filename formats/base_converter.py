@@ -15,6 +15,7 @@ class CSVFormatConverter(ABC):
     """Abstract base class for CSV format converters."""
     
     # Default output fields matching current glucose_ml_preprocessor.py usage
+    # These are fallback defaults if config is not provided
     DEFAULT_OUTPUT_FIELDS: List[str] = [
         'Timestamp (YYYY-MM-DDThh:mm:ss)',
         'Event Type',
@@ -25,6 +26,7 @@ class CSVFormatConverter(ABC):
     ]
     
     # Standard field name mapping (standard_name -> display_name)
+    # These are fallback defaults if config is not provided
     STANDARD_FIELDS: Dict[str, str] = {
         "timestamp": "Timestamp (YYYY-MM-DDThh:mm:ss)",
         "event_type": "Event Type",
@@ -34,7 +36,61 @@ class CSVFormatConverter(ABC):
         "carb_grams": "Carb Value (grams)"
     }
     
+    # Class-level config-based field mappings (initialized from config)
+    _config_default_output_fields: Optional[List[str]] = None
+    _config_standard_fields: Optional[Dict[str, str]] = None
+    
     _schema_cache: Optional[Dict] = None
+    
+    @classmethod
+    def initialize_from_config(cls, config: Optional[Dict] = None) -> None:
+        """
+        Initialize field mappings from configuration dictionary.
+        
+        Args:
+            config: Configuration dictionary with 'default_output_fields' and 'standard_fields' keys.
+                   If None or keys missing, uses default hardcoded values.
+        """
+        if config is None:
+            cls._config_default_output_fields = None
+            cls._config_standard_fields = None
+            return
+        
+        # Load default_output_fields from config
+        if 'default_output_fields' in config and config['default_output_fields']:
+            cls._config_default_output_fields = config['default_output_fields'].copy()
+        else:
+            cls._config_default_output_fields = None
+        
+        # Load standard_fields from config
+        if 'standard_fields' in config and config['standard_fields']:
+            cls._config_standard_fields = config['standard_fields'].copy()
+        else:
+            cls._config_standard_fields = None
+    
+    @classmethod
+    def get_default_output_fields(cls) -> List[str]:
+        """
+        Get default output fields, using config if available, otherwise class defaults.
+        
+        Returns:
+            List of default output field names (display names)
+        """
+        if cls._config_default_output_fields is not None:
+            return cls._config_default_output_fields.copy()
+        return cls.DEFAULT_OUTPUT_FIELDS.copy()
+    
+    @classmethod
+    def get_standard_fields(cls) -> Dict[str, str]:
+        """
+        Get standard field mappings, using config if available, otherwise class defaults.
+        
+        Returns:
+            Dictionary mapping standard field names to display names
+        """
+        if cls._config_standard_fields is not None:
+            return cls._config_standard_fields.copy()
+        return cls.STANDARD_FIELDS.copy()
     
     def __init__(self, output_fields: Optional[List[str]] = None):
         """
@@ -43,14 +99,17 @@ class CSVFormatConverter(ABC):
         Args:
             output_fields: List of standard field names to include in output. 
                           Uses standard field names (e.g., 'timestamp', 'glucose_value_mgdl').
-                          If None, uses DEFAULT_OUTPUT_FIELDS.
+                          If None, uses get_default_output_fields() (which uses config if available).
                           Timestamp is always included.
         """
         if output_fields is None:
             # Convert default display names to standard names
-            display_to_standard = {v: k for k, v in self.STANDARD_FIELDS.items()}
+            # Use get_standard_fields() to get config-based or default mappings
+            standard_fields = self.get_standard_fields()
+            display_to_standard = {v: k for k, v in standard_fields.items()}
+            default_output_fields = self.get_default_output_fields()
             self.output_fields_standard: Set[str] = {
-                display_to_standard.get(f, f) for f in self.DEFAULT_OUTPUT_FIELDS
+                display_to_standard.get(f, f) for f in default_output_fields
             }
         else:
             # Use provided standard field names
@@ -84,7 +143,8 @@ class CSVFormatConverter(ABC):
         Returns:
             Display field name (e.g., 'Timestamp (YYYY-MM-DDThh:mm:ss)')
         """
-        return self.STANDARD_FIELDS.get(standard_name, standard_name)
+        standard_fields = self.get_standard_fields()
+        return standard_fields.get(standard_name, standard_name)
     
     def _filter_output(self, result: Dict[str, str]) -> Dict[str, str]:
         """

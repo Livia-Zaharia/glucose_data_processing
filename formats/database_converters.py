@@ -56,8 +56,8 @@ class DatabaseConverter(ABC):
         Returns:
             DataFrame with all default output fields present
         """
-        # Get default output fields (display names) from CSVFormatConverter
-        default_fields = CSVFormatConverter.DEFAULT_OUTPUT_FIELDS.copy()
+        # Get default output fields (display names) from CSVFormatConverter (config-based or default)
+        default_fields = CSVFormatConverter.get_default_output_fields()
         
         # Add user_id for multi-user databases (it's added during processing)
         # Check if user_id column exists - if so, include it in required fields
@@ -155,7 +155,7 @@ class MonoUserDatabaseConverter(DatabaseConverter):
         # Ensure all records have all required fields before DataFrame creation
         # This prevents Polars from dropping columns when some records don't have them
         # Use empty strings for all fields to ensure consistent string type
-        default_fields = CSVFormatConverter.DEFAULT_OUTPUT_FIELDS.copy()
+        default_fields = CSVFormatConverter.get_default_output_fields()
         for record in all_data:
             for field in default_fields:
                 if field not in record:
@@ -347,7 +347,7 @@ class MultiUserDatabaseConverter(DatabaseConverter):
         # Ensure all records have all required fields before DataFrame creation
         # This prevents Polars from dropping columns when some records don't have them
         # Use empty strings for all fields to ensure consistent string type
-        default_fields = CSVFormatConverter.DEFAULT_OUTPUT_FIELDS.copy()
+        default_fields = CSVFormatConverter.get_default_output_fields()
         for record in all_user_data:
             for field in default_fields:
                 if field not in record:

@@ -11,6 +11,26 @@ glucose_only: false
 calibration_period_minutes: 165 # 2h 45m
 remove_after_calibration_hours: 24
 
+# Field mappings configuration
+# Default output fields (display names) used in CSV output
+default_output_fields:
+  - "Timestamp (YYYY-MM-DDThh:mm:ss)"
+  - "Event Type"
+  - "Glucose Value (mg/dL)"
+  - "Fast-Acting Insulin Value (u)"
+  - "Long-Acting Insulin Value (u)"
+  - "Carb Value (grams)"
+
+# Standard field name mapping (standard_name -> display_name)
+# Used for internal field name conversion
+standard_fields:
+  timestamp: "Timestamp (YYYY-MM-DDThh:mm:ss)"
+  event_type: "Event Type"
+  glucose_value_mgdl: "Glucose Value (mg/dL)"
+  fast_acting_insulin_u: "Fast-Acting Insulin Value (u)"
+  long_acting_insulin_u: "Long-Acting Insulin Value (u)"
+  carb_grams: "Carb Value (grams)"
+
 # Database-specific configurations
 dexcom:
   # Dexcom G6 specific settings

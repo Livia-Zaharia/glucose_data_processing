@@ -67,6 +67,9 @@ class GlucoseMLPreprocessor:
         with open(config_path, 'r') as file:
             config = yaml.safe_load(file)
         
+        # Initialize CSVFormatConverter with field mappings from config
+        CSVFormatConverter.initialize_from_config(config)
+        
         # Extract database-specific configurations
         dexcom_config = config.get('dexcom', {})
         high_value = dexcom_config.get('high_glucose_value', 401)
@@ -165,8 +168,8 @@ class GlucoseMLPreprocessor:
         # Get field_categories from schema
         field_categories = schema.get('field_categories', {})
         
-        # Map standard field names to display names using STANDARD_FIELDS
-        standard_to_display = CSVFormatConverter.STANDARD_FIELDS
+        # Map standard field names to display names using get_standard_fields() (config-based or default)
+        standard_to_display = CSVFormatConverter.get_standard_fields()
         
         # Build result dictionary
         result = {
