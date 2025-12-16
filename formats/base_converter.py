@@ -14,15 +14,17 @@ from pathlib import Path
 class CSVFormatConverter(ABC):
     """Abstract base class for CSV format converters."""
     
-    # Default output fields matching current glucose_ml_preprocessor.py usage
-    # These are fallback defaults if config is not provided
+    # Default output fields (STANDARD NAMES).
+    # These are fallback defaults if config is not provided.
+    # NOTE: We intentionally use standard names so the pipeline can support arbitrary fields
+    # without needing display-name mappings for every new field.
     DEFAULT_OUTPUT_FIELDS: List[str] = [
-        'Timestamp (YYYY-MM-DDThh:mm:ss)',
-        'Event Type',
-        'Glucose Value (mg/dL)',
-        'Fast-Acting Insulin Value (u)',
-        'Long-Acting Insulin Value (u)',
-        'Carb Value (grams)'
+        'timestamp',
+        'event_type',
+        'glucose_value_mgdl',
+        'fast_acting_insulin_u',
+        'long_acting_insulin_u',
+        'carb_grams',
     ]
     
     # Standard field name mapping (standard_name -> display_name)
@@ -74,7 +76,7 @@ class CSVFormatConverter(ABC):
         Get default output fields, using config if available, otherwise class defaults.
         
         Returns:
-            List of default output field names (display names)
+            List of default output field names (standard names)
         """
         if cls._config_default_output_fields is not None:
             return cls._config_default_output_fields.copy()
@@ -135,16 +137,17 @@ class CSVFormatConverter(ABC):
     
     def _get_standard_field_name(self, standard_name: str) -> str:
         """
-        Convert standard field name to display name.
+        Return the standard field name as-is (for flexible field approach).
         
         Args:
             standard_name: Standard field name (e.g., 'timestamp', 'glucose_value_mgdl')
             
         Returns:
-            Display field name (e.g., 'Timestamp (YYYY-MM-DDThh:mm:ss)')
+            The same standard field name (e.g., 'timestamp', 'glucose_value_mgdl')
         """
-        standard_fields = self.get_standard_fields()
-        return standard_fields.get(standard_name, standard_name)
+        # Return standard name directly - no conversion to display names
+        # This supports flexible field approach where arbitrary fields can be added
+        return standard_name
     
     def _filter_output(self, result: Dict[str, str]) -> Dict[str, str]:
         """

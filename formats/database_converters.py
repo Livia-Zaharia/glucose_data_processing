@@ -56,7 +56,7 @@ class DatabaseConverter(ABC):
         Returns:
             DataFrame with all default output fields present
         """
-        # Get default output fields (display names) from CSVFormatConverter (config-based or default)
+        # Get default output fields (standard names) from CSVFormatConverter (config-based or default)
         default_fields = CSVFormatConverter.get_default_output_fields()
         
         # Add user_id for multi-user databases (it's added during processing)
@@ -66,17 +66,13 @@ class DatabaseConverter(ABC):
             # user_id is already present, keep it
             pass
         
-        # Add missing columns with appropriate null values
+        # Add missing columns with empty-string placeholders.
+        # This preserves the historical pipeline behavior where "missing" in non-timestamp columns
+        # is represented as "" (not null), which prevents per-field gap logic from exploding
+        # sequences due to sparse event columns.
         for field in required_fields:
             if field not in df.columns:
-                # Determine appropriate null value based on field type
-                # String fields get empty string, numeric fields get null
-                if 'Value' in field or 'grams' in field.lower():
-                    # Numeric fields: use null (will be cast later)
-                    df = df.with_columns(pl.lit(None).cast(pl.Utf8).alias(field))
-                else:
-                    # String fields: use empty string
-                    df = df.with_columns(pl.lit("").alias(field))
+                df = df.with_columns(pl.lit("").alias(field))
         
         # Ensure columns are in the correct order: timestamp first, then other fields
         # Keep any extra columns (like user_id) at the end
@@ -152,38 +148,49 @@ class MonoUserDatabaseConverter(DatabaseConverter):
         if not all_data:
             raise ValueError("No valid data found in CSV files!")
         
-        # Ensure all records have all required fields before DataFrame creation
-        # This prevents Polars from dropping columns when some records don't have them
-        # Use empty strings for all fields to ensure consistent string type
+        # Ensure all records have all required fields before DataFrame creation.
+        # This prevents Polars from dropping columns when some records don't have them.
+        # Use None for missing values to avoid coercing types (e.g. timestamp to string).
         default_fields = CSVFormatConverter.get_default_output_fields()
         for record in all_data:
             for field in default_fields:
                 if field not in record:
-                    # Add missing field with empty string (consistent string type)
                     record[field] = ""
+            # Coerce any non-string values to strings to avoid Polars schema inference conflicts
+            # (some converters may emit numeric types depending on dataset quirks)
+            for k, v in list(record.items()):
+                if v is None or isinstance(v, str):
+                    continue
+                record[k] = str(v)
         
-        # Convert to DataFrame for easier sorting
-        df = pl.DataFrame(all_data)
+        # Convert to DataFrame with an explicit string schema to avoid type inference conflicts
+        # (some fields can appear as numbers in some files and strings in others)
+        all_columns: set[str] = set()
+        for record in all_data:
+            all_columns.update(record.keys())
+        schema_overrides = {col: pl.Utf8 for col in all_columns}
+        df = pl.DataFrame(all_data, schema_overrides=schema_overrides)
         
         # Enforce output schema to ensure all default fields are present
         df = self._enforce_output_schema(df)
         
         # Parse timestamps and sort
         print("Parsing timestamps and sorting...")
-        df = df.with_columns(
-            pl.col('Timestamp (YYYY-MM-DDThh:mm:ss)').map_elements(self._parse_timestamp, return_dtype=pl.Datetime).alias('parsed_timestamp')
-        )
+        # timestamp column now uses standard name and may already be datetime or string
+        # Try to parse if it's a string
+        timestamp_col_type = df['timestamp'].dtype
+        if timestamp_col_type in [pl.Utf8, pl.String]:
+            df = df.with_columns(
+                pl.col('timestamp').map_elements(self._parse_timestamp, return_dtype=pl.Datetime).alias('timestamp')
+            )
         
         # Remove rows where timestamp parsing failed
-        df = df.filter(pl.col('parsed_timestamp').is_not_null())
+        df = df.filter(pl.col('timestamp').is_not_null())
         
         print(f"Records with valid timestamps: {len(df):,}")
         
         # Sort by timestamp (oldest first)
-        df = df.sort('parsed_timestamp')
-        
-        # Rename parsed_timestamp to timestamp for consistency
-        df = df.rename({'parsed_timestamp': 'timestamp'})
+        df = df.sort('timestamp')
         
         # Apply database-specific processing
         df = self._apply_database_specific_processing(df)
@@ -197,9 +204,10 @@ class MonoUserDatabaseConverter(DatabaseConverter):
         print(f"Total records in output: {len(df):,}")
         
         # Show date range
-        if len(df) > 0:
-            first_date = df['Timestamp (YYYY-MM-DDThh:mm:ss)'][0]
-            last_date = df['Timestamp (YYYY-MM-DDThh:mm:ss)'][-1]
+        if len(df) > 0 and 'timestamp' in df.columns:
+            # Format timestamp for display
+            first_date = df['timestamp'][0].strftime('%Y-%m-%dT%H:%M:%S') if hasattr(df['timestamp'][0], 'strftime') else str(df['timestamp'][0])
+            last_date = df['timestamp'][-1].strftime('%Y-%m-%dT%H:%M:%S') if hasattr(df['timestamp'][-1], 'strftime') else str(df['timestamp'][-1])
             print(f"Date range: {first_date} to {last_date}")
 
         return df
@@ -344,38 +352,47 @@ class MultiUserDatabaseConverter(DatabaseConverter):
         if not all_user_data:
             raise ValueError("No valid data found in data files!")
         
-        # Ensure all records have all required fields before DataFrame creation
-        # This prevents Polars from dropping columns when some records don't have them
-        # Use empty strings for all fields to ensure consistent string type
+        # Ensure all records have all required fields before DataFrame creation.
+        # This prevents Polars from dropping columns when some records don't have them.
+        # Use None for missing values to avoid coercing types (e.g. timestamp to string).
         default_fields = CSVFormatConverter.get_default_output_fields()
         for record in all_user_data:
             for field in default_fields:
                 if field not in record:
-                    # Add missing field with empty string (consistent string type)
                     record[field] = ""
+            # Coerce any non-string values to strings to avoid Polars schema inference conflicts
+            for k, v in list(record.items()):
+                if v is None or isinstance(v, str):
+                    continue
+                record[k] = str(v)
         
-        # Convert to DataFrame
-        df = pl.DataFrame(all_user_data)
+        # Convert to DataFrame with an explicit string schema to avoid type inference conflicts
+        all_columns: set[str] = set()
+        for record in all_user_data:
+            all_columns.update(record.keys())
+        schema_overrides = {col: pl.Utf8 for col in all_columns}
+        df = pl.DataFrame(all_user_data, schema_overrides=schema_overrides)
         
         # Enforce output schema to ensure all default fields are present (should already be there, but double-check)
         df = self._enforce_output_schema(df)
         
         # Parse timestamps and sort by user and timestamp
         print("Parsing timestamps and sorting by user and time...")
-        df = df.with_columns(
-            pl.col('Timestamp (YYYY-MM-DDThh:mm:ss)').map_elements(self._parse_timestamp, return_dtype=pl.Datetime).alias('parsed_timestamp')
-        )
+        # timestamp column now uses standard name and may already be datetime or string
+        # Try to parse if it's a string
+        timestamp_col_type = df['timestamp'].dtype
+        if timestamp_col_type in [pl.Utf8, pl.String]:
+            df = df.with_columns(
+                pl.col('timestamp').map_elements(self._parse_timestamp, return_dtype=pl.Datetime).alias('timestamp')
+            )
         
         # Remove rows where timestamp parsing failed
-        df = df.filter(pl.col('parsed_timestamp').is_not_null())
+        df = df.filter(pl.col('timestamp').is_not_null())
         
         print(f"Records with valid timestamps: {len(df):,}")
         
         # Sort by user_id and timestamp (each user's data sorted individually)
-        df = df.sort(['user_id', 'parsed_timestamp'])
-        
-        # Rename parsed_timestamp to timestamp for consistency
-        df = df.rename({'parsed_timestamp': 'timestamp'})
+        df = df.sort(['user_id', 'timestamp'])
         
         # Write to output file
         if output_file:
