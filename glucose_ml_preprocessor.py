@@ -123,7 +123,21 @@ class GlucoseMLPreprocessor:
             config=config
         )
     
-    def __init__(self, expected_interval_minutes: int = 5, small_gap_max_minutes: int = 15, remove_calibration: bool = True, min_sequence_len: int = 200, save_intermediate_files: bool = False, calibration_period_minutes: int = 60*2 + 45, remove_after_calibration_hours: int = 24, high_glucose_value: int = 401, low_glucose_value: int = 39, glucose_only: bool = False, create_fixed_frequency: bool = True, config: Optional[Dict] = None):
+    def __init__(
+        self,
+        expected_interval_minutes: int = 5,
+        small_gap_max_minutes: int = 15,
+        remove_calibration: bool = True,
+        min_sequence_len: int = 200,
+        save_intermediate_files: bool = False,
+        calibration_period_minutes: int = 60*2 + 45,
+        remove_after_calibration_hours: int = 24,
+        high_glucose_value: int = 401,
+        low_glucose_value: int = 39,
+        glucose_only: bool = False,
+        create_fixed_frequency: bool = True,
+        config: Optional[Dict] = None,
+    ):
         """
         Initialize the preprocessor.
         
@@ -437,8 +451,32 @@ class GlucoseMLPreprocessor:
                 # This ensures we detect gaps in all continuous fields, including glucose
                 continuous_fields_to_check = continuous_fields  # Include glucose
             else:
-                # Only glucose - use timestamp-based gaps only (backward compatibility)
+                # Only glucose - base gaps on glucose timestamps (not all rows).
+                # Without this, event timestamps (insulin/carbs/etc) can "bridge" glucose gaps
+                # and reduce the number of detected sequences.
                 continuous_fields_to_check = []
+                if glucose_col in df.columns:
+                    non_null_rows = df.filter(pl.col(glucose_col).is_not_null()).sort('timestamp')
+                    if len(non_null_rows) > 1:
+                        non_null_with_diff = non_null_rows.with_columns(
+                            pl.col('timestamp').diff().dt.total_seconds().alias('field_time_diff')
+                        )
+                        gap_rows = non_null_with_diff.filter(
+                            pl.col('field_time_diff') > self.small_gap_max_seconds
+                        )
+                        if len(gap_rows) > 0:
+                            gap_timestamps = set(gap_rows['timestamp'].to_list())
+                            if gap_timestamps:
+                                df = df.with_columns(
+                                    (
+                                        pl.col(glucose_col).is_not_null()
+                                        & pl.col('timestamp').is_in(list(gap_timestamps))
+                                    ).alias('is_gap_glucose')
+                                ).with_columns(
+                                    (pl.col('is_gap') | pl.col('is_gap_glucose'))
+                                    .fill_null(False)
+                                    .alias('is_gap')
+                                ).drop('is_gap_glucose')
             
             if continuous_fields_to_check:
                 # For each continuous field, check for gaps between consecutive non-null values
@@ -601,8 +639,30 @@ class GlucoseMLPreprocessor:
                     # This ensures we detect gaps in all continuous fields, including glucose
                     continuous_fields_to_check = continuous_fields  # Include glucose
                 else:
-                    # Only glucose - use timestamp-based gaps only (backward compatibility)
+                    # Only glucose - base gaps on glucose timestamps (not all rows). See comment above.
                     continuous_fields_to_check = []
+                    if glucose_col in df.columns:
+                        non_null_rows = df.filter(pl.col(glucose_col).is_not_null()).sort('timestamp')
+                        if len(non_null_rows) > 1:
+                            non_null_with_diff = non_null_rows.with_columns(
+                                pl.col('timestamp').diff().dt.total_seconds().alias('field_time_diff')
+                            )
+                            gap_rows = non_null_with_diff.filter(
+                                pl.col('field_time_diff') > self.small_gap_max_seconds
+                            )
+                            if len(gap_rows) > 0:
+                                gap_timestamps = set(gap_rows['timestamp'].to_list())
+                                if gap_timestamps:
+                                    df = df.with_columns(
+                                        (
+                                            pl.col(glucose_col).is_not_null()
+                                            & pl.col('timestamp').is_in(list(gap_timestamps))
+                                        ).alias('is_gap_glucose')
+                                    ).with_columns(
+                                        (pl.col('is_gap') | pl.col('is_gap_glucose'))
+                                        .fill_null(False)
+                                        .alias('is_gap')
+                                    ).drop('is_gap_glucose')
                 
                 if continuous_fields_to_check:
                     # Recalculate gaps for continuous fields (same logic as before)
@@ -1405,52 +1465,49 @@ class GlucoseMLPreprocessor:
         })
         
         # 1. Interpolate Continuous Fields (Linear interpolation)
-        # Determine which fields to interpolate
+        # Determine continuous fields from schema categories (flexible fields).
+        # If no categories are provided, default to glucose-only (backward compatible).
+        service_fields: List[str] = field_categories_dict.get('service', []).copy() if field_categories_dict else []
         if field_categories_dict is None:
-            # Default: only glucose - use standard field name
-            glucose_col = 'glucose_value_mgdl'
-            continuous_fields = [glucose_col] if glucose_col in seq_data.columns else []
+            continuous_fields = ['glucose_value_mgdl'] if 'glucose_value_mgdl' in seq_data.columns else []
         else:
-            continuous_fields = field_categories_dict.get('continuous', [])
-            # Always include glucose if it exists
-            glucose_col = 'glucose_value_mgdl'
-            if glucose_col in seq_data.columns and glucose_col not in continuous_fields:
-                continuous_fields.append(glucose_col)
-        
-        # Filter to only fields that exist in the DataFrame
-        continuous_fields = [f for f in continuous_fields if f in seq_data.columns]
+            continuous_fields = [f for f in field_categories_dict.get('continuous', []) if f in seq_data.columns]
+            # Always include glucose if it exists (safety)
+            if 'glucose_value_mgdl' in seq_data.columns and 'glucose_value_mgdl' not in continuous_fields:
+                continuous_fields.append('glucose_value_mgdl')
         
         # Interpolate all continuous fields
         result_df = self._interpolate_continuous_fields_linear(fixed_timestamps, seq_data, stats, continuous_fields)
         
         # 2. Shift Events (Nearest Neighbor / Rounding)
-        # Determine which fields are occasional (for shifting)
-        if field_categories_dict is None:
-            # Default: use known occasional fields - use standard field names
-            occasional_fields = ['fast_acting_insulin_u', 'long_acting_insulin_u', 'carb_grams']
-        else:
-            occasional_fields = field_categories_dict.get('occasional', [])
-            # Also include known occasional fields if they exist
-            known_occasional = ['fast_acting_insulin_u', 'long_acting_insulin_u', 'carb_grams']
-            for field in known_occasional:
-                if field in seq_data.columns and field not in occasional_fields:
-                    occasional_fields.append(field)
-        
-        # Also include service fields that should be preserved
-        service_fields = []
+        # Event fields come from schema categories (occasional + selected service fields).
+        # We do NOT guess "event-like continuous" here; if the schema marks insulin as continuous,
+        # it will be interpolated. This matches the schema-driven behavior you want.
+        occasional_fields: List[str] = []
         if field_categories_dict is not None:
-            service_fields = field_categories_dict.get('service', [])
+            occasional_fields = [f for f in field_categories_dict.get('occasional', []) if f in seq_data.columns]
         
-        # Include Event Type and user_id if they exist - use standard field name
-        event_cols = []
+        # Include event_type and user_id if they exist, but do not include columns that are already present
+        # in the fixed-frequency grid/result_df (notably 'timestamp' and 'sequence_id') to avoid duplicate joins.
+        event_cols: List[str] = []
         seen_cols = set()
+        result_existing = set(result_df.columns)  # includes 'timestamp' and 'sequence_id'
         for col in occasional_fields + service_fields + ['event_type', 'user_id']:
+            if col in result_existing:
+                continue
             if col in seq_data.columns and col not in continuous_fields and col not in seen_cols:
                 event_cols.append(col)
                 seen_cols.add(col)
         
         if event_cols:
-            events_df = self._shift_events_rounding(seq_data, event_cols, stats, fixed_timestamps_list)
+            numeric_hint: Optional[set[str]] = set(occasional_fields) if occasional_fields else None
+            events_df = self._shift_events_rounding(
+                seq_data,
+                event_cols,
+                stats,
+                fixed_timestamps_list,
+                numeric_cols_hint=numeric_hint,
+            )
             # Join events with result (left join to keep all fixed timestamps)
             result_df = result_df.join(events_df, on='timestamp', how='left')
         
@@ -1493,7 +1550,7 @@ class GlucoseMLPreprocessor:
         for field in continuous_fields:
             if field not in seq_data.columns:
                 # Field doesn't exist - add as None
-                result_df = result_df.with_columns([pl.lit(None).alias(field)])
+                result_df = result_df.with_columns([pl.lit(None).cast(pl.Float64, strict=False).alias(field)])
                 continue
             
             # Prepare sequence data with original timestamp preserved
@@ -1505,7 +1562,7 @@ class GlucoseMLPreprocessor:
             
             if len(seq_data_ts) == 0:
                 # No non-null values - add as None
-                result_df = result_df.with_columns([pl.lit(None).alias(field)])
+                result_df = result_df.with_columns([pl.lit(None).cast(pl.Float64, strict=False).alias(field)])
                 continue
             
             # Create safe field name for temporary columns
@@ -1576,7 +1633,14 @@ class GlucoseMLPreprocessor:
         
         return result_df
 
-    def _shift_events_rounding(self, seq_data: pl.DataFrame, cols: List[str], stats: Dict[str, Any], fixed_timestamps_list: List[datetime]) -> pl.DataFrame:
+    def _shift_events_rounding(
+        self,
+        seq_data: pl.DataFrame,
+        cols: List[str],
+        stats: Dict[str, Any],
+        fixed_timestamps_list: List[datetime],
+        numeric_cols_hint: Optional[set[str]] = None,
+    ) -> pl.DataFrame:
         """
         Shift events to nearest grid point from the fixed timestamps list.
         Aggregates multiple events falling into the same bin (sum for numeric, first for string).
@@ -1623,10 +1687,27 @@ class GlucoseMLPreprocessor:
             pl.col('fixed_timestamp').alias('timestamp')
         ]).drop('fixed_timestamp')
         
-        # Cast numeric columns to Float64 before aggregation to ensure proper type handling
-        # This is critical because values might be strings from CSV or have inconsistent types
-        # Build list of numeric columns using standard field names
-        numeric_cols = ['carb_grams', 'fast_acting_insulin_u', 'long_acting_insulin_u']
+        # Determine numeric columns in a stable way.
+        # Prefer a schema/category-driven hint so column dtypes don't vary across sequences.
+        numeric_cols: List[str] = []
+        if numeric_cols_hint is not None:
+            numeric_cols = [
+                c for c in cols
+                if c in numeric_cols_hint and c not in {'event_type', 'user_id'} and not c.endswith('_id')
+            ]
+        else:
+            # Fallback: infer from data (may vary per sequence; use only when no hint is available)
+            for c in cols:
+                if c in {'event_type', 'user_id'} or c.endswith('_id'):
+                    continue
+                try:
+                    any_numeric = seq_data.select(
+                        pl.col(c).cast(pl.Float64, strict=False).is_not_null().any()
+                    ).item()
+                except Exception:
+                    any_numeric = False
+                if any_numeric:
+                    numeric_cols.append(c)
         cast_exprs = []
         for col in cols:
             if col in numeric_cols:
@@ -1646,11 +1727,9 @@ class GlucoseMLPreprocessor:
         if 'insulin_shifted_records' not in stats:
             stats['insulin_shifted_records'] = 0
             
-        # Update stats using standard field names
+        # Update stats without hardcoding specific field names
         for col in cols:
-            if col == 'carb_grams':
-                stats['carb_shifted_records'] += events_shifted.filter(pl.col(col).is_not_null()).height
-            elif 'insulin' in col.lower():
+            if col in numeric_cols:
                 stats['insulin_shifted_records'] += events_shifted.filter(pl.col(col).is_not_null()).height
         
         # Define aggregations
@@ -1673,6 +1752,20 @@ class GlucoseMLPreprocessor:
         
         # Group and aggregate by shifted timestamp
         shifted = events_shifted.group_by('timestamp').agg(agg_exprs)
+
+        # Stabilize dtypes across sequences to avoid concat errors:
+        # - numeric cols -> Float64 (even if all-null in a sequence)
+        # - non-numeric cols -> Utf8 (even if all-null in a sequence)
+        stabilize_exprs = []
+        for c in cols:
+            if c not in shifted.columns:
+                continue
+            if c in numeric_cols:
+                stabilize_exprs.append(pl.col(c).cast(pl.Float64, strict=False).alias(c))
+            else:
+                stabilize_exprs.append(pl.col(c).cast(pl.Utf8, strict=False).alias(c))
+        if stabilize_exprs:
+            shifted = shifted.with_columns(stabilize_exprs)
         
         return shifted
 
@@ -1738,31 +1831,54 @@ class GlucoseMLPreprocessor:
         """
         print("Preparing final ML dataset...")
         
-        cast_exprs = []
-        
-        # Keep timestamp in output, but serialize to ISO-like string for CSV
+        cast_exprs: List[pl.Expr] = []
+
+        # Stable, comparable output dtypes for research checkpoints:
+        # Keep behavior aligned with the original "fixed fields" pipeline:
+        # - sequence_id/user_id: Int64 (if present)
+        # - timestamp: Utf8 (ISO-like) for CSV
+        # - glucose_value_mgdl: Float64
+        # - carb_grams: Float64 (if present)
+        # - fast_acting_insulin_u/long_acting_insulin_u/event_type: Utf8
+        # IMPORTANT: do NOT fill nulls with "" here; we want null-vs-empty behavior unchanged.
+        if 'sequence_id' in df.columns:
+            cast_exprs.append(pl.col('sequence_id').cast(pl.Int64, strict=False).alias('sequence_id'))
+        if 'user_id' in df.columns:
+            cast_exprs.append(pl.col('user_id').cast(pl.Int64, strict=False).alias('user_id'))
+
         if 'timestamp' in df.columns:
             if df.schema.get('timestamp') == pl.Datetime:
                 cast_exprs.append(pl.col('timestamp').dt.strftime('%Y-%m-%dT%H:%M:%S').alias('timestamp'))
             else:
-                # If timestamp is already a string, leave as-is
                 cast_exprs.append(pl.col('timestamp').cast(pl.Utf8, strict=False).alias('timestamp'))
-        
-        # Convert known numeric fields to Float64 if they exist
-        numeric_fields = ['glucose_value_mgdl', 'fast_acting_insulin_u', 'long_acting_insulin_u', 'carb_grams']
-        for field in numeric_fields:
-            if field in df.columns:
-                cast_exprs.append(pl.col(field).cast(pl.Float64, strict=False))
-        
+
+        if 'glucose_value_mgdl' in df.columns:
+            cast_exprs.append(pl.col('glucose_value_mgdl').cast(pl.Float64, strict=False).alias('glucose_value_mgdl'))
+        if 'carb_grams' in df.columns:
+            cast_exprs.append(pl.col('carb_grams').cast(pl.Float64, strict=False).alias('carb_grams'))
+        if 'fast_acting_insulin_u' in df.columns:
+            cast_exprs.append(pl.col('fast_acting_insulin_u').cast(pl.Utf8, strict=False).alias('fast_acting_insulin_u'))
+        if 'long_acting_insulin_u' in df.columns:
+            cast_exprs.append(pl.col('long_acting_insulin_u').cast(pl.Utf8, strict=False).alias('long_acting_insulin_u'))
+        if 'event_type' in df.columns:
+            cast_exprs.append(pl.col('event_type').cast(pl.Utf8, strict=False).alias('event_type'))
+
         if cast_exprs:
             df = df.with_columns(cast_exprs)
-        
-        # Reorder columns with sequence_id first, then timestamp (if present)
-        ml_columns: List[str] = ['sequence_id']
-        if 'timestamp' in df.columns:
-            ml_columns.append('timestamp')
-        ml_columns.extend([col for col in df.columns if col not in set(ml_columns)])
-        ml_df = df.select(ml_columns)
+
+        # Stable column order: keep the historical core ordering first, then any extra fields
+        preferred = [
+            'sequence_id',
+            'timestamp',
+            'glucose_value_mgdl',
+            'fast_acting_insulin_u',
+            'long_acting_insulin_u',
+            'carb_grams',
+            'event_type',
+            'user_id',
+        ]
+        ordered = [c for c in preferred if c in df.columns] + [c for c in df.columns if c not in set(preferred)]
+        ml_df = df.select(ordered)
         
         return ml_df
     
@@ -1865,6 +1981,8 @@ class GlucoseMLPreprocessor:
         db_detector = DatabaseDetector()
         database_type = db_detector.detect_database_type(csv_folder)
         field_categories_dict = self.extract_field_categories(database_type) if database_type != 'unknown' else None
+        # Keep for downstream flexible-field casting/statistics
+        self._field_categories_dict = field_categories_dict
         
         # Step 1: Consolidate CSV files (mandatory step)
         if self.save_intermediate_files:
@@ -1919,7 +2037,7 @@ class GlucoseMLPreprocessor:
         # Step 5: Create fixed-frequency data (if enabled)
         if self.create_fixed_frequency:
             print("STEP 5: Creating fixed-frequency data...")
-            df, fixed_freq_stats = self.create_fixed_frequency_data(df)
+            df, fixed_freq_stats = self.create_fixed_frequency_data(df, field_categories_dict)
             print("Fixed-frequency data creation complete")
             
             if self.save_intermediate_files:

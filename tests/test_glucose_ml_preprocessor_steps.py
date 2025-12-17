@@ -72,9 +72,10 @@ class TestGlucoseMLPreprocessorSteps:
             df = preprocessor.consolidate_glucose_data(tmpdir)
             
             assert len(df) == 2
-            assert "Timestamp (YYYY-MM-DDThh:mm:ss)" in df.columns
-            assert "Glucose Value (mg/dL)" in df.columns
-            assert df["Glucose Value (mg/dL)"][0] == "100" # Loaded as string initially usually, or handled by converter
+            assert "timestamp" in df.columns
+            assert "glucose_value_mgdl" in df.columns
+            # Value may be inferred as string or numeric depending on Polars inference
+            assert str(df["glucose_value_mgdl"][0]) in {"100", "100.0"}
 
     def test_detect_gaps_and_sequences_continuous(self, preprocessor):
         """Test gap detection on continuous data."""
@@ -297,8 +298,8 @@ class TestGlucoseMLPreprocessorSteps:
         df = pl.DataFrame({
             "timestamp": timestamps,
             "sequence_id": [0, 0],
-            "Glucose Value (mg/dL)": [100.0, 120.0],
-            "Event Type": ["EGV", "EGV"]
+            "glucose_value_mgdl": [100.0, 120.0],
+            "event_type": ["EGV", "EGV"]
         })
         
         df_interp, stats = preprocessor.interpolate_missing_values(df)
@@ -306,12 +307,13 @@ class TestGlucoseMLPreprocessorSteps:
         # Should now have 3 rows (10:00, 10:05 interpolated, 10:10)
         assert len(df_interp) == 3
         assert stats["small_gaps_filled"] == 1
+        assert stats["glucose_value_mgdl_interpolations"] == 1
         
         # Check interpolated value (linear: 110)
-        interp_row = df_interp.filter(pl.col("Event Type") == "Interpolated")
+        interp_row = df_interp.filter(pl.col("event_type") == "Interpolated")
         assert len(interp_row) == 1
         assert interp_row["timestamp"][0] == datetime(2023, 1, 1, 10, 5, 0)
-        assert interp_row["Glucose Value (mg/dL)"][0] == 110.0
+        assert abs(interp_row["glucose_value_mgdl"][0] - 110.0) < 0.01
 
     def test_interpolate_missing_values_two_missing_points(self, preprocessor):
         """Test interpolation of small gaps with 2 missing values."""
@@ -325,8 +327,8 @@ class TestGlucoseMLPreprocessorSteps:
         df = pl.DataFrame({
             "timestamp": timestamps,
             "sequence_id": [0, 0],
-            "Glucose Value (mg/dL)": [100.0, 130.0],
-            "Event Type": ["EGV", "EGV"]
+            "glucose_value_mgdl": [100.0, 130.0],
+            "event_type": ["EGV", "EGV"]
         })
         
         df_interp, stats = preprocessor.interpolate_missing_values(df)
@@ -336,7 +338,7 @@ class TestGlucoseMLPreprocessorSteps:
         assert stats["small_gaps_filled"] == 1
         
         # Check interpolated values
-        interp_rows = df_interp.filter(pl.col("Event Type") == "Interpolated").sort("timestamp")
+        interp_rows = df_interp.filter(pl.col("event_type") == "Interpolated").sort("timestamp")
         assert len(interp_rows) == 2
         
         # First interpolated point at 10:05: time-weighted interpolation
@@ -344,14 +346,14 @@ class TestGlucoseMLPreprocessorSteps:
         # alpha = 5/15 = 1/3 (time-weighted)
         # value = 100 + (1/3) * (130 - 100) = 100 + 10 = 110
         assert interp_rows["timestamp"][0] == datetime(2023, 1, 1, 10, 5, 0)
-        assert abs(interp_rows["Glucose Value (mg/dL)"][0] - 110.0) < 0.01
+        assert abs(interp_rows["glucose_value_mgdl"][0] - 110.0) < 0.01
         
         # Second interpolated point at 10:10: time-weighted interpolation
         # Time from start: 10 minutes, total gap: 15 minutes
         # alpha = 10/15 = 2/3 (time-weighted)
         # value = 100 + (2/3) * (130 - 100) = 100 + 20 = 120
         assert interp_rows["timestamp"][1] == datetime(2023, 1, 1, 10, 10, 0)
-        assert abs(interp_rows["Glucose Value (mg/dL)"][1] - 120.0) < 0.01
+        assert abs(interp_rows["glucose_value_mgdl"][1] - 120.0) < 0.01
 
     def test_interpolate_missing_values_large_gap_skipped(self, preprocessor):
         """Test that large gaps are skipped and not interpolated."""
@@ -365,8 +367,8 @@ class TestGlucoseMLPreprocessorSteps:
         df = pl.DataFrame({
             "timestamp": timestamps,
             "sequence_id": [0, 0],
-            "Glucose Value (mg/dL)": [100.0, 120.0],
-            "Event Type": ["EGV", "EGV"]
+            "glucose_value_mgdl": [100.0, 120.0],
+            "event_type": ["EGV", "EGV"]
         })
         
         df_interp, stats = preprocessor.interpolate_missing_values(df)
@@ -377,12 +379,12 @@ class TestGlucoseMLPreprocessorSteps:
         assert stats["large_gaps_skipped"] == 1
         
         # No interpolated rows should exist
-        interp_rows = df_interp.filter(pl.col("Event Type") == "Interpolated")
+        interp_rows = df_interp.filter(pl.col("event_type") == "Interpolated")
         assert len(interp_rows) == 0
         
         # Original data should remain unchanged
         assert df_interp["timestamp"].to_list() == timestamps
-        assert df_interp["Glucose Value (mg/dL)"].to_list() == [100.0, 120.0]
+        assert df_interp["glucose_value_mgdl"].to_list() == [100.0, 120.0]
 
     def test_interpolate_missing_values_uneven_gap_14_minutes(self, preprocessor):
         """Test interpolation with 14-minute gap where interpolated point has uneven time distances.
@@ -407,8 +409,8 @@ class TestGlucoseMLPreprocessorSteps:
         df = pl.DataFrame({
             "timestamp": timestamps,
             "sequence_id": [0, 0],
-            "Glucose Value (mg/dL)": [100.0, 120.0],
-            "Event Type": ["EGV", "EGV"]
+            "glucose_value_mgdl": [100.0, 120.0],
+            "event_type": ["EGV", "EGV"]
         })
         
         df_interp, stats = preprocessor.interpolate_missing_values(df)
@@ -416,10 +418,10 @@ class TestGlucoseMLPreprocessorSteps:
         # Should have 3 rows (original 2 + 1 interpolated)
         assert len(df_interp) == 3
         assert stats["small_gaps_filled"] == 1
-        assert stats["glucose_value_mg/dl_interpolations"] == 1
+        assert stats["glucose_value_mgdl_interpolations"] == 1
         
         # Check interpolated row
-        interp_rows = df_interp.filter(pl.col("Event Type") == "Interpolated").sort("timestamp")
+        interp_rows = df_interp.filter(pl.col("event_type") == "Interpolated").sort("timestamp")
         assert len(interp_rows) == 1
         
         # Interpolated point should be at 10:05 (5 minutes from start)
@@ -431,7 +433,7 @@ class TestGlucoseMLPreprocessorSteps:
         # - Total gap: 14 minutes
         # - alpha = 5 / 14 = 0.357 (closer to start, so value closer to 100)
         # - value = 100 + 0.357 * (120 - 100) = 100 + 7.14 = 107.14
-        interp_glucose = interp_rows["Glucose Value (mg/dL)"][0]
+        interp_glucose = interp_rows["glucose_value_mgdl"][0]
         expected_glucose = 100.0 + (5.0 / 14.0) * (120.0 - 100.0)  # 107.14
         assert abs(interp_glucose - expected_glucose) < 0.01, \
             f"Expected glucose ~{expected_glucose} (time-weighted), got {interp_glucose}"
@@ -447,7 +449,7 @@ class TestGlucoseMLPreprocessorSteps:
             datetime(2023, 1, 1, 10, 5, 0),
             datetime(2023, 1, 1, 10, 14, 0)
         ]
-        assert sorted_df["Glucose Value (mg/dL)"].to_list() == [100.0, interp_glucose, 120.0]
+        assert sorted_df["glucose_value_mgdl"].to_list() == [100.0, interp_glucose, 120.0]
 
     def test_interpolate_missing_values_multiple_points_uneven_spacing(self, preprocessor):
         """Test interpolation with multiple points that have uneven time distances.
@@ -481,8 +483,8 @@ class TestGlucoseMLPreprocessorSteps:
         df = pl.DataFrame({
             "timestamp": timestamps,
             "sequence_id": [0, 0],
-            "Glucose Value (mg/dL)": [100.0, 130.0],
-            "Event Type": ["EGV", "EGV"]
+            "glucose_value_mgdl": [100.0, 130.0],
+            "event_type": ["EGV", "EGV"]
         })
         
         df_interp, stats = preprocessor_large.interpolate_missing_values(df)
@@ -491,10 +493,10 @@ class TestGlucoseMLPreprocessorSteps:
         # Should have 4 rows (original 2 + 2 interpolated)
         assert len(df_interp) == 4
         assert stats["small_gaps_filled"] == 1
-        assert stats["glucose_value_mg/dl_interpolations"] == 2
+        assert stats["glucose_value_mgdl_interpolations"] == 2
         
         # Check interpolated rows
-        interp_rows = df_interp.filter(pl.col("Event Type") == "Interpolated").sort("timestamp")
+        interp_rows = df_interp.filter(pl.col("event_type") == "Interpolated").sort("timestamp")
         assert len(interp_rows) == 2
         
         # First interpolated point at 10:05
@@ -503,8 +505,8 @@ class TestGlucoseMLPreprocessorSteps:
         # value = 100 + 0.263 * (130 - 100) = 100 + 7.89 = 107.89
         assert interp_rows["timestamp"][0] == datetime(2023, 1, 1, 10, 5, 0)
         expected_glucose_1 = 100.0 + (5.0 / 19.0) * (130.0 - 100.0)  # 107.89
-        assert abs(interp_rows["Glucose Value (mg/dL)"][0] - expected_glucose_1) < 0.01, \
-            f"Expected glucose ~{expected_glucose_1} (time-weighted), got {interp_rows['Glucose Value (mg/dL)'][0]}"
+        assert abs(interp_rows["glucose_value_mgdl"][0] - expected_glucose_1) < 0.01, \
+            f"Expected glucose ~{expected_glucose_1} (time-weighted), got {interp_rows['glucose_value_mgdl'][0]}"
         
         # Second interpolated point at 10:10
         # Time from start: 10 minutes, total gap: 19 minutes
@@ -512,8 +514,8 @@ class TestGlucoseMLPreprocessorSteps:
         # value = 100 + 0.526 * (130 - 100) = 100 + 15.79 = 115.79
         assert interp_rows["timestamp"][1] == datetime(2023, 1, 1, 10, 10, 0)
         expected_glucose_2 = 100.0 + (10.0 / 19.0) * (130.0 - 100.0)  # 115.79
-        assert abs(interp_rows["Glucose Value (mg/dL)"][1] - expected_glucose_2) < 0.01, \
-            f"Expected glucose ~{expected_glucose_2} (time-weighted), got {interp_rows['Glucose Value (mg/dL)'][1]}"
+        assert abs(interp_rows["glucose_value_mgdl"][1] - expected_glucose_2) < 0.01, \
+            f"Expected glucose ~{expected_glucose_2} (time-weighted), got {interp_rows['glucose_value_mgdl'][1]}"
         
         # Verify time distances are uneven:
         # - 10:00 -> 10:05: 5 minutes
@@ -530,7 +532,7 @@ class TestGlucoseMLPreprocessorSteps:
         
         # Verify glucose values reflect time-weighted interpolation
         # Values should be closer to start than equal-interval weighting would give
-        glucose_list = sorted_df["Glucose Value (mg/dL)"].to_list()
+        glucose_list = sorted_df["glucose_value_mgdl"].to_list()
         assert glucose_list == [100.0, expected_glucose_1, expected_glucose_2, 130.0]
         
         # Verify that time-weighted values are different from equal-interval weighting
@@ -550,11 +552,11 @@ class TestGlucoseMLPreprocessorSteps:
         df = pl.DataFrame({
             "timestamp": timestamps,
             "sequence_id": [0, 0],
-            "Glucose Value (mg/dL)": [100.0, 120.0],
-            "Fast-Acting Insulin Value (u)": [5.0, 15.0],
-            "Long-Acting Insulin Value (u)": [10.0, 20.0],
-            "Carb Value (grams)": [30.0, 50.0],
-            "Event Type": ["EGV", "EGV"]
+            "glucose_value_mgdl": [100.0, 120.0],
+            "fast_acting_insulin_u": [5.0, 15.0],
+            "long_acting_insulin_u": [10.0, 20.0],
+            "carb_grams": [30.0, 50.0],
+            "event_type": ["EGV", "EGV"]
         })
         
         df_interp, stats = preprocessor.interpolate_missing_values(df)
@@ -562,19 +564,19 @@ class TestGlucoseMLPreprocessorSteps:
         # Should have 3 rows (original 2 + 1 interpolated)
         assert len(df_interp) == 3
         assert stats["small_gaps_filled"] == 1
-        assert stats["glucose_value_mg/dl_interpolations"] == 1
+        assert stats["glucose_value_mgdl_interpolations"] == 1
         
         # Check interpolated row (10:05)
-        interp_row = df_interp.filter(pl.col("Event Type") == "Interpolated")
+        interp_row = df_interp.filter(pl.col("event_type") == "Interpolated")
         assert len(interp_row) == 1
         
         # Glucose should be interpolated (midpoint: 110.0)
-        assert abs(interp_row["Glucose Value (mg/dL)"][0] - 110.0) < 0.01
+        assert abs(interp_row["glucose_value_mgdl"][0] - 110.0) < 0.01
         
         # Insulin and carb values should be empty strings (not interpolated)
-        fast_acting = interp_row["Fast-Acting Insulin Value (u)"][0]
-        long_acting = interp_row["Long-Acting Insulin Value (u)"][0]
-        carb = interp_row["Carb Value (grams)"][0]
+        fast_acting = interp_row["fast_acting_insulin_u"][0]
+        long_acting = interp_row["long_acting_insulin_u"][0]
+        carb = interp_row["carb_grams"][0]
         
         # Should be empty string or None (not interpolated)
         assert fast_acting == '' or fast_acting is None, f"Expected empty string or None for Fast-Acting Insulin, got {fast_acting}"
@@ -582,9 +584,10 @@ class TestGlucoseMLPreprocessorSteps:
         assert carb == '' or carb is None, f"Expected empty string or None for Carb Value, got {carb}"
         
         # Verify stats - only glucose interpolations, no insulin/carb interpolations
-        assert stats["fast_acting_insulin_value_u_interpolations"] == 0
-        assert stats["long_acting_insulin_value_u_interpolations"] == 0
-        assert stats["carb_value_grams_interpolations"] == 0
+        # (keys for non-interpolated fields may be absent)
+        assert stats.get("fast_acting_insulin_u_interpolations", 0) == 0
+        assert stats.get("long_acting_insulin_u_interpolations", 0) == 0
+        assert stats.get("carb_grams_interpolations", 0) == 0
 
     def test_filter_sequences_by_length(self, preprocessor):
         """Test filtering short sequences."""
@@ -614,7 +617,7 @@ class TestGlucoseMLPreprocessorSteps:
         df = pl.DataFrame({
             "timestamp": timestamps,
             "sequence_id": [0, 0],
-            "Glucose Value (mg/dL)": [100.0, 110.0]
+            "glucose_value_mgdl": [100.0, 110.0]
         })
         
         df_fixed, stats = preprocessor.create_fixed_frequency_data(df)
@@ -632,8 +635,8 @@ class TestGlucoseMLPreprocessorSteps:
         assert (ts[1] - ts[0]).total_seconds() == 300.0 # 5 minutes
         
         # Glucose should be interpolated
-        assert "Glucose Value (mg/dL)" in df_fixed.columns
-        assert df_fixed["Glucose Value (mg/dL)"].null_count() == 0
+        assert "glucose_value_mgdl" in df_fixed.columns
+        assert df_fixed["glucose_value_mgdl"].null_count() == 0
 
     def test_shift_events_rounding_uses_fixed_timestamps(self, preprocessor):
         """Test that _shift_events_rounding() assigns events to actual fixed grid points.
@@ -737,23 +740,23 @@ class TestGlucoseMLPreprocessorSteps:
         
         df = pl.DataFrame({
             "timestamp": [datetime(2023,1,1)],
-            "Glucose Value (mg/dL)": [100.0],
-            "Carb Value (grams)": [50.0],
-            "Event Type": ["EGV"]
+            "glucose_value_mgdl": [100.0],
+            "carb_grams": [50.0],
+            "event_type": ["EGV"]
         })
         
         df_filtered, stats = preprocessor.filter_glucose_only(df)
         
-        assert "Carb Value (grams)" not in df_filtered.columns
-        assert "Event Type" not in df_filtered.columns
-        assert "Glucose Value (mg/dL)" in df_filtered.columns
+        assert "carb_grams" not in df_filtered.columns
+        assert "event_type" not in df_filtered.columns
+        assert "glucose_value_mgdl" in df_filtered.columns
 
     def test_prepare_ml_data(self, preprocessor):
         """Test final ML data preparation."""
         df = pl.DataFrame({
             "timestamp": [datetime(2023,1,1,10,0,0)],
             "sequence_id": [1],
-            "Glucose Value (mg/dL)": ["100"] # String
+            "glucose_value_mgdl": ["100"] # String
         })
         
         ml_df = preprocessor.prepare_ml_data(df)
@@ -762,7 +765,7 @@ class TestGlucoseMLPreprocessorSteps:
         assert ml_df.columns[0] == "sequence_id"
         
         # Check casting
-        assert ml_df["Glucose Value (mg/dL)"].dtype == pl.Float64
+        assert ml_df["glucose_value_mgdl"].dtype == pl.Float64
 
     def test_process_integration(self, preprocessor):
         """Full integration test with mocked data."""

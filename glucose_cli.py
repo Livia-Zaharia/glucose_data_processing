@@ -11,7 +11,12 @@ from pathlib import Path
 from typing import Optional, List
 import sys
 from glucose_ml_preprocessor import GlucoseMLPreprocessor, print_statistics
-from cycle_data_parser import CycleDataParser
+
+# Optional cycle data parser (research-phase convenience)
+try:
+    from cycle_data_parser import CycleDataParser
+except ImportError:
+    CycleDataParser = None
 
 def main(
     input_folders: List[str] = typer.Argument(
@@ -194,6 +199,9 @@ def main(
         # Parse cycle data if provided
         cycle_parser = None
         if cycle_data_file:
+            if CycleDataParser is None:
+                typer.echo("❌ Error: cycle_data_parser module not found. Cannot process --cycle.", err=True)
+                raise typer.Exit(1)
             cycle_path_obj = Path(cycle_data_file)
             if not cycle_path_obj.exists():
                 typer.echo(f"❌ Error: Cycle data file '{cycle_data_file}' does not exist", err=True)

@@ -37,19 +37,22 @@ class TestFixedFrequencyLogic:
                 datetime(2023, 1, 1, 10, 10, 0) # Anchor end
             ],
             "sequence_id": [0, 0, 0, 0],
-            "Glucose Value (mg/dL)": [100.0, 100.0, 100.0, 100.0],
-            "Fast-Acting Insulin Value (u)": [None, 1.0, 2.0, None]
+            "glucose_value_mgdl": [100.0, 100.0, 100.0, 100.0],
+            "fast_acting_insulin_u": [None, 1.0, 2.0, None]
         })
         
-        df_fixed, _ = preprocessor.create_fixed_frequency_data(df)
+        df_fixed, _ = preprocessor.create_fixed_frequency_data(
+            df,
+            {"continuous": ["glucose_value_mgdl"], "occasional": ["fast_acting_insulin_u"], "service": ["event_type"]},
+        )
         
         # Check 10:00
         row_00 = df_fixed.filter(pl.col("timestamp") == datetime(2023, 1, 1, 10, 0, 0))
-        assert row_00["Fast-Acting Insulin Value (u)"][0] == 1.0, "10:01 event should shift to 10:00"
+        assert row_00["fast_acting_insulin_u"][0] == 1.0, "10:01 event should shift to 10:00"
         
         # Check 10:05
         row_05 = df_fixed.filter(pl.col("timestamp") == datetime(2023, 1, 1, 10, 5, 0))
-        assert row_05["Fast-Acting Insulin Value (u)"][0] == 2.0, "10:04 event should shift to 10:05"
+        assert row_05["fast_acting_insulin_u"][0] == 2.0, "10:04 event should shift to 10:05"
 
     def test_insulin_duplication_bug(self, preprocessor):
         """Test if a single event is duplicated to two fixed points."""
@@ -66,14 +69,17 @@ class TestFixedFrequencyLogic:
                 datetime(2023, 1, 1, 10, 10, 0)
             ],
             "sequence_id": [0, 0, 0],
-            "Glucose Value (mg/dL)": [100.0, 100.0, 100.0],
-            "Fast-Acting Insulin Value (u)": [None, 5.0, None]
+            "glucose_value_mgdl": [100.0, 100.0, 100.0],
+            "fast_acting_insulin_u": [None, 5.0, None]
         })
         
-        df_fixed, _ = preprocessor.create_fixed_frequency_data(df)
+        df_fixed, _ = preprocessor.create_fixed_frequency_data(
+            df,
+            {"continuous": ["glucose_value_mgdl"], "occasional": ["fast_acting_insulin_u"], "service": ["event_type"]},
+        )
         
         # Get insulin values
-        insulin_values = df_fixed.filter(pl.col("Fast-Acting Insulin Value (u)").is_not_null())
+        insulin_values = df_fixed.filter(pl.col("fast_acting_insulin_u").is_not_null())
         
         # Should only be present once
         assert len(insulin_values) == 1, f"Insulin event duplicated! Found at: {insulin_values['timestamp'].to_list()}"
@@ -94,14 +100,17 @@ class TestFixedFrequencyLogic:
                 datetime(2023, 1, 1, 10, 10, 0)
             ],
             "sequence_id": [0, 0, 0, 0],
-            "Glucose Value (mg/dL)": [100.0, 100.0, 100.0, 100.0],
-            "Fast-Acting Insulin Value (u)": [None, 1.0, 2.0, None]
+            "glucose_value_mgdl": [100.0, 100.0, 100.0, 100.0],
+            "fast_acting_insulin_u": [None, 1.0, 2.0, None]
         })
         
-        df_fixed, _ = preprocessor.create_fixed_frequency_data(df)
+        df_fixed, _ = preprocessor.create_fixed_frequency_data(
+            df,
+            {"continuous": ["glucose_value_mgdl"], "occasional": ["fast_acting_insulin_u"], "service": ["event_type"]},
+        )
         
         row_00 = df_fixed.filter(pl.col("timestamp") == datetime(2023, 1, 1, 10, 0, 0))
-        val = row_00["Fast-Acting Insulin Value (u)"][0]
+        val = row_00["fast_acting_insulin_u"][0]
         
         assert val is not None
         assert val == 3.0, f"Should sum colliding insulin events. Got {val}"
@@ -121,20 +130,23 @@ class TestFixedFrequencyLogic:
                 datetime(2023, 1, 1, 10, 10, 0)
             ],
             "sequence_id": [0, 0, 0, 0],
-            "Glucose Value (mg/dL)": [100.0, 100.0, 100.0, 100.0],
-            "Carb Value (grams)": [None, 50.0, None, None],
-            "Fast-Acting Insulin Value (u)": [None, None, 5.0, None]
+            "glucose_value_mgdl": [100.0, 100.0, 100.0, 100.0],
+            "carb_grams": [None, 50.0, None, None],
+            "fast_acting_insulin_u": [None, None, 5.0, None]
         })
         
-        df_fixed, _ = preprocessor.create_fixed_frequency_data(df)
+        df_fixed, _ = preprocessor.create_fixed_frequency_data(
+            df,
+            {"continuous": ["glucose_value_mgdl"], "occasional": ["carb_grams", "fast_acting_insulin_u"], "service": ["event_type"]},
+        )
         
         row_00 = df_fixed.filter(pl.col("timestamp") == datetime(2023, 1, 1, 10, 0, 0))
-        assert row_00["Carb Value (grams)"][0] == 50.0
-        assert row_00["Fast-Acting Insulin Value (u)"][0] is None
+        assert row_00["carb_grams"][0] == 50.0
+        assert row_00["fast_acting_insulin_u"][0] is None
         
         row_05 = df_fixed.filter(pl.col("timestamp") == datetime(2023, 1, 1, 10, 5, 0))
-        assert row_05["Carb Value (grams)"][0] is None
-        assert row_05["Fast-Acting Insulin Value (u)"][0] == 5.0
+        assert row_05["carb_grams"][0] is None
+        assert row_05["fast_acting_insulin_u"][0] == 5.0
 
     def test_glucose_interpolation_completeness(self, preprocessor):
         """Verify glucose is interpolated for every fixed point."""
@@ -151,17 +163,17 @@ class TestFixedFrequencyLogic:
                 datetime(2023, 1, 1, 10, 10, 0)
             ],
             "sequence_id": [0, 0],
-            "Glucose Value (mg/dL)": [100.0, 110.0]
+            "glucose_value_mgdl": [100.0, 110.0]
         })
         
         df_fixed, _ = preprocessor.create_fixed_frequency_data(df)
         
         assert len(df_fixed) == 3 # 00, 05, 10
         
-        vals = df_fixed["Glucose Value (mg/dL)"].to_list()
+        vals = df_fixed["glucose_value_mgdl"].to_list()
         # assert vals[1] == 105.0 # This fails because currently it's nearest neighbor
         assert vals[1] is not None
-        assert df_fixed["Glucose Value (mg/dL)"].null_count() == 0
+        assert df_fixed["glucose_value_mgdl"].null_count() == 0
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

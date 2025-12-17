@@ -27,23 +27,22 @@ def create_test_dataframe(
     occasional_field_values: list = None,
     service_field_values: list = None
 ) -> pl.DataFrame:
-    """Create a test DataFrame with specified values."""
+    """Create a test DataFrame with specified values using STANDARD field names."""
     data = {
         'timestamp': timestamps,
-        'Glucose Value (mg/dL)': glucose_values,
+        'glucose_value_mgdl': glucose_values,
         'sequence_id': [1] * len(timestamps),
-        'Timestamp (YYYY-MM-DDThh:mm:ss)': [ts.strftime('%Y-%m-%dT%H:%M:%S') for ts in timestamps],
-        'Event Type': ['EGV'] * len(timestamps)
+        'event_type': ['EGV'] * len(timestamps)
     }
     
     if continuous_field1_values is not None:
-        data['Continuous Field 1'] = continuous_field1_values
+        data['continuous_field_1'] = continuous_field1_values
     if continuous_field2_values is not None:
-        data['Continuous Field 2'] = continuous_field2_values
+        data['continuous_field_2'] = continuous_field2_values
     if occasional_field_values is not None:
-        data['Occasional Field'] = occasional_field_values
+        data['occasional_field'] = occasional_field_values
     if service_field_values is not None:
-        data['Service Field'] = service_field_values
+        data['service_field'] = service_field_values
     
     df = pl.DataFrame(data)
     # Timestamps are already datetime objects, no conversion needed
@@ -77,9 +76,9 @@ def test_multiple_continuous_fields_same_points():
     )
     
     field_categories = {
-        'continuous': ['Glucose Value (mg/dL)', 'Continuous Field 1', 'Continuous Field 2'],
-        'occasional': ['Occasional Field'],
-        'service': ['Service Field', 'Event Type']
+        'continuous': ['glucose_value_mgdl', 'continuous_field_1', 'continuous_field_2'],
+        'occasional': ['occasional_field'],
+        'service': ['service_field', 'event_type']
     }
     
     result, stats = preprocessor.interpolate_missing_values(df, field_categories)
@@ -94,27 +93,27 @@ def test_multiple_continuous_fields_same_points():
     assert len(interpolated_row) == 1, "Should have one interpolated row"
     
     # Glucose should be interpolated: 110 + 0.5 * (130 - 110) = 120
-    interpolated_glucose = interpolated_row['Glucose Value (mg/dL)'][0]
+    interpolated_glucose = interpolated_row['glucose_value_mgdl'][0]
     assert abs(interpolated_glucose - 120.0) < 0.01, f"Expected glucose ~120, got {interpolated_glucose}"
     
     # Continuous Field 1 should be interpolated: 55 + 0.5 * (65 - 55) = 60
-    interpolated_c1 = interpolated_row['Continuous Field 1'][0]
+    interpolated_c1 = interpolated_row['continuous_field_1'][0]
     assert abs(interpolated_c1 - 60.0) < 0.01, f"Expected Continuous Field 1 ~60, got {interpolated_c1}"
     
     # Continuous Field 2: prev is None, so interpolation should be None
-    interpolated_c2 = interpolated_row['Continuous Field 2'][0]
+    interpolated_c2 = interpolated_row['continuous_field_2'][0]
     assert interpolated_c2 is None, f"Expected Continuous Field 2 to be None (prev was None), got {interpolated_c2}"
     
     # Occasional field should be None (not interpolated)
-    interpolated_occ = interpolated_row['Occasional Field'][0]
+    interpolated_occ = interpolated_row['occasional_field'][0]
     assert interpolated_occ is None, f"Expected Occasional Field to be None, got {interpolated_occ}"
     
     # Service field should be empty string (not interpolated)
-    interpolated_service = interpolated_row['Service Field'][0]
+    interpolated_service = interpolated_row['service_field'][0]
     assert interpolated_service == '', f"Expected Service Field to be empty, got {interpolated_service}"
     
     # Event Type should be 'Interpolated'
-    assert interpolated_row['Event Type'][0] == 'Interpolated', "Event Type should be 'Interpolated'"
+    assert interpolated_row['event_type'][0] == 'Interpolated', "event_type should be 'Interpolated'"
     
     print("✓ test_multiple_continuous_fields_same_points passed")
 
@@ -144,9 +143,9 @@ def test_continuous_field_with_fewer_points():
     )
     
     field_categories = {
-        'continuous': ['Glucose Value (mg/dL)', 'Continuous Field 1'],
-        'occasional': ['Occasional Field'],
-        'service': ['Event Type']
+        'continuous': ['glucose_value_mgdl', 'continuous_field_1'],
+        'occasional': ['occasional_field'],
+        'service': ['event_type']
     }
     
     result, stats = preprocessor.interpolate_missing_values(df, field_categories)
@@ -158,7 +157,7 @@ def test_continuous_field_with_fewer_points():
     
     # Continuous Field 1: prev=55 (from 10:05), curr=65 (from 10:15), alpha=0.5
     # So interpolated = 55 + 0.5*(65-55) = 60
-    interpolated_c1 = interpolated_row['Continuous Field 1'][0]
+    interpolated_c1 = interpolated_row['continuous_field_1'][0]
     assert interpolated_c1 is not None, "Continuous Field 1 should be interpolated"
     assert abs(interpolated_c1 - 60.0) < 0.01, f"Expected Continuous Field 1 ~60, got {interpolated_c1}"
     
@@ -183,7 +182,7 @@ def test_continuous_field_with_fewer_points():
     )
     
     # When prev is None, interpolation should be None
-    interpolated_c1_none = interpolated_row2['Continuous Field 1'][0]
+    interpolated_c1_none = interpolated_row2['continuous_field_1'][0]
     assert interpolated_c1_none is None, f"Expected None when prev is None, got {interpolated_c1_none}"
     
     print("✓ test_continuous_field_with_fewer_points passed")
@@ -210,8 +209,8 @@ def test_no_continuous_fields_except_glucose():
     # field_categories doesn't include glucose explicitly
     field_categories = {
         'continuous': [],
-        'occasional': ['Occasional Field'],
-        'service': ['Event Type']
+        'occasional': ['occasional_field'],
+        'service': ['event_type']
     }
     
     result, stats = preprocessor.interpolate_missing_values(df, field_categories)
@@ -226,7 +225,7 @@ def test_no_continuous_fields_except_glucose():
     assert len(interpolated_row) == 1, "Should have interpolated point"
     
     # Glucose should be interpolated: 100 + 0.5 * (130 - 100) = 115
-    interpolated_glucose = interpolated_row['Glucose Value (mg/dL)'][0]
+    interpolated_glucose = interpolated_row['glucose_value_mgdl'][0]
     expected = 100.0 + 0.5 * (130.0 - 100.0)  # alpha = 5/10 = 0.5
     assert abs(interpolated_glucose - expected) < 0.01, f"Expected glucose ~{expected}, got {interpolated_glucose}"
     
@@ -253,9 +252,9 @@ def test_large_gap_not_interpolated():
     )
     
     field_categories = {
-        'continuous': ['Glucose Value (mg/dL)', 'Continuous Field 1'],
+        'continuous': ['glucose_value_mgdl', 'continuous_field_1'],
         'occasional': [],
-        'service': ['Event Type']
+        'service': ['event_type']
     }
     
     result, stats = preprocessor.interpolate_missing_values(df, field_categories)
@@ -682,11 +681,11 @@ def test_extract_field_categories():
     assert 'service' in categories
     
     # Glucose should be in continuous
-    assert 'Glucose Value (mg/dL)' in categories['continuous'], "Glucose should be in continuous category"
+    assert 'glucose_value_mgdl' in categories['continuous'], "glucose_value_mgdl should be in continuous category"
     
     # Test with unknown database (should return default)
     categories_unknown = GlucoseMLPreprocessor.extract_field_categories('unknown')
-    assert 'Glucose Value (mg/dL)' in categories_unknown['continuous'], "Should default to glucose only"
+    assert 'glucose_value_mgdl' in categories_unknown['continuous'], "Should default to glucose only"
     
     print("✓ test_extract_field_categories passed")
 
