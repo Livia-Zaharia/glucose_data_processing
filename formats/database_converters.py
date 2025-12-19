@@ -56,12 +56,12 @@ class DatabaseConverter(ABC):
         Returns:
             DataFrame with all default output fields present
         """
-        # Get default output fields (standard names) from CSVFormatConverter (config-based or default)
-        default_fields = CSVFormatConverter.get_default_output_fields()
+        # Get output fields from CSVFormatConverter (standard names)
+        output_fields = CSVFormatConverter.get_output_fields()
         
         # Add user_id for multi-user databases (it's added during processing)
         # Check if user_id column exists - if so, include it in required fields
-        required_fields = default_fields.copy()
+        required_fields = output_fields.copy()
         if 'user_id' in df.columns:
             # user_id is already present, keep it
             pass
@@ -75,7 +75,7 @@ class DatabaseConverter(ABC):
                 df = df.with_columns(pl.lit("").alias(field))
         
         # Ensure columns are in the correct order: timestamp first, then other fields
-        # Keep any extra columns (like user_id) at the end
+        # Keep any extra columns (like user_id, timestamp internal column, etc.) at the end
         existing_columns = df.columns
         ordered_columns = []
         
@@ -151,9 +151,9 @@ class MonoUserDatabaseConverter(DatabaseConverter):
         # Ensure all records have all required fields before DataFrame creation.
         # This prevents Polars from dropping columns when some records don't have them.
         # Use None for missing values to avoid coercing types (e.g. timestamp to string).
-        default_fields = CSVFormatConverter.get_default_output_fields()
+        output_fields = CSVFormatConverter.get_output_fields()
         for record in all_data:
-            for field in default_fields:
+            for field in output_fields:
                 if field not in record:
                     record[field] = ""
             # Coerce any non-string values to strings to avoid Polars schema inference conflicts
@@ -355,9 +355,9 @@ class MultiUserDatabaseConverter(DatabaseConverter):
         # Ensure all records have all required fields before DataFrame creation.
         # This prevents Polars from dropping columns when some records don't have them.
         # Use None for missing values to avoid coercing types (e.g. timestamp to string).
-        default_fields = CSVFormatConverter.get_default_output_fields()
+        output_fields = CSVFormatConverter.get_output_fields()
         for record in all_user_data:
-            for field in default_fields:
+            for field in output_fields:
                 if field not in record:
                     record[field] = ""
             # Coerce any non-string values to strings to avoid Polars schema inference conflicts

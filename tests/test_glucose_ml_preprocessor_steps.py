@@ -13,6 +13,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from glucose_ml_preprocessor import GlucoseMLPreprocessor
+from formats.base_converter import CSVFormatConverter
 
 class TestGlucoseMLPreprocessorSteps:
     """
@@ -753,6 +754,17 @@ class TestGlucoseMLPreprocessorSteps:
 
     def test_prepare_ml_data(self, preprocessor):
         """Test final ML data preparation."""
+        # Ensure field categories are set (real pipeline sets this based on schema).
+        # This drives dynamic casting of continuous fields.
+        preprocessor._field_categories_dict = {
+            "continuous": ["glucose_value_mgdl"],
+            "occasional": [],
+            "service": ["timestamp", "event_type"],
+        }
+
+        # Ensure default converter mappings are active for display-name output.
+        CSVFormatConverter.initialize_from_config(None)
+
         df = pl.DataFrame({
             "timestamp": [datetime(2023,1,1,10,0,0)],
             "sequence_id": [1],
@@ -765,7 +777,9 @@ class TestGlucoseMLPreprocessorSteps:
         assert ml_df.columns[0] == "sequence_id"
         
         # Check casting
-        assert ml_df["glucose_value_mgdl"].dtype == pl.Float64
+        glucose_col = CSVFormatConverter.get_display_name("glucose_value_mgdl")
+        assert glucose_col in ml_df.columns
+        assert ml_df[glucose_col].dtype == pl.Float64
 
     def test_process_integration(self, preprocessor):
         """Full integration test with mocked data."""

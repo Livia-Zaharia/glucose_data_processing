@@ -12,18 +12,20 @@ calibration_period_minutes: 165 # 2h 45m
 remove_after_calibration_hours: 24
 
 # Field mappings configuration
-# Default output fields (display names) used in CSV output
-default_output_fields:
-  - "Timestamp (YYYY-MM-DDThh:mm:ss)"
-  - "Event Type"
-  - "Glucose Value (mg/dL)"
-  - "Fast-Acting Insulin Value (u)"
-  - "Long-Acting Insulin Value (u)"
-  - "Carb Value (grams)"
+# Output fields (standard field names) that should appear in CSV output
+# Fields not in field_to_display_name_map will use their field name as display name
+output_fields:
+  - "timestamp"
+  - "event_type"
+  - "glucose_value_mgdl"
+  - "fast_acting_insulin_u"
+  - "long_acting_insulin_u"
+  - "carb_grams"
 
-# Standard field name mapping (standard_name -> display_name)
-# Used for internal field name conversion
-standard_fields:
+# Field to display name mapping (standard_name -> display_name)
+# Used to convert standard field names to display names in CSV output
+# Fields in output_fields but not in this map will use their standard name as display name
+field_to_display_name_map:
   timestamp: "Timestamp (YYYY-MM-DDThh:mm:ss)"
   event_type: "Event Type"
   glucose_value_mgdl: "Glucose Value (mg/dL)"

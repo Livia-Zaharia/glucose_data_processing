@@ -444,7 +444,9 @@ def test_continuous_field_out_of_sync_with_glucose():
     print("\nThis is a limitation: the algorithm cannot interpolate missing values")
     print("at timestamps that already exist in the DataFrame due to other continuous fields.")
     
-    return result, stats
+    # This test is intentionally exploratory and prints analysis; it should not return values.
+    # Assertions above ensure the scenario is exercised without triggering pytest warnings.
+    return None
 
 
 def test_detect_gaps_with_continuous_fields():

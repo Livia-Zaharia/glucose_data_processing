@@ -53,7 +53,7 @@ class StandardFieldNames:
     def __init__(self):
         """Initialize standard field names."""
         # Get known standard fields from CSVFormatConverter
-        self._known_fields = set(CSVFormatConverter.get_standard_fields().keys())
+        self._known_fields = set(CSVFormatConverter.get_field_to_display_name_map().keys())
     
     def is_known_field(self, standard_name: str) -> bool:
         """
@@ -1823,6 +1823,9 @@ class GlucoseMLPreprocessor:
         """
         Prepare final DataFrame for machine learning with sequence_id as first column.
         
+        Dynamically casts all fields based on field categories and DataFrame schema.
+        No hardcoded field names - works with any fields added to config.
+        
         Args:
             df: Processed DataFrame with sequence IDs
             
@@ -1832,53 +1835,109 @@ class GlucoseMLPreprocessor:
         print("Preparing final ML dataset...")
         
         cast_exprs: List[pl.Expr] = []
-
-        # Stable, comparable output dtypes for research checkpoints:
-        # Keep behavior aligned with the original "fixed fields" pipeline:
-        # - sequence_id/user_id: Int64 (if present)
-        # - timestamp: Utf8 (ISO-like) for CSV
-        # - glucose_value_mgdl: Float64
-        # - carb_grams: Float64 (if present)
-        # - fast_acting_insulin_u/long_acting_insulin_u/event_type: Utf8
-        # IMPORTANT: do NOT fill nulls with "" here; we want null-vs-empty behavior unchanged.
-        if 'sequence_id' in df.columns:
-            cast_exprs.append(pl.col('sequence_id').cast(pl.Int64, strict=False).alias('sequence_id'))
-        if 'user_id' in df.columns:
-            cast_exprs.append(pl.col('user_id').cast(pl.Int64, strict=False).alias('user_id'))
-
-        if 'timestamp' in df.columns:
-            if df.schema.get('timestamp') == pl.Datetime:
-                cast_exprs.append(pl.col('timestamp').dt.strftime('%Y-%m-%dT%H:%M:%S').alias('timestamp'))
+        
+        # Get field categories to determine field types dynamically
+        field_categories_dict = getattr(self, '_field_categories_dict', None)
+        continuous_fields = set(field_categories_dict.get('continuous', [])) if field_categories_dict else set()
+        occasional_fields = set(field_categories_dict.get('occasional', [])) if field_categories_dict else set()
+        service_fields = set(field_categories_dict.get('service', [])) if field_categories_dict else set()
+        
+        # Get all fields that should be in output
+        output_fields = CSVFormatConverter.get_output_fields()
+        all_output_fields = set(output_fields)
+        
+        # Special fields that always have specific types
+        id_fields = {'sequence_id', 'user_id'}  # Int64
+        timestamp_field = {'timestamp'}  # Utf8 (ISO format string)
+        
+        # Process each column in the DataFrame
+        for col in df.columns:
+            # Special handling for ID fields
+            if col in id_fields:
+                cast_exprs.append(pl.col(col).cast(pl.Int64, strict=False).alias(col))
+                continue
+            
+            # Special handling for timestamp
+            if col == 'timestamp':
+                if df.schema.get('timestamp') == pl.Datetime:
+                    cast_exprs.append(pl.col('timestamp').dt.strftime('%Y-%m-%dT%H:%M:%S').alias('timestamp'))
+                else:
+                    cast_exprs.append(pl.col('timestamp').cast(pl.Utf8, strict=False).alias('timestamp'))
+                continue
+            
+            # Determine type based on field categories (priority)
+            # Continuous fields are numeric (Float64) - always cast, regardless of current type
+            if col in continuous_fields:
+                cast_exprs.append(pl.col(col).cast(pl.Float64, strict=False).alias(col))
+            # Occasional fields: numeric if they can be, otherwise string
+            elif col in occasional_fields:
+                # Check if field can be numeric (many occasional fields like step_count are numeric)
+                current_type = df.schema.get(col)
+                if current_type in [pl.Float64, pl.Float32, pl.Int64, pl.Int32]:
+                    # Numeric occasional field - cast to Float64
+                    cast_exprs.append(pl.col(col).cast(pl.Float64, strict=False).alias(col))
+                else:
+                    # String occasional field - cast to Utf8
+                    cast_exprs.append(pl.col(col).cast(pl.Utf8, strict=False).alias(col))
+            # Service fields are strings (Utf8)
+            elif col in service_fields:
+                cast_exprs.append(pl.col(col).cast(pl.Utf8, strict=False).alias(col))
+            # If field is in output_fields but not in categories, try to infer type
+            elif col in all_output_fields:
+                # Infer type from current DataFrame schema
+                current_type = df.schema.get(col)
+                if current_type in [pl.Float64, pl.Float32, pl.Int64, pl.Int32]:
+                    # Numeric type - cast to Float64
+                    cast_exprs.append(pl.col(col).cast(pl.Float64, strict=False).alias(col))
+                elif current_type == pl.Datetime:
+                    # Datetime - convert to string
+                    cast_exprs.append(pl.col(col).dt.strftime('%Y-%m-%dT%H:%M:%S').alias(col))
+                else:
+                    # Default to string for unknown types
+                    cast_exprs.append(pl.col(col).cast(pl.Utf8, strict=False).alias(col))
+            # For fields not in output_fields but present in DataFrame, preserve their type
+            # (they might be added by processing steps like user_id)
             else:
-                cast_exprs.append(pl.col('timestamp').cast(pl.Utf8, strict=False).alias('timestamp'))
-
-        if 'glucose_value_mgdl' in df.columns:
-            cast_exprs.append(pl.col('glucose_value_mgdl').cast(pl.Float64, strict=False).alias('glucose_value_mgdl'))
-        if 'carb_grams' in df.columns:
-            cast_exprs.append(pl.col('carb_grams').cast(pl.Float64, strict=False).alias('carb_grams'))
-        if 'fast_acting_insulin_u' in df.columns:
-            cast_exprs.append(pl.col('fast_acting_insulin_u').cast(pl.Utf8, strict=False).alias('fast_acting_insulin_u'))
-        if 'long_acting_insulin_u' in df.columns:
-            cast_exprs.append(pl.col('long_acting_insulin_u').cast(pl.Utf8, strict=False).alias('long_acting_insulin_u'))
-        if 'event_type' in df.columns:
-            cast_exprs.append(pl.col('event_type').cast(pl.Utf8, strict=False).alias('event_type'))
+                # Keep original type, but ensure it's a stable type
+                current_type = df.schema.get(col)
+                if current_type == pl.Datetime:
+                    cast_exprs.append(pl.col(col).dt.strftime('%Y-%m-%dT%H:%M:%S').alias(col))
+                elif current_type not in [pl.Float64, pl.Int64, pl.Utf8]:
+                    # Cast to a stable type if it's not already one
+                    if current_type in [pl.Float32, pl.Int32]:
+                        cast_exprs.append(pl.col(col).cast(pl.Float64, strict=False).alias(col))
+                    else:
+                        cast_exprs.append(pl.col(col).cast(pl.Utf8, strict=False).alias(col))
 
         if cast_exprs:
             df = df.with_columns(cast_exprs)
 
-        # Stable column order: keep the historical core ordering first, then any extra fields
-        preferred = [
-            'sequence_id',
-            'timestamp',
-            'glucose_value_mgdl',
-            'fast_acting_insulin_u',
-            'long_acting_insulin_u',
-            'carb_grams',
-            'event_type',
-            'user_id',
-        ]
+        # Get column order from config if available, otherwise use default order
+        output_fields = CSVFormatConverter.get_output_fields()
+        
+        # Always include sequence_id and user_id at the beginning if present
+        preferred = ['sequence_id'] if 'sequence_id' in df.columns else []
+        preferred.extend([f for f in output_fields if f != 'sequence_id'])
+        if 'user_id' in df.columns and 'user_id' not in preferred:
+            preferred.append('user_id')
+        
+        # Order columns: preferred fields first, then any remaining columns
         ordered = [c for c in preferred if c in df.columns] + [c for c in df.columns if c not in set(preferred)]
         ml_df = df.select(ordered)
+        
+        # Convert standard field names to display names for CSV output
+        # Get field to display name mapping
+        field_to_display_map = CSVFormatConverter.get_field_to_display_name_map()
+        
+        # Rename columns: use display name if mapping exists, otherwise use standard name
+        rename_map = {}
+        for col in ml_df.columns:
+            if col in field_to_display_map:
+                rename_map[col] = field_to_display_map[col]
+            # If not in map, keep original name (fields like heart_rate will use their standard name)
+        
+        if rename_map:
+            ml_df = ml_df.rename(rename_map)
         
         return ml_df
     
@@ -2229,7 +2288,7 @@ class GlucoseMLPreprocessor:
             'interpolation_analysis': {
                 'total_interpolations': 0,
                 'total_interpolated_data_points': 0,
-                'glucose_value_mg/dl_interpolations': 0,
+                'glucose_value_mgdl_interpolations': 0,
                 'insulin_value_u_interpolations': 0,
                 'carb_value_grams_interpolations': 0,
                 'sequences_processed': 0,
@@ -2331,7 +2390,10 @@ class GlucoseMLPreprocessor:
             interp_analysis = stats.get('interpolation_analysis', {})
             aggregated['interpolation_analysis']['total_interpolations'] += interp_analysis.get('total_interpolations', 0)
             aggregated['interpolation_analysis']['total_interpolated_data_points'] += interp_analysis.get('total_interpolated_data_points', 0)
-            aggregated['interpolation_analysis']['glucose_value_mg/dl_interpolations'] += interp_analysis.get('glucose_value_mg/dl_interpolations', 0)
+            # Handle both old format (with slash) and new format (without slash)
+            glucose_interps = interp_analysis.get('glucose_value_mgdl_interpolations', 
+                                                  interp_analysis.get('glucose_value_mg/dl_interpolations', 0))
+            aggregated['interpolation_analysis']['glucose_value_mgdl_interpolations'] += glucose_interps
             aggregated['interpolation_analysis']['insulin_value_u_interpolations'] += interp_analysis.get('insulin_value_u_interpolations', 0)
             aggregated['interpolation_analysis']['carb_value_grams_interpolations'] += interp_analysis.get('carb_value_grams_interpolations', 0)
             aggregated['interpolation_analysis']['sequences_processed'] += interp_analysis.get('sequences_processed', 0)
@@ -2509,9 +2571,12 @@ def print_statistics(stats: Dict[str, Any], preprocessor: 'GlucoseMLPreprocessor
     print(f"   Small Gaps Identified and Processed: {interp_analysis['small_gaps_filled']:,}")
     print(f"   Interpolated Data Points Created: {interp_analysis['total_interpolated_data_points']:,}")
     print(f"   Total Field Interpolations: {interp_analysis['total_interpolations']:,}")
-    print(f"   Glucose Interpolations: {interp_analysis['glucose_value_mg/dl_interpolations']:,}")
-    print(f"   Insulin Interpolations: {interp_analysis['insulin_value_u_interpolations']:,}")
-    print(f"   Carb Interpolations: {interp_analysis['carb_value_grams_interpolations']:,}")
+    # Handle both old format (with slash) and new format (without slash)
+    glucose_interps = interp_analysis.get('glucose_value_mgdl_interpolations', 
+                                          interp_analysis.get('glucose_value_mg/dl_interpolations', 0))
+    print(f"   Glucose Interpolations: {glucose_interps:,}")
+    print(f"   Insulin Interpolations: {interp_analysis.get('insulin_value_u_interpolations', 0):,}")
+    print(f"   Carb Interpolations: {interp_analysis.get('carb_value_grams_interpolations', 0):,}")
     print(f"   Large Gaps Skipped: {interp_analysis['large_gaps_skipped']:,}")
     print(f"   Sequences Processed: {interp_analysis['sequences_processed']:,}")
     

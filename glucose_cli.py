@@ -18,6 +18,23 @@ try:
 except ImportError:
     CycleDataParser = None
 
+
+def _resolve_config_file(config_file: Optional[str]) -> Optional[str]:
+    """
+    Resolve the config file path to use.
+
+    Behavior:
+    - If user provides --config, use it as-is.
+    - Otherwise, if ./glucose_config.yaml exists, use it by default.
+    - Otherwise, return None and rely on CLI args only.
+    """
+    if config_file:
+        return config_file
+    default_cfg = Path("glucose_config.yaml")
+    if default_cfg.exists() and default_cfg.is_file():
+        return str(default_cfg)
+    return None
+
 def main(
     input_folders: List[str] = typer.Argument(
         ..., 
@@ -70,7 +87,7 @@ def main(
     ),
     calibration_period_minutes: int = typer.Option(
         60*2 + 45,  # 2 hours 45 minutes
-        "--calibration-period", "-c",
+        "--calibration-period", "-p",
         help="Gap duration considered as calibration period in minutes (default: 165 minutes)"
     ),
     remove_after_calibration_hours: int = typer.Option(
@@ -158,15 +175,19 @@ def main(
             typer.echo(f"   🔄 Cycle data file: {cycle_data_file}")
     
     try:
+        resolved_config_file = _resolve_config_file(config_file)
+        if verbose and resolved_config_file and not config_file:
+            typer.echo(f"📄 Auto-loading default configuration from: {resolved_config_file}")
+
         # Create preprocessor from config file if provided, otherwise use CLI arguments
-        if config_file:
-            config_path_obj = Path(config_file)
+        if resolved_config_file:
+            config_path_obj = Path(resolved_config_file)
             if not config_path_obj.exists():
-                typer.echo(f"❌ Error: Config file '{config_file}' does not exist", err=True)
+                typer.echo(f"❌ Error: Config file '{resolved_config_file}' does not exist", err=True)
                 raise typer.Exit(1)
             
             if verbose:
-                typer.echo(f"📄 Loading configuration from: {config_file}")
+                typer.echo(f"📄 Loading configuration from: {resolved_config_file}")
             
             # CLI arguments override config file values
             cli_overrides = {
@@ -181,7 +202,7 @@ def main(
                 'create_fixed_frequency': create_fixed_frequency
             }
             
-            preprocessor = GlucoseMLPreprocessor.from_config_file(config_file, **cli_overrides)
+            preprocessor = GlucoseMLPreprocessor.from_config_file(resolved_config_file, **cli_overrides)
         else:
             # Use CLI arguments directly
             preprocessor = GlucoseMLPreprocessor(

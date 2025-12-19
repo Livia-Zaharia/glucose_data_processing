@@ -18,7 +18,7 @@ class CSVFormatConverter(ABC):
     # These are fallback defaults if config is not provided.
     # NOTE: We intentionally use standard names so the pipeline can support arbitrary fields
     # without needing display-name mappings for every new field.
-    DEFAULT_OUTPUT_FIELDS: List[str] = [
+    OUTPUT_FIELDS: List[str] = [
         'timestamp',
         'event_type',
         'glucose_value_mgdl',
@@ -27,9 +27,9 @@ class CSVFormatConverter(ABC):
         'carb_grams',
     ]
     
-    # Standard field name mapping (standard_name -> display_name)
+    # Field to display name mapping (standard_name -> display_name)
     # These are fallback defaults if config is not provided
-    STANDARD_FIELDS: Dict[str, str] = {
+    FIELD_TO_DISPLAY_NAME_MAP: Dict[str, str] = {
         "timestamp": "Timestamp (YYYY-MM-DDThh:mm:ss)",
         "event_type": "Event Type",
         "glucose_value_mgdl": "Glucose Value (mg/dL)",
@@ -39,8 +39,8 @@ class CSVFormatConverter(ABC):
     }
     
     # Class-level config-based field mappings (initialized from config)
-    _config_default_output_fields: Optional[List[str]] = None
-    _config_standard_fields: Optional[Dict[str, str]] = None
+    _config_output_fields: Optional[List[str]] = None
+    _config_field_to_display_name_map: Optional[Dict[str, str]] = None
     
     _schema_cache: Optional[Dict] = None
     
@@ -50,49 +50,72 @@ class CSVFormatConverter(ABC):
         Initialize field mappings from configuration dictionary.
         
         Args:
-            config: Configuration dictionary with 'default_output_fields' and 'standard_fields' keys.
+            config: Configuration dictionary with 'output_fields' and 'field_to_display_name_map' keys.
                    If None or keys missing, uses default hardcoded values.
         """
         if config is None:
-            cls._config_default_output_fields = None
-            cls._config_standard_fields = None
+            cls._config_output_fields = None
+            cls._config_field_to_display_name_map = None
             return
         
-        # Load default_output_fields from config
-        if 'default_output_fields' in config and config['default_output_fields']:
-            cls._config_default_output_fields = config['default_output_fields'].copy()
+        # Load output_fields from config (backward compatibility: also check old name)
+        if 'output_fields' in config and config['output_fields']:
+            cls._config_output_fields = config['output_fields'].copy()
+        elif 'default_output_fields' in config and config['default_output_fields']:
+            # Backward compatibility: convert display names to standard names
+            old_fields = config['default_output_fields'].copy()
+            old_map = config.get('standard_fields', config.get('field_to_display_name_map', {}))
+            display_to_standard = {v: k for k, v in old_map.items()}
+            cls._config_output_fields = [display_to_standard.get(f, f) for f in old_fields]
         else:
-            cls._config_default_output_fields = None
+            cls._config_output_fields = None
         
-        # Load standard_fields from config
-        if 'standard_fields' in config and config['standard_fields']:
-            cls._config_standard_fields = config['standard_fields'].copy()
+        # Load field_to_display_name_map from config (backward compatibility: also check old name)
+        if 'field_to_display_name_map' in config and config['field_to_display_name_map']:
+            cls._config_field_to_display_name_map = config['field_to_display_name_map'].copy()
+        elif 'standard_fields' in config and config['standard_fields']:
+            cls._config_field_to_display_name_map = config['standard_fields'].copy()
         else:
-            cls._config_standard_fields = None
+            cls._config_field_to_display_name_map = None
     
     @classmethod
-    def get_default_output_fields(cls) -> List[str]:
+    def get_output_fields(cls) -> List[str]:
         """
-        Get default output fields, using config if available, otherwise class defaults.
+        Get output fields, using config if available, otherwise class defaults.
         
         Returns:
-            List of default output field names (standard names)
+            List of output field names (standard names)
         """
-        if cls._config_default_output_fields is not None:
-            return cls._config_default_output_fields.copy()
-        return cls.DEFAULT_OUTPUT_FIELDS.copy()
+        if cls._config_output_fields is not None:
+            return cls._config_output_fields.copy()
+        return cls.OUTPUT_FIELDS.copy()
     
     @classmethod
-    def get_standard_fields(cls) -> Dict[str, str]:
+    def get_field_to_display_name_map(cls) -> Dict[str, str]:
         """
-        Get standard field mappings, using config if available, otherwise class defaults.
+        Get field to display name mapping, using config if available, otherwise class defaults.
         
         Returns:
             Dictionary mapping standard field names to display names
         """
-        if cls._config_standard_fields is not None:
-            return cls._config_standard_fields.copy()
-        return cls.STANDARD_FIELDS.copy()
+        if cls._config_field_to_display_name_map is not None:
+            return cls._config_field_to_display_name_map.copy()
+        return cls.FIELD_TO_DISPLAY_NAME_MAP.copy()
+    
+    @classmethod
+    def get_display_name(cls, standard_name: str) -> str:
+        """
+        Get display name for a standard field name.
+        If field is not in mapping, returns the standard name as-is.
+        
+        Args:
+            standard_name: Standard field name (e.g., 'timestamp', 'heart_rate')
+            
+        Returns:
+            Display name if mapping exists, otherwise standard name
+        """
+        field_map = cls.get_field_to_display_name_map()
+        return field_map.get(standard_name, standard_name)
     
     def __init__(self, output_fields: Optional[List[str]] = None):
         """
@@ -105,14 +128,8 @@ class CSVFormatConverter(ABC):
                           Timestamp is always included.
         """
         if output_fields is None:
-            # Convert default display names to standard names
-            # Use get_standard_fields() to get config-based or default mappings
-            standard_fields = self.get_standard_fields()
-            display_to_standard = {v: k for k, v in standard_fields.items()}
-            default_output_fields = self.get_default_output_fields()
-            self.output_fields_standard: Set[str] = {
-                display_to_standard.get(f, f) for f in default_output_fields
-            }
+            # Get output fields from config or defaults (already standard names)
+            self.output_fields_standard: Set[str] = set(self.get_output_fields())
         else:
             # Use provided standard field names
             self.output_fields_standard = set(output_fields)
