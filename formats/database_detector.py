@@ -6,12 +6,13 @@ This module provides the database detection system that automatically identifies
 database types and returns the appropriate database converter.
 """
 
-from typing import Optional, Dict, Any
 from pathlib import Path
-from .database_converters import DatabaseConverter
-from .dexcom_database_converter import DexcomDatabaseConverter
-from .libre3_database_converter import Libre3DatabaseConverter
-from .uom_database_converter import UoMDatabaseConverter
+from typing import Any, Dict, Optional
+
+from formats.database_converters import DatabaseConverter
+from formats.dexcom.dexcom_database_converter import DexcomDatabaseConverter
+from formats.libre3.libre3_database_converter import Libre3DatabaseConverter
+from formats.uom.uom_database_converter import UoMDatabaseConverter
 
 
 class DatabaseDetector:

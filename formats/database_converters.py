@@ -7,12 +7,12 @@ of different database structures (mono-user vs multi-user).
 """
 
 from abc import ABC, abstractmethod
-from typing import List, Dict, Any, Tuple, Optional
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 import polars as pl
 from datetime import datetime, timedelta
-from .base_converter import CSVFormatConverter
-from .format_detector import CSVFormatDetector
+from formats.base_converter import CSVFormatConverter
+from formats.format_detector import CSVFormatDetector
 
 
 class DatabaseConverter(ABC):

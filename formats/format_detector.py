@@ -6,18 +6,19 @@ This module provides the format detection system that automatically identifies
 CSV formats and returns the appropriate converter.
 """
 
-from typing import Optional, List
 from pathlib import Path
-from .base_converter import CSVFormatConverter
-from .dexcom_g6_converter import DexcomG6Converter
-from .freestyle_libre3_converter import FreeStyleLibre3Converter
-from .uom_glucose_converter import UoMGlucoseConverter
-from .uom_basal_converter import UoMBasalConverter
-from .uom_bolus_converter import UoMBolusConverter
-from .uom_nutrition_converter import UoMNutritionConverter
-from .uom_activity_converter import UoMActivityConverter
-from .uom_sleep_converter import UoMSleepConverter
-from .uom_sleeptime_converter import UoMSleeptimeConverter
+from typing import List, Optional
+
+from formats.base_converter import CSVFormatConverter
+from formats.dexcom.dexcom_g6_converter import DexcomG6Converter
+from formats.libre3.freestyle_libre3_converter import FreeStyleLibre3Converter
+from formats.uom.uom_activity_converter import UoMActivityConverter
+from formats.uom.uom_basal_converter import UoMBasalConverter
+from formats.uom.uom_bolus_converter import UoMBolusConverter
+from formats.uom.uom_glucose_converter import UoMGlucoseConverter
+from formats.uom.uom_nutrition_converter import UoMNutritionConverter
+from formats.uom.uom_sleep_converter import UoMSleepConverter
+from formats.uom.uom_sleeptime_converter import UoMSleeptimeConverter
 
 
 class CSVFormatDetector:

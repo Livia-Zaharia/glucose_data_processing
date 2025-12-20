@@ -19,11 +19,11 @@ Usage:
         pass
 """
 
-from .base_converter import CSVFormatConverter
-from .dexcom_g6_converter import DexcomG6Converter
-from .freestyle_libre3_converter import FreeStyleLibre3Converter
-from .format_detector import CSVFormatDetector
-from .database_detector import DatabaseDetector
+from formats.base_converter import CSVFormatConverter
+from formats.database_detector import DatabaseDetector
+from formats.dexcom.dexcom_g6_converter import DexcomG6Converter
+from formats.format_detector import CSVFormatDetector
+from formats.libre3.freestyle_libre3_converter import FreeStyleLibre3Converter
 
 __all__ = [
     'CSVFormatConverter',
