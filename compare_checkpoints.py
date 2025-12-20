@@ -105,7 +105,12 @@ def _is_comparable_dtype(dtype: pl.DataType) -> bool:
 
 
 def compare_schemas(schema1: pl.Schema, schema2: pl.Schema, *, max_list: int) -> dict[str, Any]:
-    """Compare schemas (names, order, and dtypes)."""
+    """Compare schemas (names, order, and dtypes).
+
+    Notes:
+      - Column *order* is reported separately and does not imply a mismatch in "names match".
+      - Type comparison is performed by column name (order-insensitive).
+    """
     names1 = list(schema1.keys())
     names2 = list(schema2.keys())
 
@@ -118,12 +123,18 @@ def compare_schemas(schema1: pl.Schema, schema2: pl.Schema, *, max_list: int) ->
         if schema1[col] != schema2[col]:
             type_differences[col] = {"type_1": str(schema1[col]), "type_2": str(schema2[col])}
 
+    # Order-insensitive comparisons for names/types.
+    names_match = (set(names1) == set(names2))
+    order_match = (names1 == names2)
+    types_match = names_match and (len(type_differences) == 0)
+
     return {
         "field_count_match": len(schema1) == len(schema2),
         "field_count_1": len(schema1),
         "field_count_2": len(schema2),
-        "field_names_match": names1 == names2,
-        "field_types_match": schema1 == schema2,
+        "field_names_match": names_match,
+        "field_order_match": order_match,
+        "field_types_match": types_match,
         "missing_in_2_count": len(missing_in_2),
         "missing_in_1_count": len(missing_in_1),
         "missing_in_2_sample": missing_in_2[:max_list],
@@ -610,6 +621,9 @@ def print_comparison_report(
     print(f"Field count - File 1: {schema_comp['field_count_1']}, File 2: {schema_comp['field_count_2']}")
     print(f"Field count match: {'[OK]' if schema_comp['field_count_match'] else '[FAIL]'}")
     print(f"Field names match: {'[OK]' if schema_comp['field_names_match'] else '[FAIL]'}")
+    # Order is informational: we treat different ordering as non-fatal for "same schema".
+    if "field_order_match" in schema_comp:
+        print(f"Field order match: {'[OK]' if schema_comp['field_order_match'] else '[WARN]'}")
     print(f"Field types match: {'[OK]' if schema_comp['field_types_match'] else '[FAIL]'}")
 
     if schema_comp["missing_in_2_count"]:
@@ -904,7 +918,7 @@ def compare(
         else:
             typer.echo("[WARNING] Files differ - see details above")
             issues = []
-            if not schema_comp['field_count_match'] or not schema_comp['field_names_match']:
+            if not schema_comp['field_count_match'] or not schema_comp['field_names_match'] or not schema_comp['field_types_match']:
                 issues.append("Schema differences")
             if not seq_comp['sequence_ids_match']:
                 issues.append("Sequence ID differences")
@@ -912,6 +926,8 @@ def compare(
                 issues.append(f"{seq_comp['row_count_differences']} sequences with different row counts")
             if value_comp.get('match_percentage', 100) < 100:
                 issues.append(f"Value differences ({100 - value_comp.get('match_percentage', 0):.2f}% mismatch)")
+            if ("field_order_match" in schema_comp) and (not schema_comp["field_order_match"]):
+                issues.append("Column order differs (non-fatal)")
             typer.echo(f"   Issues found: {', '.join(issues)}")
         
     except Exception as e:

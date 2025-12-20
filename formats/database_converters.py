@@ -338,7 +338,15 @@ class MultiUserDatabaseConverter(DatabaseConverter):
         
         # Process each user separately (sorted for deterministic processing order)
         users_processed = self._identify_users(data_path)
-        print(f"Found {len(users_processed)} users to process")
+        
+        # Apply first_n_users filtering if specified
+        first_n_users = self.config.get('first_n_users')
+        if first_n_users and first_n_users > 0:
+            sorted_users = sorted(users_processed.items())
+            users_processed = dict(sorted_users[:first_n_users])
+            print(f"Found {len(users_processed)} users to process (limited to first {first_n_users} users)")
+        else:
+            print(f"Found {len(users_processed)} users to process")
         
         for user_id, user_files in sorted(users_processed.items()):
             print(f"\nProcessing user: {user_id}")

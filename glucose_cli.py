@@ -109,6 +109,11 @@ def main(
         None,
         "--cycle",
         help="Path to cycle data CSV file with columns: date, flow_amount. Glucose data will be filtered to cycle data date range."
+    ),
+    first_n_users: Optional[int] = typer.Option(
+        None,
+        "--first-n-users",
+        help="Process only the first n users (for multi-user databases). If 0 or not specified, all users are processed."
     )
 ):
     """
@@ -199,7 +204,8 @@ def main(
                 'calibration_period_minutes': calibration_period_minutes,
                 'remove_after_calibration_hours': remove_after_calibration_hours,
                 'glucose_only': glucose_only,
-                'create_fixed_frequency': create_fixed_frequency
+                'create_fixed_frequency': create_fixed_frequency,
+                'first_n_users': first_n_users if first_n_users and first_n_users > 0 else None
             }
             
             preprocessor = GlucoseMLPreprocessor.from_config_file(resolved_config_file, **cli_overrides)
@@ -214,7 +220,8 @@ def main(
                 calibration_period_minutes=calibration_period_minutes,
                 remove_after_calibration_hours=remove_after_calibration_hours,
                 glucose_only=glucose_only,
-                create_fixed_frequency=create_fixed_frequency
+                create_fixed_frequency=create_fixed_frequency,
+                first_n_users=first_n_users if first_n_users and first_n_users > 0 else None
             )
         
         # Parse cycle data if provided

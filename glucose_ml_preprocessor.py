@@ -120,7 +120,8 @@ class GlucoseMLPreprocessor:
             low_glucose_value=cli_overrides.get('low_glucose_value', low_value),
             glucose_only=cli_overrides.get('glucose_only', config.get('glucose_only', False)),
             create_fixed_frequency=cli_overrides.get('create_fixed_frequency', config.get('create_fixed_frequency', True)),
-            config=config
+            config=config,
+            first_n_users=cli_overrides.get('first_n_users', config.get('first_n_users', None))
         )
     
     def __init__(
@@ -137,6 +138,7 @@ class GlucoseMLPreprocessor:
         glucose_only: bool = False,
         create_fixed_frequency: bool = True,
         config: Optional[Dict] = None,
+        first_n_users: Optional[int] = None,
     ):
         """
         Initialize the preprocessor.
@@ -166,7 +168,9 @@ class GlucoseMLPreprocessor:
         self.low_glucose_value = low_glucose_value
         self.glucose_only = glucose_only
         self.create_fixed_frequency = create_fixed_frequency
-        self.config = config
+        self.config = config if config is not None else {}
+        if first_n_users is not None:
+            self.config['first_n_users'] = first_n_users
         self.expected_interval_seconds = expected_interval_minutes * 60
         self.small_gap_max_seconds = small_gap_max_minutes * 60
         self.calibration_period_seconds = calibration_period_minutes * 60
