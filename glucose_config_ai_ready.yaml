@@ -1,0 +1,46 @@
+# AI-READI processing config
+# - Keeps the core glucose pipeline fields
+# - Adds fields that exist in AI-READI: heart_rate + physical activity signals
+# - Uses streaming buffer settings for huge datasets
+
+# General preprocessing settings
+expected_interval_minutes: 5
+small_gap_max_minutes: 15
+min_sequence_len: 200
+save_intermediate_files: false
+create_fixed_frequency: true
+glucose_only: false
+
+# Streaming buffer control (used when converters expose iter_user_event_frames)
+streaming_max_buffer_mb: 64
+streaming_flush_max_users: 5
+
+# Output filtering: keep only output_fields + selected service fields
+restrict_output_to_config_fields: true
+service_fields_allowlist:
+  - "timestamp"
+  - "event_type"
+  - "user_id"
+
+# Field mappings configuration
+output_fields:
+  - "timestamp"
+  - "event_type"
+  - "glucose_value_mgdl"
+  - "heart_rate"
+  - "step_count"
+  - "active_kcal"
+
+field_to_display_name_map:
+  timestamp: "Timestamp (YYYY-MM-DDThh:mm:ss)"
+  event_type: "Event Type"
+  glucose_value_mgdl: "Glucose Value (mg/dL)"
+  heart_rate: "Heart Rate"
+  step_count: "Step Count"
+  active_kcal: "Active Calories (kcal)"
+
+# Database-specific configurations
+dexcom:
+  high_glucose_value: 401
+  low_glucose_value: 39
+  remove_calibration: true

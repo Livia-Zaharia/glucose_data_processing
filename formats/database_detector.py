@@ -8,8 +8,10 @@ database types and returns the appropriate database converter.
 
 from pathlib import Path
 from typing import Any, Dict, Optional
+import zipfile
 
 from formats.database_converters import DatabaseConverter
+from formats.ai_readi.ai_readi_database_converter import AIReadIDatabaseConverter
 from formats.dexcom.dexcom_database_converter import DexcomDatabaseConverter
 from formats.libre3.libre3_database_converter import Libre3DatabaseConverter
 from formats.uom.uom_database_converter import UoMDatabaseConverter
@@ -23,7 +25,8 @@ class DatabaseDetector:
         self.database_converters = {
             'dexcom': DexcomDatabaseConverter,
             'libre3': Libre3DatabaseConverter,
-            'uom': UoMDatabaseConverter
+            'uom': UoMDatabaseConverter,
+            'ai_readi': AIReadIDatabaseConverter,
         }
     
     def detect_database_type(self, data_folder: str) -> str:
@@ -40,6 +43,25 @@ class DatabaseDetector:
         
         if not data_path.exists():
             raise FileNotFoundError(f"Data folder not found: {data_folder}")
+
+        # AI-READI: zip-backed dataset
+        if data_path.is_file() and data_path.suffix.lower() == ".zip":
+            try:
+                with zipfile.ZipFile(data_path, "r") as z:
+                    # Detect via required AI-READI members under /dataset/
+                    has_participants = False
+                    has_dexcom = False
+                    for name in z.namelist():
+                        # Keep checks cheap; stop early when both match.
+                        if not has_participants and name.endswith("/dataset/participants.tsv"):
+                            has_participants = True
+                        if (not has_dexcom) and ("/dataset/wearable_blood_glucose/continuous_glucose_monitoring/dexcom_g6/" in name) and name.endswith("_DEX.json"):
+                            has_dexcom = True
+                        if has_participants and has_dexcom:
+                            return "ai_readi"
+            except Exception:
+                return "unknown"
+            return "unknown"
         
         # Get all CSV files
         csv_files = list(data_path.glob("**/*.csv"))

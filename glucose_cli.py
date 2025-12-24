@@ -10,6 +10,7 @@ import typer
 from pathlib import Path
 from typing import Optional, List
 import sys
+import polars as pl
 from glucose_ml_preprocessor import GlucoseMLPreprocessor, print_statistics
 
 # Optional cycle data parser (research-phase convenience)
@@ -38,7 +39,7 @@ def _resolve_config_file(config_file: Optional[str]) -> Optional[str]:
 def main(
     input_folders: List[str] = typer.Argument(
         ..., 
-        help="Path(s) to folder(s) containing CSV files to process. Multiple folders can be specified to combine different databases."
+        help="Path(s) to input datasets to process. Each input can be a folder (CSV datasets) or a .zip (AI-READI). Multiple inputs can be combined."
     ),
     config_file: str = typer.Option(
         None,
@@ -152,8 +153,13 @@ def main(
             raise typer.Exit(1)
         
         if not input_path_obj.is_dir():
-            typer.echo(f"❌ Error: Input must be a folder containing CSV files, got: '{input_folder}'", err=True)
-            raise typer.Exit(1)
+            # Allow zip-backed datasets (AI-READI)
+            if not (input_path_obj.is_file() and input_path_obj.suffix.lower() == ".zip"):
+                typer.echo(
+                    f"❌ Error: Input must be a folder containing CSV files or a .zip dataset, got: '{input_folder}'",
+                    err=True,
+                )
+                raise typer.Exit(1)
         
         validated_folders.append(input_folder)
     
@@ -272,7 +278,25 @@ def main(
         
         # Show results
         typer.echo(f"✅ Processing completed successfully!")
-        typer.echo(f"📊 Output: {len(ml_data):,} records in {ml_data['sequence_id'].n_unique():,} sequences")
+        # Streaming modes (e.g., AI-READI) may return a placeholder DataFrame to avoid
+        # loading huge outputs into memory. Prefer statistics when available.
+        try:
+            overview = statistics.get("dataset_overview", {}) if isinstance(statistics, dict) else {}
+            stats_records = int(overview.get("total_records", 0))
+            stats_sequences = int(overview.get("total_sequences", 0))
+        except Exception:
+            stats_records = 0
+            stats_sequences = 0
+
+        df_records = len(ml_data) if hasattr(ml_data, "__len__") else 0
+        df_sequences = 0
+        if isinstance(ml_data, pl.DataFrame) and "sequence_id" in ml_data.columns:
+            df_sequences = int(ml_data["sequence_id"].n_unique())
+
+        out_records = stats_records if (df_records == 0 and stats_records > 0) else df_records
+        out_sequences = stats_sequences if (df_sequences == 0 and stats_sequences > 0) else df_sequences
+
+        typer.echo(f"📊 Output: {out_records:,} records in {out_sequences:,} sequences")
         typer.echo(f"💾 Saved to: {output_file}")
         
         # Show statistics if requested

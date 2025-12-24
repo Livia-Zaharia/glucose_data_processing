@@ -189,14 +189,16 @@ class GlucoseMLPreprocessor:
         Returns:
             Dictionary with categories as keys and lists of display column names as values
         """
-        # Map database type to schema file name
+        # Map database type to schema file name (legacy aliases).
+        # Prefer convention: `<database_type>_schema.json` if present.
         schema_files = {
             'uom': 'uom_schema.json',
             'dexcom': 'dexcom_schema.json',
-            'freestyle_libre3': 'freestyle_libre3_schema.json'
+            'libre3': 'freestyle_libre3_schema.json',
+            'freestyle_libre3': 'freestyle_libre3_schema.json',
         }
-        
-        schema_file = schema_files.get(database_type)
+
+        schema_file = schema_files.get(database_type, f"{database_type}_schema.json")
         if not schema_file:
             # Return default with only glucose as continuous
             # Use standard field name
@@ -240,6 +242,233 @@ class GlucoseMLPreprocessor:
             result['continuous'].append(glucose_col)
         
         return result
+
+    @staticmethod
+    def _df_estimated_size_bytes(df: pl.DataFrame) -> int:
+        """
+        Best-effort DataFrame size estimate for buffering decisions.
+        """
+        try:
+            return int(df.estimated_size())  # type: ignore[attr-defined]
+        except Exception:
+            # Conservative fallback: rows * cols * 16 bytes
+            return int(len(df) * max(1, len(df.columns)) * 16)
+
+    def _streaming_buffer_max_bytes(self) -> int:
+        """
+        Configurable maximum buffered bytes before flushing to disk.
+        """
+        mb = self.config.get("streaming_max_buffer_mb")
+        try:
+            mb_i = int(mb) if mb is not None else 256
+        except Exception:
+            mb_i = 256
+        return max(32, mb_i) * 1024 * 1024
+
+    def _streaming_flush_max_users(self) -> int:
+        """
+        Maximum number of per-user chunks to buffer before flushing (independent of bytes).
+        """
+        v = self.config.get("streaming_flush_max_users")
+        try:
+            n = int(v) if v is not None else 10
+        except Exception:
+            n = 10
+        return max(1, n)
+
+    def _write_csv_append(self, df: pl.DataFrame, *, output_file: str, include_header: bool) -> None:
+        with open(output_file, "ab") as f:
+            df.write_csv(f, null_value="", include_header=include_header)
+
+    def _compute_expected_output_columns(self, database_types: List[str]) -> list[str]:
+        """
+        Compute a stable CSV schema (final/output column names) for streaming multi-database writes.
+        Uses schema `field_categories` keys (standard names) + config display-name mapping.
+        """
+        field_to_display = CSVFormatConverter.get_field_to_display_name_map()
+
+        # Strict mode: only output_fields + selected service fields (+ sequence_id)
+        if bool(self.config.get("restrict_output_to_config_fields", False)):
+            output_fields = CSVFormatConverter.get_output_fields()
+            service_allow = self.config.get("service_fields_allowlist")
+            service_keep = {str(x) for x in service_allow} if isinstance(service_allow, list) else set()
+
+            allowed_standard = set(output_fields) | service_keep | {"sequence_id"}
+            cols = ["sequence_id"]
+            for c in output_fields:
+                if c == "sequence_id":
+                    continue
+                cols.append(field_to_display.get(c, c))
+            for c in sorted(service_keep):
+                disp = field_to_display.get(c, c)
+                if disp not in set(cols):
+                    cols.append(disp)
+            # De-dupe while preserving order
+            seen: set[str] = set()
+            out: list[str] = []
+            for c in cols:
+                if c not in seen:
+                    out.append(c)
+                    seen.add(c)
+            return out
+
+        cols: list[str] = ["sequence_id"]
+        for f in CSVFormatConverter.get_output_fields():
+            if f == "sequence_id":
+                continue
+            cols.append(field_to_display.get(f, f))
+
+        extra: set[str] = set()
+        for db in database_types:
+            schema_file = {
+                "uom": "uom_schema.json",
+                "dexcom": "dexcom_schema.json",
+                "libre3": "freestyle_libre3_schema.json",
+                "freestyle_libre3": "freestyle_libre3_schema.json",
+            }.get(db, f"{db}_schema.json")
+            schema_path = Path(__file__).parent / "formats" / schema_file
+            if not schema_path.exists():
+                continue
+            with open(schema_path, "r", encoding="utf-8") as f:
+                schema = json.load(f)
+            for standard_name in schema.get("field_categories", {}).keys():
+                if standard_name == "sequence_id":
+                    continue
+                extra.add(field_to_display.get(standard_name, standard_name))
+
+        for c in sorted(extra):
+            if c not in set(cols):
+                cols.append(c)
+        return cols
+
+    def _process_streaming_from_converter(
+        self,
+        *,
+        data_folder: str,
+        database_type: str,
+        output_file: str,
+        last_sequence_id: int,
+        field_categories_dict: Optional[Dict[str, List[str]]],
+    ) -> Tuple[pl.DataFrame, Dict[str, Any], int]:
+        """
+        Generic bounded-memory streaming processing for any converter that supports
+        `iter_user_event_frames(data_folder, interval_minutes=...)`.
+        """
+        db_detector = DatabaseDetector()
+        database_converter = db_detector.get_database_converter(database_type, self.config or {})
+        if database_converter is None:
+            raise ValueError(f"No converter available for database type: {database_type}")
+
+        iter_fn = getattr(database_converter, "iter_user_event_frames", None)
+        if not callable(iter_fn):
+            raise ValueError(f"Converter for {database_type} does not support streaming frames")
+
+        Path(output_file).write_text("", encoding="utf-8")
+
+        expected_cols = self._compute_expected_output_columns([database_type])
+        max_bytes = self._streaming_buffer_max_bytes()
+        max_users = self._streaming_flush_max_users()
+
+        wrote_header = False
+        current_last_sequence_id = last_sequence_id
+        buffered: list[pl.DataFrame] = []
+        buffered_bytes = 0
+        buffered_users = 0
+
+        total_records = 0
+        total_sequences = 0
+        original_records = 0
+        min_ts: Optional[str] = None
+        max_ts: Optional[str] = None
+
+        def flush() -> None:
+            nonlocal wrote_header, buffered, buffered_bytes, buffered_users, total_records, total_sequences
+            if not buffered:
+                return
+            # Write frames individually to avoid dtype mismatches (Null vs Float64) during concat.
+            frames = buffered
+            buffered = []
+            buffered_bytes = 0
+            buffered_users = 0
+            for frame in frames:
+                missing = [c for c in expected_cols if c not in frame.columns]
+                if missing:
+                    frame = frame.with_columns([pl.lit(None).alias(c) for c in missing])
+                frame = frame.select([c for c in expected_cols if c in frame.columns])
+                total_records += len(frame)
+                if "sequence_id" in frame.columns:
+                    total_sequences += int(frame["sequence_id"].n_unique())
+                self._write_csv_append(frame, output_file=output_file, include_header=not wrote_header)
+                wrote_header = True
+
+        for user_df in iter_fn(data_folder, interval_minutes=self.expected_interval_minutes):
+            if len(user_df) == 0:
+                continue
+            original_records += len(user_df)
+
+            # Track date range
+            try:
+                umin = user_df["timestamp"].min()
+                umax = user_df["timestamp"].max()
+                if umin is not None:
+                    s = umin.strftime("%Y-%m-%dT%H:%M:%S")
+                    min_ts = s if (min_ts is None or s < min_ts) else min_ts
+                if umax is not None:
+                    s = umax.strftime("%Y-%m-%dT%H:%M:%S")
+                    max_ts = s if (max_ts is None or s > max_ts) else max_ts
+            except Exception:
+                pass
+
+            df, _gap_stats, current_last_sequence_id = self.detect_gaps_and_sequences(
+                user_df, current_last_sequence_id, field_categories_dict
+            )
+            df, _ = self.interpolate_missing_values(df, field_categories_dict)
+            df, _ = self.filter_sequences_by_length(df)
+            if self.create_fixed_frequency:
+                df, _ = self.create_fixed_frequency_data(df, field_categories_dict)
+            df, _ = self.filter_glucose_only(df)
+            ml_df = self.prepare_ml_data(df)
+
+            # Align schema
+            missing = [c for c in expected_cols if c not in ml_df.columns]
+            if missing:
+                ml_df = ml_df.with_columns([pl.lit(None).alias(c) for c in missing])
+            ml_df = ml_df.select([c for c in expected_cols if c in ml_df.columns])
+
+            buffered.append(ml_df)
+            buffered_bytes += self._df_estimated_size_bytes(ml_df)
+            buffered_users += 1
+
+            if buffered_bytes >= max_bytes or buffered_users >= max_users:
+                flush()
+
+        flush()
+
+        stats = {
+            "dataset_overview": {
+                "total_records": total_records,
+                "total_sequences": total_sequences,
+                "date_range": {"start": min_ts or "N/A", "end": max_ts or "N/A"},
+                "original_records": original_records,
+            },
+            "sequence_analysis": {
+                "sequence_lengths": {"count": total_sequences, "mean": 0, "std": 0, "min": 0, "25%": 0, "50%": 0, "75%": 0, "max": 0},
+                "longest_sequence": 0,
+                "shortest_sequence": 0,
+                "sequences_by_length": {},
+            },
+            "gap_analysis": {},
+            "interpolation_analysis": {},
+            "calibration_removal_analysis": {},
+            "filtering_analysis": {},
+            "replacement_analysis": {},
+            "fixed_frequency_analysis": {},
+            "glucose_filtering_analysis": {},
+            "data_quality": {},
+        }
+
+        placeholder = pl.DataFrame({"sequence_id": pl.Series([], dtype=pl.Int64)})
+        return placeholder, stats, current_last_sequence_id
     
     def parse_timestamp(self, timestamp_str: str) -> datetime:
         """Parse timestamp string to datetime object for sorting."""
@@ -1942,6 +2171,30 @@ class GlucoseMLPreprocessor:
         
         if rename_map:
             ml_df = ml_df.rename(rename_map)
+
+        # Optional strict output filtering:
+        # Keep only configured output_fields + selected service fields (+ sequence_id/user_id if present).
+        if bool(self.config.get("restrict_output_to_config_fields", False)):
+            service_allow = self.config.get("service_fields_allowlist")
+            if isinstance(service_allow, list):
+                service_keep = {str(x) for x in service_allow}
+            else:
+                # default: keep all service fields (standard names)
+                service_keep = set(service_fields)
+
+            allowed_standard = set(output_fields) | service_keep | {"sequence_id"}
+            if "user_id" in df.columns:
+                allowed_standard.add("user_id")
+
+            # Convert to final/output column names (after display-name mapping)
+            allowed_cols = {field_to_display_map.get(c, c) for c in allowed_standard}
+
+            # Always keep sequence_id if present
+            if "sequence_id" in ml_df.columns:
+                allowed_cols.add("sequence_id")
+
+            # Filter columns, preserving order
+            ml_df = ml_df.select([c for c in ml_df.columns if c in allowed_cols])
         
         return ml_df
     
@@ -2047,6 +2300,22 @@ class GlucoseMLPreprocessor:
         # Keep for downstream flexible-field casting/statistics
         self._field_categories_dict = field_categories_dict
         
+        # Generic bounded-memory streaming: if converter exposes `iter_user_event_frames`
+        # and an output_file is provided, stream to disk instead of building a giant DataFrame.
+        database_converter = db_detector.get_database_converter(database_type, self.config or {})
+        if (
+            output_file
+            and database_converter is not None
+            and callable(getattr(database_converter, "iter_user_event_frames", None))
+        ):
+            return self._process_streaming_from_converter(
+                data_folder=csv_folder,
+                database_type=database_type,
+                output_file=output_file,
+                last_sequence_id=last_sequence_id,
+                field_categories_dict=field_categories_dict,
+            )
+        
         # Step 1: Consolidate CSV files (mandatory step)
         if self.save_intermediate_files:
             consolidated_file = "consolidated_data.csv"
@@ -2149,6 +2418,7 @@ class GlucoseMLPreprocessor:
         print("Preprocessing completed successfully!")
         
         return ml_df, stats, last_sequence_id
+
     
     def process_multiple_databases(self, csv_folders: List[str], output_file: str = None, last_sequence_id: int = 0) -> Tuple[pl.DataFrame, Dict[str, Any], int]:
         """
@@ -2169,6 +2439,150 @@ class GlucoseMLPreprocessor:
         print(f"Starting multi-database processing for {len(csv_folders)} databases...")
         print(f"Databases to process: {', '.join(csv_folders)}")
         print("-" * 50)
+
+        db_detector = DatabaseDetector()
+        db_types: list[str] = []
+        for p in csv_folders:
+            try:
+                db_types.append(db_detector.detect_database_type(p))
+            except Exception:
+                db_types.append("unknown")
+        
+        # Generic streaming multi-db writer: if any converter supports `iter_user_event_frames`
+        # and output_file is provided, stream-combine outputs to avoid large in-memory concatenations.
+        converters = [db_detector.get_database_converter(t, self.config or {}) for t in db_types]
+        streaming_capable = any(c is not None and callable(getattr(c, "iter_user_event_frames", None)) for c in converters)
+        if streaming_capable and output_file:
+            expected_cols = self._compute_expected_output_columns(db_types)
+            max_bytes = self._streaming_buffer_max_bytes()
+            max_users = self._streaming_flush_max_users()
+            Path(output_file).write_text("", encoding="utf-8")
+
+            current_last_sequence_id = last_sequence_id
+            wrote_header = False
+            buffered: list[pl.DataFrame] = []
+            buffered_bytes = 0
+            buffered_users = 0
+            total_records = 0
+            total_sequences = 0
+            min_ts: Optional[str] = None
+            max_ts: Optional[str] = None
+
+            def flush() -> None:
+                nonlocal wrote_header, buffered, buffered_bytes, buffered_users, total_records, total_sequences
+                if not buffered:
+                    return
+                frames = buffered
+                buffered = []
+                buffered_bytes = 0
+                buffered_users = 0
+                for frame in frames:
+                    missing = [c for c in expected_cols if c not in frame.columns]
+                    if missing:
+                        frame = frame.with_columns([pl.lit(None).alias(c) for c in missing])
+                    frame = frame.select([c for c in expected_cols if c in frame.columns])
+                    total_records += len(frame)
+                    if "sequence_id" in frame.columns:
+                        total_sequences += int(frame["sequence_id"].n_unique())
+                    self._write_csv_append(frame, output_file=output_file, include_header=not wrote_header)
+                    wrote_header = True
+
+            for idx, (csv_folder, db_type, converter) in enumerate(zip(csv_folders, db_types, converters), 1):
+                print(f"\n{'=' * 60}")
+                print(f"PROCESSING DATABASE {idx}/{len(csv_folders)}: {csv_folder}")
+                print(f"{'=' * 60}\n")
+
+                if converter is not None and callable(getattr(converter, "iter_user_event_frames", None)):
+                    field_categories_dict = self.extract_field_categories(db_type) if db_type != "unknown" else None
+                    for user_df in converter.iter_user_event_frames(csv_folder, interval_minutes=self.expected_interval_minutes):
+                        if len(user_df) == 0:
+                            continue
+
+                        # Track date range
+                        try:
+                            umin = user_df["timestamp"].min()
+                            umax = user_df["timestamp"].max()
+                            if umin is not None:
+                                s = umin.strftime("%Y-%m-%dT%H:%M:%S")
+                                min_ts = s if (min_ts is None or s < min_ts) else min_ts
+                            if umax is not None:
+                                s = umax.strftime("%Y-%m-%dT%H:%M:%S")
+                                max_ts = s if (max_ts is None or s > max_ts) else max_ts
+                        except Exception:
+                            pass
+
+                        df, _gap_stats, current_last_sequence_id = self.detect_gaps_and_sequences(
+                            user_df, current_last_sequence_id, field_categories_dict
+                        )
+                        df, _ = self.interpolate_missing_values(df, field_categories_dict)
+                        df, _ = self.filter_sequences_by_length(df)
+                        if self.create_fixed_frequency:
+                            df, _ = self.create_fixed_frequency_data(df, field_categories_dict)
+                        df, _ = self.filter_glucose_only(df)
+                        ml_df = self.prepare_ml_data(df)
+
+                        missing = [c for c in expected_cols if c not in ml_df.columns]
+                        if missing:
+                            ml_df = ml_df.with_columns([pl.lit(None).alias(c) for c in missing])
+                        ml_df = ml_df.select([c for c in expected_cols if c in ml_df.columns])
+
+                        buffered.append(ml_df)
+                        buffered_bytes += self._df_estimated_size_bytes(ml_df)
+                        buffered_users += 1
+                        if buffered_bytes >= max_bytes or buffered_users >= max_users:
+                            flush()
+                else:
+                    # Process in-memory and append
+                    ml_df, stats, current_last_sequence_id = self.process(
+                        csv_folder, output_file=None, last_sequence_id=current_last_sequence_id
+                    )
+                    try:
+                        dr = stats.get("dataset_overview", {}).get("date_range", {}) if isinstance(stats, dict) else {}
+                        if dr.get("start") and dr["start"] != "N/A":
+                            min_ts = dr["start"] if (min_ts is None or dr["start"] < min_ts) else min_ts
+                        if dr.get("end") and dr["end"] != "N/A":
+                            max_ts = dr["end"] if (max_ts is None or dr["end"] > max_ts) else max_ts
+                    except Exception:
+                        pass
+
+                    missing = [c for c in expected_cols if c not in ml_df.columns]
+                    if missing:
+                        ml_df = ml_df.with_columns([pl.lit(None).alias(c) for c in missing])
+                    ml_df = ml_df.select([c for c in expected_cols if c in ml_df.columns])
+
+                    buffered.append(ml_df)
+                    buffered_bytes += self._df_estimated_size_bytes(ml_df)
+                    buffered_users += 1
+                    if buffered_bytes >= max_bytes or buffered_users >= max_users:
+                        flush()
+
+            flush()
+
+            aggregated_stats = {
+                "dataset_overview": {
+                    "total_records": total_records,
+                    "total_sequences": total_sequences,
+                    "date_range": {"start": min_ts or "N/A", "end": max_ts or "N/A"},
+                    "original_records": total_records,
+                },
+                "sequence_analysis": {
+                    "sequence_lengths": {"count": total_sequences, "mean": 0, "std": 0, "min": 0, "25%": 0, "50%": 0, "75%": 0, "max": 0},
+                    "longest_sequence": 0,
+                    "shortest_sequence": 0,
+                    "sequences_by_length": {},
+                },
+                "gap_analysis": {},
+                "interpolation_analysis": {},
+                "calibration_removal_analysis": {},
+                "filtering_analysis": {},
+                "replacement_analysis": {},
+                "fixed_frequency_analysis": {},
+                "glucose_filtering_analysis": {},
+                "data_quality": {},
+            }
+
+            placeholder = pl.DataFrame({"sequence_id": pl.Series([], dtype=pl.Int64)})
+            return placeholder, aggregated_stats, current_last_sequence_id
         
         all_dataframes = []
         all_statistics = []
