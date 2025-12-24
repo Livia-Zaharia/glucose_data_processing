@@ -25,17 +25,7 @@
     "respiratory_rate": "continuous",
     "oxygen_saturation_percent": "continuous",
 
-    "sleep_level": "occasional",
-
-    "ambient_temperature_c": "continuous",
-    "relative_humidity_percent": "continuous",
-    "voc_index": "continuous",
-    "nox_index": "continuous",
-    "pm1_ugm3": "continuous",
-    "pm2_5_ugm3": "continuous",
-    "pm4_ugm3": "continuous",
-    "pm10_ugm3": "continuous",
-    "inttemp_c": "continuous"
+    "sleep_level": "occasional"
   },
   "converters": {
     "cgm_dexcom_g6": {
@@ -116,26 +106,6 @@
       "timestamp_path": "effective_time_frame.date_time",
       "field_paths": {
         "oxygen_saturation.value": "oxygen_saturation_percent"
-      }
-    },
-    "environment_sensor": {
-      "format": "csv",
-      "event_type": "Environment",
-      "timestamp_field": "ts",
-      "field_mappings": {
-        "hum": "relative_humidity_percent",
-        "temp": "ambient_temperature_c",
-        "voc": "voc_index",
-        "nox": "nox_index",
-        "pm1": "pm1_ugm3",
-        "pm2.5": "pm2_5_ugm3",
-        "pm4": "pm4_ugm3",
-        "pm10": "pm10_ugm3",
-        "inttemp": "inttemp_c"
-      },
-      "csv_options": {
-        "skip_rows": 45,
-        "truncate_ragged_lines": true
       }
     }
   }

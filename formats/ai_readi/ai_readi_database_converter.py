@@ -40,12 +40,6 @@ class _AIReadIZipLayout:
             f"wearable_activity_monitor/{modality}/garmin_vivosmart5/{user_id}/{user_id}_{suffix}.json"
         )
 
-    def env_csv(self, user_id: str) -> str:
-        return (
-            f"{self.dataset_root}"
-            f"environment/environmental_sensor/leelab_anura/{user_id}/{user_id}_ENV.csv"
-        )
-
 
 def _find_dataset_root(zip_ref: zipfile.ZipFile) -> str:
     """
@@ -221,9 +215,6 @@ class AIReadIDatabaseConverter(DatabaseConverter):
         rows.extend(self._extract_garmin_respiratory_rate(zip_ref, layout, user_id, meta))
         rows.extend(self._extract_garmin_oxygen_saturation(zip_ref, layout, user_id, meta))
 
-        # Environment
-        rows.extend(self._extract_environment(zip_ref, layout, user_id, meta))
-
         return rows
 
     def _extract_user_frame(
@@ -315,10 +306,6 @@ class AIReadIDatabaseConverter(DatabaseConverter):
         sleep = self._extract_sleep_df(zip_ref, layout, user_id)
         if sleep is not None:
             frames.append(self._resample(sleep, interval, agg="last"))
-
-        env = self._extract_env_df(zip_ref, layout, user_id)
-        if env is not None:
-            frames.append(self._resample(env, interval, agg="mean"))
 
         if not frames:
             return pl.DataFrame({"user_id": [], "timestamp": [], "event_type": []})
@@ -444,51 +431,6 @@ class AIReadIDatabaseConverter(DatabaseConverter):
         if not ts_list:
             return None
         return pl.DataFrame({"timestamp": ts_list, value_col: val_list})
-
-    def _extract_env_df(
-        self, zip_ref: zipfile.ZipFile, layout: _AIReadIZipLayout, user_id: str
-    ) -> Optional[pl.DataFrame]:
-        member = layout.env_csv(user_id)
-        try:
-            with zip_ref.open(member) as f:
-                # Environment CSV is large, but per-user read is bounded and will be resampled.
-                data = f.read()
-        except KeyError:
-            return None
-
-        df = pl.read_csv(
-            io.BytesIO(data),
-            skip_rows=45,
-            infer_schema_length=10_000,
-            ignore_errors=True,
-            truncate_ragged_lines=True,
-        )
-        if "ts" not in df.columns:
-            return None
-
-        keep = [c for c in ["ts", "hum", "temp", "voc", "nox", "pm1", "pm2.5", "pm4", "pm10", "inttemp"] if c in df.columns]
-        df = df.select(keep).rename({"ts": "timestamp"})
-
-        # Parse timestamp and rename fields to standard names.
-        df = df.with_columns(
-            pl.col("timestamp").map_elements(_parse_timestamp_to_naive_utc, return_dtype=pl.Datetime).alias("timestamp")
-        ).filter(pl.col("timestamp").is_not_null())
-
-        rename_map = {
-            "hum": "relative_humidity_percent",
-            "temp": "ambient_temperature_c",
-            "voc": "voc_index",
-            "nox": "nox_index",
-            "pm1": "pm1_ugm3",
-            "pm2.5": "pm2_5_ugm3",
-            "pm4": "pm4_ugm3",
-            "pm10": "pm10_ugm3",
-            "inttemp": "inttemp_c",
-        }
-        rename_map = {k: v for k, v in rename_map.items() if k in df.columns}
-        if rename_map:
-            df = df.rename(rename_map)
-        return df
 
     def _resample(self, df: pl.DataFrame, every: str, *, agg: str) -> pl.DataFrame:
         """
@@ -688,64 +630,6 @@ class AIReadIDatabaseConverter(DatabaseConverter):
             value_path="oxygen_saturation.value",
             output_field="oxygen_saturation_percent",
         )
-
-    def _extract_environment(
-        self, zip_ref: zipfile.ZipFile, layout: _AIReadIZipLayout, user_id: str, meta: dict[str, Any]
-    ) -> list[dict[str, Any]]:
-        member = layout.env_csv(user_id)
-        try:
-            with zip_ref.open(member) as f:
-                # Environment CSVs can be large (~tens of MB). This initial implementation reads
-                # the full CSV for a user. The streaming todo will replace this with a bounded
-                # resampling pipeline.
-                data = f.read()
-        except KeyError:
-            return []
-
-        df = pl.read_csv(
-            io.BytesIO(data),
-            skip_rows=45,
-            infer_schema_length=10_000,
-            ignore_errors=True,
-            truncate_ragged_lines=True,
-        )
-        if "ts" not in df.columns:
-            return []
-
-        cols = [c for c in ["ts", "hum", "temp", "voc", "nox", "pm1", "pm2.5", "pm4", "pm10", "inttemp"] if c in df.columns]
-        df = df.select(cols)
-
-        # Convert to rows.
-        out: list[dict[str, Any]] = []
-        for r in df.iter_rows(named=True):
-            ts = r.get("ts")
-            if not isinstance(ts, str) or not ts:
-                continue
-            row = self._base_row(user_id, meta, event_type="Environment", timestamp=ts)
-
-            # Map to standard names
-            if "hum" in r and r["hum"] is not None:
-                row["relative_humidity_percent"] = r["hum"]
-            if "temp" in r and r["temp"] is not None:
-                row["ambient_temperature_c"] = r["temp"]
-            if "voc" in r and r["voc"] is not None:
-                row["voc_index"] = r["voc"]
-            if "nox" in r and r["nox"] is not None:
-                row["nox_index"] = r["nox"]
-            if "pm1" in r and r["pm1"] is not None:
-                row["pm1_ugm3"] = r["pm1"]
-            if "pm2.5" in r and r["pm2.5"] is not None:
-                row["pm2_5_ugm3"] = r["pm2.5"]
-            if "pm4" in r and r["pm4"] is not None:
-                row["pm4_ugm3"] = r["pm4"]
-            if "pm10" in r and r["pm10"] is not None:
-                row["pm10_ugm3"] = r["pm10"]
-            if "inttemp" in r and r["inttemp"] is not None:
-                row["inttemp_c"] = r["inttemp"]
-
-            out.append(row)
-
-        return out
 
     def _extract_simple_value_series(
         self,
