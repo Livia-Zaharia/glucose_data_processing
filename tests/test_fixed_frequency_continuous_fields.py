@@ -8,16 +8,17 @@ Tests various scenarios with out-of-sync continuous fields:
 3. Occasional fields (insulin, carbs) shifting to nearest grid points
 4. Edge cases with missing values, overlapping timestamps, etc.
 
-Note: These tests are expected to FAIL initially since create_fixed_frequency_data()
-does not yet handle multiple continuous fields. The tests serve as specifications
-for the future implementation.
+Note: These tests verify that create_fixed_frequency_data() correctly
+handles multiple continuous fields by interpolating them independently
+at all fixed-frequency grid points.
 
 REQUIREMENTS VERIFIED:
-- ✓ Occasional fields (insulin, carbs) ARE shifted to nearest grid points (working)
-- ✗ Continuous fields should be interpolated at all grid points (not implemented yet)
-- ✗ Multiple continuous fields should be handled independently (not implemented yet)
+- ✓ Occasional fields (insulin, carbs) ARE shifted to nearest grid points
+- ✓ Continuous fields ARE interpolated at all grid points
+- ✓ Multiple continuous fields ARE handled independently
 """
 
+import pytest
 import polars as pl
 from datetime import datetime, timedelta
 import sys
@@ -687,49 +688,5 @@ def test_mixed_continuous_and_occasional_fields_out_of_sync():
 
 
 if __name__ == '__main__':
-    print("Running tests for create_fixed_frequency_data() with multiple continuous fields...\n")
-    print("NOTE: These tests are expected to FAIL initially since the method")
-    print("does not yet handle multiple continuous fields.\n")
-    
-    try:
-        test_multiple_continuous_fields_out_of_sync()
-    except AssertionError as e:
-        print(f"✗ test_multiple_continuous_fields_out_of_sync FAILED (expected): {e}")
-    
-    try:
-        test_continuous_fields_with_missing_values_at_grid_points()
-    except AssertionError as e:
-        print(f"✗ test_continuous_fields_with_missing_values_at_grid_points FAILED (expected): {e}")
-    
-    try:
-        test_three_continuous_fields_different_patterns()
-    except AssertionError as e:
-        print(f"✗ test_three_continuous_fields_different_patterns FAILED (expected): {e}")
-    
-    try:
-        test_continuous_fields_with_irregular_timestamps()
-    except AssertionError as e:
-        print(f"✗ test_continuous_fields_with_irregular_timestamps FAILED (expected): {e}")
-    
-    try:
-        test_continuous_fields_only_glucose_in_categories()
-    except AssertionError as e:
-        print(f"✗ test_continuous_fields_only_glucose_in_categories FAILED (unexpected): {e}")
-    
-    try:
-        test_occasional_fields_shifted_with_multiple_continuous_fields()
-    except AssertionError as e:
-        print(f"✗ test_occasional_fields_shifted_with_multiple_continuous_fields FAILED (expected): {e}")
-    
-    try:
-        test_occasional_fields_collision_with_multiple_continuous_fields()
-    except AssertionError as e:
-        print(f"✗ test_occasional_fields_collision_with_multiple_continuous_fields FAILED (expected): {e}")
-    
-    try:
-        test_mixed_continuous_and_occasional_fields_out_of_sync()
-    except AssertionError as e:
-        print(f"✗ test_mixed_continuous_and_occasional_fields_out_of_sync FAILED (expected): {e}")
-    
-    print("\n✅ Test execution complete - failures are expected until implementation is complete")
+    pytest.main([__file__, "-v"])
 
