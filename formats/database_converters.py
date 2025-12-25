@@ -18,7 +18,7 @@ from formats.format_detector import CSVFormatDetector
 class DatabaseConverter(ABC):
     """Base class for database converters."""
     
-    def __init__(self, config: Dict[str, Any], output_fields: Optional[List[str]] = None):
+    def __init__(self, config: Dict[str, Any], output_fields: Optional[List[str]] = None, database_type: Optional[str] = None):
         """
         Initialize the database converter.
         
@@ -26,11 +26,21 @@ class DatabaseConverter(ABC):
             config: Configuration dictionary with database-specific settings
             output_fields: List of field names to include in converter output.
                           If None, uses default fields matching current usage.
+            database_type: String identifier for the database type (e.g., 'uom', 'ai_readi')
         """
         self.config = config
         self.output_fields = output_fields
+        self.database_type = database_type
         self.format_detector = CSVFormatDetector(output_fields)
-    
+
+    def _get_start_with_user_id(self) -> Optional[str]:
+        """Get the start_with_user_id parameter for this database from config."""
+        if not self.database_type:
+            return None
+        db_configs = self.config.get("database_configs", {})
+        db_config = db_configs.get(self.database_type, {})
+        return str(db_config.get("start_with_user_id")) if "start_with_user_id" in db_config else None
+
     @abstractmethod
     def consolidate_data(self, data_folder: str, output_file: Optional[str] = None) -> pl.DataFrame:
         """
@@ -339,13 +349,31 @@ class MultiUserDatabaseConverter(DatabaseConverter):
         # Process each user separately (sorted for deterministic processing order)
         users_processed = self._identify_users(data_path)
         
+        # Apply start_with_user_id skipping if specified
+        start_user_id = self._get_start_with_user_id()
+        sorted_users = sorted(users_processed.items(), key=lambda x: x[0])
+        
+        if start_user_id:
+            start_index = 0
+            found = False
+            for i, (user_id, _) in enumerate(sorted_users):
+                if user_id == start_user_id:
+                    start_index = i
+                    found = True
+                    break
+            if found:
+                print(f"Skipping users before {start_user_id} (found at index {start_index})")
+                sorted_users = sorted_users[start_index:]
+            else:
+                print(f"Warning: start_with_user_id '{start_user_id}' not found in database. Processing all users.")
+
         # Apply first_n_users filtering if specified
         first_n_users = self.config.get('first_n_users')
         if first_n_users and first_n_users > 0:
-            sorted_users = sorted(users_processed.items())
             users_processed = dict(sorted_users[:first_n_users])
             print(f"Found {len(users_processed)} users to process (limited to first {first_n_users} users)")
         else:
+            users_processed = dict(sorted_users)
             print(f"Found {len(users_processed)} users to process")
         
         for user_id, user_files in sorted(users_processed.items()):

@@ -357,7 +357,8 @@ class GlucoseMLPreprocessor:
         `iter_user_event_frames(data_folder, interval_minutes=...)`.
         """
         db_detector = DatabaseDetector()
-        database_converter = db_detector.get_database_converter(database_type, self.config or {})
+        output_fields = self.config.get("output_fields")
+        database_converter = db_detector.get_database_converter(database_type, self.config or {}, output_fields=output_fields)
         if database_converter is None:
             raise ValueError(f"No converter available for database type: {database_type}")
 
@@ -1500,18 +1501,23 @@ class GlucoseMLPreprocessor:
             seq_data = df.filter(pl.col('sequence_id') == seq_id).sort('timestamp')
             
             if len(seq_data) < 2:
-                # Keep single-point sequences as-is
-                all_fixed_sequences.append(seq_data)
+                # Keep single-point sequences as-is, but ensure column order and types match input df
+                all_fixed_sequences.append(seq_data.select(df.columns).cast(df.schema))
                 continue
                 
             fixed_freq_stats['sequences_processed'] += 1
             
             # Create fixed-frequency timestamps using Polars operations
             fixed_seq_data = self._create_fixed_frequency_sequence(seq_data, seq_id, fixed_freq_stats, field_categories_dict)
+            
+            # Ensure column order and types match input df
+            # Use select(df.columns) then cast(df.schema) for perfect alignment
+            fixed_seq_data = fixed_seq_data.select(df.columns).cast(df.schema)
             all_fixed_sequences.append(fixed_seq_data)
         
         # Combine all fixed sequences
         if all_fixed_sequences:
+            # All sequences now have identical schema due to select() and cast() above
             df_fixed = pl.concat(all_fixed_sequences).sort(['sequence_id', 'timestamp'])
         else:
             df_fixed = df
@@ -1763,7 +1769,10 @@ class GlucoseMLPreprocessor:
                 else:
                     result_df = result_df.with_columns([pl.lit(None).cast(col_type).alias(col)])
         
-        # Ensure columns are in same order as original (or at least include all original columns)
+        # Ensure columns are in same order as original
+        # Use select to reorder columns to match seq_data
+        result_df = result_df.select(seq_data.columns)
+        
         return result_df
     
     def _interpolate_continuous_fields_linear(self, fixed_timestamps: pl.DataFrame, seq_data: pl.DataFrame, stats: Dict[str, Any], continuous_fields: List[str]) -> pl.DataFrame:
@@ -2603,7 +2612,9 @@ class GlucoseMLPreprocessor:
             ml_df, stats, current_last_sequence_id = self.process(csv_folder, output_file=None, last_sequence_id=current_last_sequence_id)
             
             # Remove user_id column if present (to ensure consistent schema across databases)
-            if 'user_id' in ml_df.columns:
+            # Unless user_id is explicitly requested in output_fields
+            output_fields = CSVFormatConverter.get_output_fields()
+            if 'user_id' in ml_df.columns and 'user_id' not in output_fields:
                 print(f"\n⚙️  Removing user_id column for multi-database compatibility...")
                 ml_df = ml_df.drop('user_id')
             
@@ -2966,18 +2977,19 @@ def print_statistics(stats: Dict[str, Any], preprocessor: 'GlucoseMLPreprocessor
     print(f"   Median Sequence Length: {seq_analysis['sequence_lengths']['50%']:.1f} records")
     
     # Gap Analysis
-    gap_analysis = stats['gap_analysis']
-    print(f"\nGAP ANALYSIS:")
-    print(f"   Total Gaps > {preprocessor.small_gap_max_minutes if preprocessor else 'N/A'} minutes: {gap_analysis['total_gaps']:,}")
-    print(f"   Sequences Created: {gap_analysis['total_sequences']:,}")
+    gap_analysis = stats.get('gap_analysis', {})
+    if gap_analysis:
+        print(f"\nGAP ANALYSIS:")
+        print(f"   Total Gaps > {preprocessor.small_gap_max_minutes if preprocessor else 'N/A'} minutes: {gap_analysis.get('total_gaps', 0):,}")
+        print(f"   Sequences Created: {gap_analysis.get('total_sequences', 0):,}")
     
     # Calibration Period Analysis
-    if 'calibration_period_analysis' in gap_analysis:
+    if 'calibration_period_analysis' in gap_analysis and gap_analysis['calibration_period_analysis']:
         calib_analysis = gap_analysis['calibration_period_analysis']
         print(f"\nCALIBRATION PERIOD ANALYSIS:")
-        print(f"   Calibration Periods Detected: {calib_analysis['calibration_periods_detected']:,}")
-        print(f"   Records Removed After Calibration: {calib_analysis['total_records_marked_for_removal']:,}")
-        print(f"   Sequences Affected: {calib_analysis['sequences_marked_for_removal']:,}")
+        print(f"   Calibration Periods Detected: {calib_analysis.get('calibration_periods_detected', 0):,}")
+        print(f"   Records Removed After Calibration: {calib_analysis.get('total_records_marked_for_removal', 0):,}")
+        print(f"   Sequences Affected: {calib_analysis.get('sequences_marked_for_removal', 0):,}")
     
     # High/Low Value Replacement Analysis
     if 'replacement_analysis' in stats and stats['replacement_analysis']:
@@ -2989,19 +3001,20 @@ def print_statistics(stats: Dict[str, Any], preprocessor: 'GlucoseMLPreprocessor
         print(f"   Glucose Field Type: {'Float64' if replacement_analysis['glucose_field_converted_to_float'] else 'String'}")
     
     # Interpolation Analysis
-    interp_analysis = stats['interpolation_analysis']
-    print(f"\nINTERPOLATION ANALYSIS:")
-    print(f"   Small Gaps Identified and Processed: {interp_analysis['small_gaps_filled']:,}")
-    print(f"   Interpolated Data Points Created: {interp_analysis['total_interpolated_data_points']:,}")
-    print(f"   Total Field Interpolations: {interp_analysis['total_interpolations']:,}")
-    # Handle both old format (with slash) and new format (without slash)
-    glucose_interps = interp_analysis.get('glucose_value_mgdl_interpolations', 
-                                          interp_analysis.get('glucose_value_mg/dl_interpolations', 0))
-    print(f"   Glucose Interpolations: {glucose_interps:,}")
-    print(f"   Insulin Interpolations: {interp_analysis.get('insulin_value_u_interpolations', 0):,}")
-    print(f"   Carb Interpolations: {interp_analysis.get('carb_value_grams_interpolations', 0):,}")
-    print(f"   Large Gaps Skipped: {interp_analysis['large_gaps_skipped']:,}")
-    print(f"   Sequences Processed: {interp_analysis['sequences_processed']:,}")
+    interp_analysis = stats.get('interpolation_analysis', {})
+    if interp_analysis:
+        print(f"\nINTERPOLATION ANALYSIS:")
+        print(f"   Small Gaps Identified and Processed: {interp_analysis.get('small_gaps_filled', 0):,}")
+        print(f"   Interpolated Data Points Created: {interp_analysis.get('total_interpolated_data_points', 0):,}")
+        print(f"   Total Field Interpolations: {interp_analysis.get('total_interpolations', 0):,}")
+        # Handle both old format (with slash) and new format (without slash)
+        glucose_interps = interp_analysis.get('glucose_value_mgdl_interpolations', 
+                                              interp_analysis.get('glucose_value_mg/dl_interpolations', 0))
+        print(f"   Glucose Interpolations: {glucose_interps:,}")
+        print(f"   Insulin Interpolations: {interp_analysis.get('insulin_value_u_interpolations', 0):,}")
+        print(f"   Carb Interpolations: {interp_analysis.get('carb_value_grams_interpolations', 0):,}")
+        print(f"   Large Gaps Skipped: {interp_analysis.get('large_gaps_skipped', 0):,}")
+        print(f"   Sequences Processed: {interp_analysis.get('sequences_processed', 0):,}")
     
     # Calibration Removal Analysis
     if 'calibration_removal_analysis' in stats and stats['calibration_removal_analysis']:

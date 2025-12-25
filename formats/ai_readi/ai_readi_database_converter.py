@@ -155,9 +155,29 @@ class AIReadIDatabaseConverter(DatabaseConverter):
             participants = self._read_participants(zip_ref, layout)
 
             user_ids = sorted(participants.keys(), key=lambda x: int(x) if x.isdigit() else x)
+            
+            # Apply start_with_user_id skipping if specified
+            start_user_id = self._get_start_with_user_id()
+            if start_user_id:
+                start_index = 0
+                found = False
+                for i, uid in enumerate(user_ids):
+                    if uid == start_user_id:
+                        start_index = i
+                        found = True
+                        break
+                if found:
+                    print(f"Skipping AI-READI users before {start_user_id} (found at index {start_index})")
+                    user_ids = user_ids[start_index:]
+                else:
+                    print(f"Warning: start_with_user_id '{start_user_id}' not found in AI-READI database.")
+
+            # Apply first_n_users filtering if specified
             first_n_users = self.config.get("first_n_users")
             if first_n_users and int(first_n_users) > 0:
                 user_ids = user_ids[: int(first_n_users)]
+
+            print(f"Processing {len(user_ids)} AI-READI users...")
 
             for user_id in user_ids:
                 df = self._extract_user_frame(zip_ref, layout, user_id, participants[user_id], interval_minutes=interval_minutes)

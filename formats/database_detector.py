@@ -7,7 +7,7 @@ database types and returns the appropriate database converter.
 """
 
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 import zipfile
 
 from formats.database_converters import DatabaseConverter
@@ -120,19 +120,20 @@ class DatabaseDetector:
         
         return max(file_patterns, key=file_patterns.get)
     
-    def get_database_converter(self, database_type: str, config: Dict[str, Any]) -> Optional[DatabaseConverter]:
+    def get_database_converter(self, database_type: str, config: Dict[str, Any], output_fields: Optional[List[str]] = None) -> Optional[DatabaseConverter]:
         """
         Get the appropriate database converter for the given database type.
         
         Args:
             database_type: Database type string
             config: Configuration dictionary
+            output_fields: List of field names to include in output
             
         Returns:
             Database converter instance or None if type not supported
         """
         if database_type in self.database_converters:
-            return self.database_converters[database_type](config)
+            return self.database_converters[database_type](config, output_fields=output_fields, database_type=database_type)
         else:
             return None
     
