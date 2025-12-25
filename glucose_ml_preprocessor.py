@@ -179,15 +179,16 @@ class GlucoseMLPreprocessor:
         self.fields = StandardFieldNames()
     
     @staticmethod
-    def extract_field_categories(database_type: str) -> Dict[str, List[str]]:
+    def extract_field_categories(database_type: str) -> Dict[str, Any]:
         """
-        Extract field categories from schema file and map to display column names.
+        Extract field categories and settings from schema file.
         
         Args:
             database_type: Database type (e.g., 'uom', 'dexcom', 'freestyle_libre3')
             
         Returns:
-            Dictionary with categories as keys and lists of display column names as values
+            Dictionary with categories ('continuous', 'occasional', 'service') 
+            and settings (e.g., 'remove_after_calibration')
         """
         # Map database type to schema file name (legacy aliases).
         # Prefer convention: `<database_type>_schema.json` if present.
@@ -201,22 +202,22 @@ class GlucoseMLPreprocessor:
         schema_file = schema_files.get(database_type, f"{database_type}_schema.json")
         if not schema_file:
             # Return default with only glucose as continuous
-            # Use standard field name
             return {
                 'continuous': ['glucose_value_mgdl'],
                 'occasional': [],
-                'service': []
+                'service': [],
+                'remove_after_calibration': True
             }
         
         # Load schema file
         schema_path = Path(__file__).parent / 'formats' / schema_file
         if not schema_path.exists():
             # Return default if schema file doesn't exist
-            # Use standard field name
             return {
                 'continuous': ['glucose_value_mgdl'],
                 'occasional': [],
-                'service': []
+                'service': [],
+                'remove_after_calibration': True
             }
         
         with open(schema_path, 'r', encoding='utf-8') as f:
@@ -225,11 +226,12 @@ class GlucoseMLPreprocessor:
         # Get field_categories from schema
         field_categories = schema.get('field_categories', {})
         
-        # Build result dictionary using standard field names directly (no mapping to display names)
+        # Build result dictionary using standard field names directly
         result = {
             'continuous': [],
             'occasional': [],
-            'service': []
+            'service': [],
+            'remove_after_calibration': schema.get('remove_after_calibration', True)
         }
         
         for standard_name, category in field_categories.items():
@@ -530,7 +532,7 @@ class GlucoseMLPreprocessor:
         return df
         
 
-    def detect_gaps_and_sequences(self, df: pl.DataFrame, last_sequence_id: int = 0, field_categories_dict: Optional[Dict[str, List[str]]] = None) -> Tuple[pl.DataFrame, Dict[str, Any], int]:
+    def detect_gaps_and_sequences(self, df: pl.DataFrame, last_sequence_id: int = 0, field_categories_dict: Optional[Dict[str, Any]] = None) -> Tuple[pl.DataFrame, Dict[str, Any], int]:
         """
         Detect time gaps and create sequence IDs, marking calibration periods and sequences for removal.
         
@@ -623,7 +625,7 @@ class GlucoseMLPreprocessor:
         
         return df, stats, current_last_sequence_id
     
-    def _create_sequences_for_user(self, user_df: pl.DataFrame, last_sequence_id: int = 0, user_id: str = None, field_categories_dict: Optional[Dict[str, List[str]]] = None) -> Tuple[pl.DataFrame, Dict[str, int], int]:
+    def _create_sequences_for_user(self, user_df: pl.DataFrame, last_sequence_id: int = 0, user_id: str = None, field_categories_dict: Optional[Dict[str, Any]] = None) -> Tuple[pl.DataFrame, Dict[str, int], int]:
         """
         Create sequences for a single user's data and handle calibration periods.
         
@@ -779,7 +781,10 @@ class GlucoseMLPreprocessor:
         stats['calibration_periods_detected'] = df['is_calibration_gap'].sum()
         
         # If calibration gaps exist, mark data for removal
-        if stats['calibration_periods_detected'] > 0:
+        # This is only done if the schema flag 'remove_after_calibration' is True (default for raw data)
+        should_remove_calibration = field_categories_dict.get('remove_after_calibration', True) if field_categories_dict else True
+        
+        if stats['calibration_periods_detected'] > 0 and should_remove_calibration:
             # Get indices of calibration gaps
             calibration_indices = df.with_row_index().filter(pl.col('is_calibration_gap'))['index'].to_list()
             
