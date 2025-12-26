@@ -11,12 +11,10 @@ This script processes glucose monitoring data for ML training by:
 """
 
 import polars as pl
-import numpy as np
-import pandas as pd
 from typing import Tuple, Dict, Any, List, Optional
 from datetime import datetime, timedelta
 from pathlib import Path
-import csv
+from loguru import logger
 import warnings
 import yaml
 import sys
@@ -28,13 +26,11 @@ from formats.base_converter import CSVFormatConverter
 
 warnings.filterwarnings('ignore')
 
-# Set console encoding to UTF-8 to handle Unicode characters
-if hasattr(sys.stdout, 'reconfigure'):
-    try:
-        sys.stdout.reconfigure(encoding='utf-8')
-    except:
-        pass
-
+# Constants for common field names and literal values
+INTERPOLATED_EVENT_TYPE = 'Interpolated'
+DEFAULT_STREAMING_MAX_BUFFER_MB = 256
+DEFAULT_STREAMING_FLUSH_MAX_USERS = 10
+MIN_BUFFER_MB = 32
 
 class StandardFieldNames:
     """
@@ -49,8 +45,10 @@ class StandardFieldNames:
     FAST_ACTING_INSULIN = 'fast_acting_insulin_u'
     LONG_ACTING_INSULIN = 'long_acting_insulin_u'
     CARB_VALUE = 'carb_grams'
+    USER_ID = 'user_id'
+    SEQUENCE_ID = 'sequence_id'
     
-    def __init__(self):
+    def __init__(self) -> None:
         """Initialize standard field names."""
         # Get known standard fields from CSVFormatConverter
         self._known_fields = set(CSVFormatConverter.get_field_to_display_name_map().keys())
@@ -85,7 +83,7 @@ class GlucoseMLPreprocessor:
     """
     
     @classmethod
-    def from_config_file(cls, config_path: str, **cli_overrides):
+    def from_config_file(cls, config_path: Path, **cli_overrides: Any) -> "GlucoseMLPreprocessor":
         """
         Create a GlucoseMLPreprocessor instance from a YAML configuration file.
         
@@ -96,7 +94,7 @@ class GlucoseMLPreprocessor:
         Returns:
             GlucoseMLPreprocessor instance with loaded configuration
         """
-        with open(config_path, 'r') as file:
+        with open(config_path, 'r', encoding='utf-8') as file:
             config = yaml.safe_load(file)
         
         # Initialize CSVFormatConverter with field mappings from config
@@ -137,9 +135,9 @@ class GlucoseMLPreprocessor:
         low_glucose_value: int = 39,
         glucose_only: bool = False,
         create_fixed_frequency: bool = True,
-        config: Optional[Dict] = None,
+        config: Optional[Dict[str, Any]] = None,
         first_n_users: Optional[int] = None,
-    ):
+    ) -> None:
         """
         Initialize the preprocessor.
         
@@ -174,6 +172,8 @@ class GlucoseMLPreprocessor:
         self.expected_interval_seconds = expected_interval_minutes * 60
         self.small_gap_max_seconds = small_gap_max_minutes * 60
         self.calibration_period_seconds = calibration_period_minutes * 60
+        self._original_record_count: int = 0
+        self._field_categories_dict: Optional[Dict[str, Any]] = None
         
         # Initialize standard field names for universal field name handling
         self.fields = StandardFieldNames()
@@ -200,21 +200,13 @@ class GlucoseMLPreprocessor:
         }
 
         schema_file = schema_files.get(database_type, f"{database_type}_schema.json")
-        if not schema_file:
-            # Return default with only glucose as continuous
-            return {
-                'continuous': ['glucose_value_mgdl'],
-                'occasional': [],
-                'service': [],
-                'remove_after_calibration': True
-            }
         
         # Load schema file
         schema_path = Path(__file__).parent / 'formats' / schema_file
         if not schema_path.exists():
-            # Return default if schema file doesn't exist
+            # Return default with only glucose as continuous
             return {
-                'continuous': ['glucose_value_mgdl'],
+                'continuous': [StandardFieldNames.GLUCOSE_VALUE],
                 'occasional': [],
                 'service': [],
                 'remove_after_calibration': True
@@ -239,7 +231,7 @@ class GlucoseMLPreprocessor:
                 result[category].append(standard_name)
         
         # Always ensure glucose is in continuous (if it exists)
-        glucose_col = 'glucose_value_mgdl'
+        glucose_col = StandardFieldNames.GLUCOSE_VALUE
         if glucose_col not in result['continuous']:
             result['continuous'].append(glucose_col)
         
@@ -251,8 +243,8 @@ class GlucoseMLPreprocessor:
         Best-effort DataFrame size estimate for buffering decisions.
         """
         try:
-            return int(df.estimated_size())  # type: ignore[attr-defined]
-        except Exception:
+            return int(df.estimated_size())
+        except (AttributeError, ValueError):
             # Conservative fallback: rows * cols * 16 bytes
             return int(len(df) * max(1, len(df.columns)) * 16)
 
@@ -260,34 +252,35 @@ class GlucoseMLPreprocessor:
         """
         Configurable maximum buffered bytes before flushing to disk.
         """
-        mb = self.config.get("streaming_max_buffer_mb")
+        mb = self.config.get("streaming_max_buffer_mb", DEFAULT_STREAMING_MAX_BUFFER_MB)
         try:
-            mb_i = int(mb) if mb is not None else 256
-        except Exception:
-            mb_i = 256
-        return max(32, mb_i) * 1024 * 1024
+            mb_i = int(mb)
+        except (ValueError, TypeError):
+            mb_i = DEFAULT_STREAMING_MAX_BUFFER_MB
+        return max(MIN_BUFFER_MB, mb_i) * 1024 * 1024
 
     def _streaming_flush_max_users(self) -> int:
         """
         Maximum number of per-user chunks to buffer before flushing (independent of bytes).
         """
-        v = self.config.get("streaming_flush_max_users")
+        v = self.config.get("streaming_flush_max_users", DEFAULT_STREAMING_FLUSH_MAX_USERS)
         try:
-            n = int(v) if v is not None else 10
-        except Exception:
-            n = 10
+            n = int(v)
+        except (ValueError, TypeError):
+            n = DEFAULT_STREAMING_FLUSH_MAX_USERS
         return max(1, n)
 
-    def _write_csv_append(self, df: pl.DataFrame, *, output_file: str, include_header: bool) -> None:
+    def _write_csv_append(self, df: pl.DataFrame, *, output_file: Path, include_header: bool) -> None:
         with open(output_file, "ab") as f:
-            df.write_csv(f, null_value="", include_header=include_header)
+            df.write_csv(f, include_header=include_header)
 
-    def _compute_expected_output_columns(self, database_types: List[str]) -> list[str]:
+    def _compute_expected_output_columns(self, database_types: List[str]) -> List[str]:
         """
         Compute a stable CSV schema (final/output column names) for streaming multi-database writes.
         Uses schema `field_categories` keys (standard names) + config display-name mapping.
         """
         field_to_display = CSVFormatConverter.get_field_to_display_name_map()
+        seq_id_col = StandardFieldNames.SEQUENCE_ID
 
         # Strict mode: only output_fields + selected service fields (+ sequence_id)
         if bool(self.config.get("restrict_output_to_config_fields", False)):
@@ -295,10 +288,9 @@ class GlucoseMLPreprocessor:
             service_allow = self.config.get("service_fields_allowlist")
             service_keep = {str(x) for x in service_allow} if isinstance(service_allow, list) else set()
 
-            allowed_standard = set(output_fields) | service_keep | {"sequence_id"}
-            cols = ["sequence_id"]
+            cols = [seq_id_col]
             for c in output_fields:
-                if c == "sequence_id":
+                if c == seq_id_col:
                     continue
                 cols.append(field_to_display.get(c, c))
             for c in sorted(service_keep):
@@ -307,16 +299,16 @@ class GlucoseMLPreprocessor:
                     cols.append(disp)
             # De-dupe while preserving order
             seen: set[str] = set()
-            out: list[str] = []
+            out: List[str] = []
             for c in cols:
                 if c not in seen:
                     out.append(c)
                     seen.add(c)
             return out
 
-        cols: list[str] = ["sequence_id"]
+        cols: List[str] = [seq_id_col]
         for f in CSVFormatConverter.get_output_fields():
-            if f == "sequence_id":
+            if f == seq_id_col:
                 continue
             cols.append(field_to_display.get(f, f))
 
@@ -334,7 +326,7 @@ class GlucoseMLPreprocessor:
             with open(schema_path, "r", encoding="utf-8") as f:
                 schema = json.load(f)
             for standard_name in schema.get("field_categories", {}).keys():
-                if standard_name == "sequence_id":
+                if standard_name == seq_id_col:
                     continue
                 extra.add(field_to_display.get(standard_name, standard_name))
 
@@ -346,9 +338,9 @@ class GlucoseMLPreprocessor:
     def _process_streaming_from_converter(
         self,
         *,
-        data_folder: str,
+        data_folder: Path,
         database_type: str,
-        output_file: str,
+        output_file: Path,
         last_sequence_id: int,
         field_categories_dict: Optional[Dict[str, List[str]]],
     ) -> Tuple[pl.DataFrame, Dict[str, Any], int]:
@@ -366,7 +358,7 @@ class GlucoseMLPreprocessor:
         if not callable(iter_fn):
             raise ValueError(f"Converter for {database_type} does not support streaming frames")
 
-        Path(output_file).write_text("", encoding="utf-8")
+        output_file.write_text("", encoding="utf-8")
 
         expected_cols = self._compute_expected_output_columns([database_type])
         max_bytes = self._streaming_buffer_max_bytes()
@@ -374,7 +366,7 @@ class GlucoseMLPreprocessor:
 
         wrote_header = False
         current_last_sequence_id = last_sequence_id
-        buffered: list[pl.DataFrame] = []
+        buffered: List[pl.DataFrame] = []
         buffered_bytes = 0
         buffered_users = 0
 
@@ -383,6 +375,9 @@ class GlucoseMLPreprocessor:
         original_records = 0
         min_ts: Optional[str] = None
         max_ts: Optional[str] = None
+        
+        ts_col = StandardFieldNames.TIMESTAMP
+        seq_id_col = StandardFieldNames.SEQUENCE_ID
 
         def flush() -> None:
             nonlocal wrote_header, buffered, buffered_bytes, buffered_users, total_records, total_sequences
@@ -399,8 +394,8 @@ class GlucoseMLPreprocessor:
                     frame = frame.with_columns([pl.lit(None).alias(c) for c in missing])
                 frame = frame.select([c for c in expected_cols if c in frame.columns])
                 total_records += len(frame)
-                if "sequence_id" in frame.columns:
-                    total_sequences += int(frame["sequence_id"].n_unique())
+                if seq_id_col in frame.columns:
+                    total_sequences += int(frame[seq_id_col].n_unique())
                 self._write_csv_append(frame, output_file=output_file, include_header=not wrote_header)
                 wrote_header = True
 
@@ -411,15 +406,15 @@ class GlucoseMLPreprocessor:
 
             # Track date range
             try:
-                umin = user_df["timestamp"].min()
-                umax = user_df["timestamp"].max()
+                umin = user_df[ts_col].min()
+                umax = user_df[ts_col].max()
                 if umin is not None:
                     s = umin.strftime("%Y-%m-%dT%H:%M:%S")
                     min_ts = s if (min_ts is None or s < min_ts) else min_ts
                 if umax is not None:
                     s = umax.strftime("%Y-%m-%dT%H:%M:%S")
                     max_ts = s if (max_ts is None or s > max_ts) else max_ts
-            except Exception:
+            except (KeyError, AttributeError, ValueError):
                 pass
 
             df, _gap_stats, current_last_sequence_id = self.detect_gaps_and_sequences(
@@ -470,10 +465,10 @@ class GlucoseMLPreprocessor:
             "data_quality": {},
         }
 
-        placeholder = pl.DataFrame({"sequence_id": pl.Series([], dtype=pl.Int64)})
+        placeholder = pl.DataFrame({seq_id_col: pl.Series([], dtype=pl.Int64)})
         return placeholder, stats, current_last_sequence_id
     
-    def parse_timestamp(self, timestamp_str: str) -> datetime:
+    def parse_timestamp(self, timestamp_str: str) -> Optional[datetime]:
         """Parse timestamp string to datetime object for sorting."""
         if not timestamp_str or timestamp_str.strip() == "":
             return None
@@ -496,8 +491,7 @@ class GlucoseMLPreprocessor:
         
         return None
     
-    
-    def consolidate_glucose_data(self, data_folder: str, output_file: str = None) -> pl.DataFrame:
+    def consolidate_glucose_data(self, data_folder: Path, output_file: Optional[Path] = None) -> pl.DataFrame:
         """Consolidate all data files in the folder into a single DataFrame.
         
         Args:
@@ -511,7 +505,7 @@ class GlucoseMLPreprocessor:
         db_detector = DatabaseDetector()
         database_type = db_detector.detect_database_type(data_folder)
         
-        print(f"Detected database type: {database_type}")
+        logger.info(f"Detected database type: {database_type}")
         
         if database_type == 'unknown':
             raise ValueError(f"Could not detect database type for folder: {data_folder}")
@@ -522,7 +516,7 @@ class GlucoseMLPreprocessor:
         if database_converter is None:
             raise ValueError(f"No converter available for database type: {database_type}")
         
-        print(f"Using {database_converter.get_database_name()}")
+        logger.info(f"Using {database_converter.get_database_name()}")
         
         # Consolidate data using the appropriate converter
         df = database_converter.consolidate_data(data_folder, output_file)
@@ -549,8 +543,12 @@ class GlucoseMLPreprocessor:
         Returns:
             Tuple of (DataFrame with sequence IDs and removal flags, statistics dictionary, last_sequence_id)
         """
-        print("Detecting gaps and creating sequences...")
+        logger.info("Detecting gaps and creating sequences...")
         
+        ts_col = StandardFieldNames.TIMESTAMP
+        user_id_col = StandardFieldNames.USER_ID
+        seq_id_col = StandardFieldNames.SEQUENCE_ID
+
         # Initialize statistics for calibration period analysis
         calibration_stats = {
             'calibration_periods_detected': 0,
@@ -562,45 +560,45 @@ class GlucoseMLPreprocessor:
         current_last_sequence_id = last_sequence_id
         
         # Handle multi-user data by processing each user separately
-        if 'user_id' in df.columns:
-            print("Processing multi-user data - creating sequences per user...")
-            all_sequences = []
+        if user_id_col in df.columns:
+            logger.info("Processing multi-user data - creating sequences per user...")
+            all_sequences: List[pl.DataFrame] = []
             
-            for user_id in sorted(df['user_id'].unique()):
-                user_data = df.filter(pl.col('user_id') == user_id).sort('timestamp')
+            for user_id in sorted(df[user_id_col].unique().to_list()):
+                user_data = df.filter(pl.col(user_id_col) == user_id).sort(ts_col)
                 user_sequences, user_calib_stats, current_last_sequence_id = self._create_sequences_for_user(
                     user_data, current_last_sequence_id, user_id, field_categories_dict
                 )
                 all_sequences.append(user_sequences)
                 
                 # Aggregate stats
-                calibration_stats['calibration_periods_detected'] += user_calib_stats['calibration_periods_detected']
-                calibration_stats['total_records_marked_for_removal'] += user_calib_stats['total_records_marked_for_removal']
+                calibration_stats['calibration_periods_detected'] += int(user_calib_stats['calibration_periods_detected'])
+                calibration_stats['total_records_marked_for_removal'] += int(user_calib_stats['total_records_marked_for_removal'])
             
             # Combine all user sequences
             if all_sequences:
-                df = pl.concat(all_sequences).sort(['user_id', 'sequence_id', 'timestamp'])
+                df = pl.concat(all_sequences).sort([user_id_col, seq_id_col, ts_col])
             else:
                 df = df.clear()
         else:
             # Single user data - process normally
-            df = df.sort('timestamp')
+            df = df.sort(ts_col)
             df, calibration_stats, current_last_sequence_id = self._create_sequences_for_user(df, current_last_sequence_id, None, field_categories_dict)
         
         # Calculate statistics
         # Use len() instead of count() for Polars 1.0+ compatibility
         # Handle empty DataFrame or DataFrame without sequence_id column
-        if len(df) > 0 and 'sequence_id' in df.columns:
-            if 'user_id' in df.columns:
-                sequence_counts = df.group_by(['user_id', 'sequence_id']).len().sort(['user_id', 'sequence_id'])
+        if len(df) > 0 and seq_id_col in df.columns:
+            if user_id_col in df.columns:
+                sequence_counts = df.group_by([user_id_col, seq_id_col]).len().sort([user_id_col, seq_id_col])
             else:
-                sequence_counts = df.group_by(['sequence_id']).len().sort('sequence_id')
+                sequence_counts = df.group_by([seq_id_col]).len().sort(seq_id_col)
             
             stats = {
-                'total_sequences': df['sequence_id'].n_unique(),
+                'total_sequences': df[seq_id_col].n_unique(),
                 'gap_positions': df['is_gap'].sum() if 'is_gap' in df.columns else 0,
                 'total_gaps': df['is_gap'].sum() if 'is_gap' in df.columns else 0,
-                'sequence_lengths': dict(zip(sequence_counts['sequence_id'].to_list(), sequence_counts['len'].to_list())) if len(sequence_counts) > 0 else {},
+                'sequence_lengths': dict(zip(sequence_counts[seq_id_col].to_list(), sequence_counts['len'].to_list())) if len(sequence_counts) > 0 else {},
                 'calibration_period_analysis': calibration_stats
             }
         else:
@@ -613,12 +611,12 @@ class GlucoseMLPreprocessor:
                 'calibration_period_analysis': calibration_stats
             }
         
-        print(f"Created {stats['total_sequences']} sequences")
-        print(f"Found {stats['total_gaps']} gaps > {self.small_gap_max_minutes} minutes")
+        logger.info(f"Created {stats['total_sequences']} sequences")
+        logger.info(f"Found {stats['total_gaps']} gaps > {self.small_gap_max_minutes} minutes")
         
         if calibration_stats['calibration_periods_detected'] > 0:
-            print(f"Detected {calibration_stats['calibration_periods_detected']} calibration periods")
-            print(f"Removed {calibration_stats['total_records_marked_for_removal']} records after calibration")
+            logger.info(f"Detected {calibration_stats['calibration_periods_detected']} calibration periods")
+            logger.info(f"Removed {calibration_stats['total_records_marked_for_removal']} records after calibration")
         
         # Remove temporary columns
         columns_to_remove = ['time_diff_seconds', 'is_gap', 'is_calibration_gap', 'remove_due_to_calibration']
@@ -626,7 +624,7 @@ class GlucoseMLPreprocessor:
         
         return df, stats, current_last_sequence_id
     
-    def _create_sequences_for_user(self, user_df: pl.DataFrame, last_sequence_id: int = 0, user_id: str = None, field_categories_dict: Optional[Dict[str, Any]] = None) -> Tuple[pl.DataFrame, Dict[str, int], int]:
+    def _create_sequences_for_user(self, user_df: pl.DataFrame, last_sequence_id: int = 0, user_id: Optional[str] = None, field_categories_dict: Optional[Dict[str, Any]] = None) -> Tuple[pl.DataFrame, Dict[str, Any], int]:
         """
         Create sequences for a single user's data and handle calibration periods.
         
@@ -643,6 +641,10 @@ class GlucoseMLPreprocessor:
         Returns:
             Tuple of (DataFrame with sequence IDs added and calibration data removed, calibration statistics, last_sequence_id)
         """
+        ts_col = StandardFieldNames.TIMESTAMP
+        glucose_col = StandardFieldNames.GLUCOSE_VALUE
+        seq_id_col = StandardFieldNames.SEQUENCE_ID
+
         stats = {
             'calibration_periods_detected': 0,
             'total_records_marked_for_removal': 0
@@ -653,7 +655,7 @@ class GlucoseMLPreprocessor:
 
         # Calculate time differences between consecutive timestamps
         df = user_df.with_columns([
-            pl.col('timestamp').diff().dt.total_seconds().alias('time_diff_seconds')
+            pl.col(ts_col).diff().dt.total_seconds().alias('time_diff_seconds')
         ])
         
         # Identify calibration gaps (based on timestamp differences)
@@ -669,44 +671,32 @@ class GlucoseMLPreprocessor:
         ])
         
         # If field_categories_dict is provided, also check gaps for continuous fields
-        # For backward compatibility: if only glucose is in continuous fields, use timestamp-based gaps only
-        # If there are OTHER continuous fields besides glucose, include glucose in continuous field gap detection
         if field_categories_dict is not None:
             continuous_fields = field_categories_dict.get('continuous', [])
-            # Filter to only fields that exist in the DataFrame
             continuous_fields = [f for f in continuous_fields if f in df.columns]
             
-            # Check if there are other continuous fields besides glucose
-            glucose_col = 'glucose_value_mgdl'
             continuous_fields_other = [f for f in continuous_fields if f != glucose_col]
             
-            # Only use continuous field gap detection if there are OTHER continuous fields
-            # This maintains backward compatibility for glucose-only cases
             if continuous_fields_other:
-                # Include glucose in gap detection when there are other continuous fields
-                # This ensures we detect gaps in all continuous fields, including glucose
                 continuous_fields_to_check = continuous_fields  # Include glucose
             else:
-                # Only glucose - base gaps on glucose timestamps (not all rows).
-                # Without this, event timestamps (insulin/carbs/etc) can "bridge" glucose gaps
-                # and reduce the number of detected sequences.
                 continuous_fields_to_check = []
                 if glucose_col in df.columns:
-                    non_null_rows = df.filter(pl.col(glucose_col).is_not_null()).sort('timestamp')
+                    non_null_rows = df.filter(pl.col(glucose_col).is_not_null()).sort(ts_col)
                     if len(non_null_rows) > 1:
                         non_null_with_diff = non_null_rows.with_columns(
-                            pl.col('timestamp').diff().dt.total_seconds().alias('field_time_diff')
+                            pl.col(ts_col).diff().dt.total_seconds().alias('field_time_diff')
                         )
                         gap_rows = non_null_with_diff.filter(
                             pl.col('field_time_diff') > self.small_gap_max_seconds
                         )
                         if len(gap_rows) > 0:
-                            gap_timestamps = set(gap_rows['timestamp'].to_list())
+                            gap_timestamps = set(gap_rows[ts_col].to_list())
                             if gap_timestamps:
                                 df = df.with_columns(
                                     (
                                         pl.col(glucose_col).is_not_null()
-                                        & pl.col('timestamp').is_in(list(gap_timestamps))
+                                        & pl.col(ts_col).is_in(list(gap_timestamps))
                                     ).alias('is_gap_glucose')
                                 ).with_columns(
                                     (pl.col('is_gap') | pl.col('is_gap_glucose'))
@@ -715,58 +705,38 @@ class GlucoseMLPreprocessor:
                                 ).drop('is_gap_glucose')
             
             if continuous_fields_to_check:
-                # For each continuous field, check for gaps between consecutive non-null values
-                # A gap exists if the time difference between consecutive non-null values > small_gap_max_minutes
-                
-                # Create gap indicators for each continuous field
-                # For each continuous field, identify gaps between consecutive non-null values
-                gap_columns = []
+                gap_columns: List[pl.Expr] = []
                 for field in continuous_fields_to_check:
-                    # Filter DataFrame to rows where this field is not null
-                    non_null_rows = df.filter(pl.col(field).is_not_null()).sort('timestamp')
+                    non_null_rows = df.filter(pl.col(field).is_not_null()).sort(ts_col)
                     
                     if len(non_null_rows) > 1:
-                        # Calculate time differences between consecutive non-null values
                         non_null_with_diff = non_null_rows.with_columns([
-                            pl.col('timestamp').diff().dt.total_seconds().alias('field_time_diff')
+                            pl.col(ts_col).diff().dt.total_seconds().alias('field_time_diff')
                         ])
-                        
-                        # Find rows where time difference > small_gap_max_minutes
-                        # These are the rows where a gap ends (where field becomes non-null after a gap)
                         gap_rows = non_null_with_diff.filter(
                             pl.col('field_time_diff') > self.small_gap_max_seconds
                         )
                         
                         if len(gap_rows) > 0:
-                            # Get timestamps where gaps end
-                            gap_timestamps = set(gap_rows['timestamp'].to_list())
-                            
-                            # Create a column that marks rows where this field has a gap
-                            # A gap exists at rows where field is not null AND timestamp is in gap_timestamps
+                            gap_timestamps = set(gap_rows[ts_col].to_list())
                             field_gap = (
                                 pl.col(field).is_not_null() & 
-                                pl.col('timestamp').is_in(list(gap_timestamps))
+                                pl.col(ts_col).is_in(list(gap_timestamps))
                             )
                         else:
-                            # No gaps found for this field
                             field_gap = pl.lit(False)
                     else:
-                        # Not enough non-null values to detect gaps
                         field_gap = pl.lit(False)
                     
                     gap_columns.append(field_gap.alias(f'is_gap_{field.replace(" ", "_").replace("(", "").replace(")", "").replace("/", "_")}'))
                 
-                # Add gap columns
                 if gap_columns:
                     df = df.with_columns(gap_columns)
-                    
-                    # Combine all gap indicators: if ANY continuous field has a gap, mark as gap
-                    gap_exprs = [pl.col('is_gap')]  # Start with timestamp-based gaps
+                    gap_exprs = [pl.col('is_gap')]
                     for field in continuous_fields_to_check:
                         safe_name = field.replace(" ", "_").replace("(", "").replace(")", "").replace("/", "_")
                         gap_exprs.append(pl.col(f'is_gap_{safe_name}'))
                     
-                    # Combine: is_gap OR any field gap
                     combined_gap = gap_exprs[0]
                     for expr in gap_exprs[1:]:
                         combined_gap = combined_gap | expr
@@ -775,127 +745,68 @@ class GlucoseMLPreprocessor:
                         combined_gap.fill_null(False).alias('is_gap')
                     ])
                     
-                    # Remove temporary gap columns
                     temp_gap_cols = [f'is_gap_{field.replace(" ", "_").replace("(", "").replace(")", "").replace("/", "_")}' for field in continuous_fields_to_check]
                     df = df.drop([col for col in temp_gap_cols if col in df.columns])
         
-        stats['calibration_periods_detected'] = df['is_calibration_gap'].sum()
+        stats['calibration_periods_detected'] = int(df['is_calibration_gap'].sum())
         
-        # If calibration gaps exist, mark data for removal
-        # This is only done if the schema flag 'remove_after_calibration' is True (default for raw data)
         should_remove_calibration = field_categories_dict.get('remove_after_calibration', True) if field_categories_dict else True
         
         if stats['calibration_periods_detected'] > 0 and should_remove_calibration:
-            # Get indices of calibration gaps
             calibration_indices = df.with_row_index().filter(pl.col('is_calibration_gap'))['index'].to_list()
             
-            # Create a mask for removal
-            # We can't easily do this fully vectorially in Polars without a complex window function or join
-            # So we'll use a list of timestamps to remove or a boolean mask
-            
-            # Efficient approach: Create a list of removal windows
-            removal_windows = []
-            timestamps = df['timestamp'].to_list()
+            removal_windows: List[Tuple[datetime, datetime]] = []
+            timestamps = df[ts_col].to_list()
             
             for idx in calibration_indices:
-                # The gap is BEFORE the row at idx. 
-                # So the calibration ended roughly at timestamps[idx] (start of new data segment)
-                # But technically the gap duration is time_diff_seconds.
-                # We want to remove data starting from timestamps[idx] for X hours.
-                
                 start_removal = timestamps[idx]
                 end_removal = start_removal + timedelta(hours=self.remove_after_calibration_hours)
                 removal_windows.append((start_removal, end_removal))
             
-            # Apply removal windows
-            # We construct a boolean expression for keeping data
-            # Keep if NOT in any removal window
-            
-            # To do this efficiently in Polars without iteration in the filter:
-            # We can create a "remove" column initialized to False
-            # But looping over windows is necessary if we have them.
-            
-            # However, for large datasets, looping might be slow. 
-            # A clearer way:
-            # 1. Extract rows that start a calibration period
-            # 2. Create a validity mask
-            
-            # Let's try a slightly different approach using joins if possible, or just filter
-            # Since number of calibration gaps is likely small, loop is acceptable for constructing filter
-            
-            # We'll create a 'remove_due_to_calibration' column
-            # This part uses Python loop but over gaps, not all rows
-            
-            # Optimization: If too many gaps, this could be slow. But calibration gaps are rare (days/weeks).
-            
-            is_kept = np.ones(len(df), dtype=bool)
-            ts_array = df['timestamp'].to_numpy()
-            
+            df = df.with_columns(pl.lit(True).alias('keep_record'))
             for start, end in removal_windows:
-                # Find indices within this window
-                # timestamps >= start and timestamps < end
-                # start is inclusive because that's the first point after the gap
-                mask = (ts_array >= start) & (ts_array < end)
-                is_kept[mask] = False
+                df = df.with_columns(
+                    pl.when((pl.col(ts_col) >= start) & (pl.col(ts_col) < end))
+                    .then(False)
+                    .otherwise(pl.col('keep_record'))
+                    .alias('keep_record')
+                )
                 
-            stats['total_records_marked_for_removal'] = (~is_kept).sum()
-            
-            # Apply filter
-            df = df.with_columns(pl.lit(is_kept).alias('keep_record'))
+            stats['total_records_marked_for_removal'] = int((~df['keep_record']).sum())
             df = df.filter(pl.col('keep_record')).drop('keep_record')
             
-        
-        # Re-calculate gaps and sequences on filtered data
-        # We need to recalculate time_diffs because removing rows might create new adjacent rows 
-        # (though typically we remove blocks so the gap structure changes)
-        # Actually, if we remove the 24h block after a gap, the "gap" effectively becomes larger 
-        # or shifts. But we treat the remaining data as a new sequence start.
-        
         if len(df) > 0:
-            # Recalculate timestamp-based gaps
             df = df.with_columns([
-                pl.col('timestamp').diff().dt.total_seconds().alias('time_diff_seconds'),
+                pl.col(ts_col).diff().dt.total_seconds().alias('time_diff_seconds'),
             ]).with_columns([
                 (pl.col('time_diff_seconds') > self.small_gap_max_seconds).fill_null(False).alias('is_gap'),
             ])
             
-            # If field_categories_dict is provided, also recalculate gaps for continuous fields
-            # For backward compatibility: if only glucose is in continuous fields, use timestamp-based gaps only
-            # If there are OTHER continuous fields besides glucose, include glucose in continuous field gap detection
             if field_categories_dict is not None:
                 continuous_fields = field_categories_dict.get('continuous', [])
-                # Filter to only fields that exist in the DataFrame
                 continuous_fields = [f for f in continuous_fields if f in df.columns]
-                
-                # Check if there are other continuous fields besides glucose
-                glucose_col = 'glucose_value_mgdl'
                 continuous_fields_other = [f for f in continuous_fields if f != glucose_col]
                 
-                # Only use continuous field gap detection if there are OTHER continuous fields
-                # This maintains backward compatibility for glucose-only cases
                 if continuous_fields_other:
-                    # Include glucose in gap detection when there are other continuous fields
-                    # This ensures we detect gaps in all continuous fields, including glucose
-                    continuous_fields_to_check = continuous_fields  # Include glucose
+                    continuous_fields_to_check = continuous_fields
                 else:
-                    # Only glucose - base gaps on glucose timestamps (not all rows). See comment above.
                     continuous_fields_to_check = []
                     if glucose_col in df.columns:
-                        non_null_rows = df.filter(pl.col(glucose_col).is_not_null()).sort('timestamp')
+                        non_null_rows = df.filter(pl.col(glucose_col).is_not_null()).sort(ts_col)
                         if len(non_null_rows) > 1:
                             non_null_with_diff = non_null_rows.with_columns(
-                                pl.col('timestamp').diff().dt.total_seconds().alias('field_time_diff')
+                                pl.col(ts_col).diff().dt.total_seconds().alias('field_time_diff')
                             )
                             gap_rows = non_null_with_diff.filter(
                                 pl.col('field_time_diff') > self.small_gap_max_seconds
                             )
                             if len(gap_rows) > 0:
-                                gap_timestamps = set(gap_rows['timestamp'].to_list())
+                                gap_timestamps = set(gap_rows[ts_col].to_list())
                                 if gap_timestamps:
                                     df = df.with_columns(
                                         (
                                             pl.col(glucose_col).is_not_null()
-                                            & pl.col('timestamp').is_in(list(gap_timestamps))
+                                            & pl.col(ts_col).is_in(list(gap_timestamps))
                                         ).alias('is_gap_glucose')
                                     ).with_columns(
                                         (pl.col('is_gap') | pl.col('is_gap_glucose'))
@@ -904,54 +815,36 @@ class GlucoseMLPreprocessor:
                                     ).drop('is_gap_glucose')
                 
                 if continuous_fields_to_check:
-                    # Recalculate gaps for continuous fields (same logic as before)
                     gap_columns = []
                     for field in continuous_fields_to_check:
-                        # Filter DataFrame to rows where this field is not null
-                        non_null_rows = df.filter(pl.col(field).is_not_null()).sort('timestamp')
-                        
+                        non_null_rows = df.filter(pl.col(field).is_not_null()).sort(ts_col)
                         if len(non_null_rows) > 1:
-                            # Calculate time differences between consecutive non-null values
                             non_null_with_diff = non_null_rows.with_columns([
-                                pl.col('timestamp').diff().dt.total_seconds().alias('field_time_diff')
+                                pl.col(ts_col).diff().dt.total_seconds().alias('field_time_diff')
                             ])
-                            
-                            # Find rows where time difference > small_gap_max_minutes
-                            # These are the rows where a gap ends (where field becomes non-null after a gap)
                             gap_rows = non_null_with_diff.filter(
                                 pl.col('field_time_diff') > self.small_gap_max_seconds
                             )
-                            
                             if len(gap_rows) > 0:
-                                # Get timestamps where gaps end
-                                gap_timestamps = set(gap_rows['timestamp'].to_list())
-                                
-                                # Create a column that marks rows where this field has a gap
-                                # A gap exists at rows where field is not null AND timestamp is in gap_timestamps
+                                gap_timestamps = set(gap_rows[ts_col].to_list())
                                 field_gap = (
                                     pl.col(field).is_not_null() & 
-                                    pl.col('timestamp').is_in(list(gap_timestamps))
+                                    pl.col(ts_col).is_in(list(gap_timestamps))
                                 )
                             else:
-                                # No gaps found for this field
                                 field_gap = pl.lit(False)
                         else:
-                            # Not enough non-null values to detect gaps
                             field_gap = pl.lit(False)
                         
                         gap_columns.append(field_gap.alias(f'is_gap_{field.replace(" ", "_").replace("(", "").replace(")", "").replace("/", "_")}'))
                     
-                    # Add gap columns
                     if gap_columns:
                         df = df.with_columns(gap_columns)
-                        
-                        # Combine all gap indicators: if ANY continuous field has a gap, mark as gap
-                        gap_exprs = [pl.col('is_gap')]  # Start with timestamp-based gaps
+                        gap_exprs = [pl.col('is_gap')]
                         for field in continuous_fields_to_check:
                             safe_name = field.replace(" ", "_").replace("(", "").replace(")", "").replace("/", "_")
                             gap_exprs.append(pl.col(f'is_gap_{safe_name}'))
                         
-                        # Combine: is_gap OR any field gap
                         combined_gap = gap_exprs[0]
                         for expr in gap_exprs[1:]:
                             combined_gap = combined_gap | expr
@@ -960,25 +853,19 @@ class GlucoseMLPreprocessor:
                             combined_gap.fill_null(False).alias('is_gap')
                         ])
                         
-                        # Remove temporary gap columns
                         temp_gap_cols = [f'is_gap_{field.replace(" ", "_").replace("(", "").replace(")", "").replace("/", "_")}' for field in continuous_fields_to_check]
                         df = df.drop([col for col in temp_gap_cols if col in df.columns])
             
-            # Create sequence IDs based on gaps
             df = df.with_columns([
                 pl.col('is_gap').cum_sum().alias('local_sequence_id')
             ])
             
-            # Convert local sequence IDs (0-based) to global sequence IDs starting from last_sequence_id + 1
-            # Since cum_sum() of booleans always produces consecutive integers starting from 0,
-            # we can simply add last_sequence_id + 1 to convert to global IDs
             df = df.with_columns([
-                (pl.col('local_sequence_id') + last_sequence_id + 1).alias('sequence_id')
+                (pl.col('local_sequence_id') + last_sequence_id + 1).alias(seq_id_col)
             ]).drop('local_sequence_id')
             
-            # Update last_sequence_id to the maximum sequence ID used
-            max_sequence_id = df['sequence_id'].max()
-            last_sequence_id = max_sequence_id if max_sequence_id is not None else last_sequence_id
+            max_sequence_id = df[seq_id_col].max()
+            last_sequence_id = int(max_sequence_id) if max_sequence_id is not None else last_sequence_id
         
         return df, stats, last_sequence_id
     
@@ -999,18 +886,23 @@ class GlucoseMLPreprocessor:
         Returns:
             Tuple of (DataFrame with interpolated values, interpolation statistics)
         """
+        ts_col = StandardFieldNames.TIMESTAMP
+        glucose_col = StandardFieldNames.GLUCOSE_VALUE
+        seq_id_col = StandardFieldNames.SEQUENCE_ID
+        event_type_col = StandardFieldNames.EVENT_TYPE
+        user_id_col = StandardFieldNames.USER_ID
+
         # Determine which fields to interpolate
         if field_categories_dict is None:
             # Use standard field name
             field_categories_dict = {
-                'continuous': ['glucose_value_mgdl'],
+                'continuous': [glucose_col],
                 'occasional': [],
                 'service': []
             }
         
         continuous_fields = field_categories_dict.get('continuous', [])
         # Always include glucose if it exists
-        glucose_col = 'glucose_value_mgdl'
         if glucose_col in df.columns and glucose_col not in continuous_fields:
             continuous_fields.append(glucose_col)
         
@@ -1018,7 +910,7 @@ class GlucoseMLPreprocessor:
         fields_to_interpolate = [f for f in continuous_fields if f in df.columns]
         
         if not fields_to_interpolate:
-            print("No continuous fields found - skipping interpolation")
+            logger.info("No continuous fields found - skipping interpolation")
             return df, {
                 'total_interpolations': 0,
                 'total_interpolated_data_points': 0,
@@ -1027,19 +919,17 @@ class GlucoseMLPreprocessor:
                 'large_gaps_skipped': 0
             }
         
-        print(f"Interpolating small gaps for fields: {', '.join(fields_to_interpolate)}...")
+        logger.info(f"Interpolating small gaps for fields: {', '.join(fields_to_interpolate)}...")
         
         # Precalculate safe field names (for use in column aliases)
-        # Maps original field name -> safe field name (without spaces, parentheses, slashes)
-        field_safe_names = {}
-        field_stats_keys = {}
+        field_safe_names: Dict[str, str] = {}
+        field_stats_keys: Dict[str, str] = {}
         for field in fields_to_interpolate:
             safe_name = field.replace(" ", "_").replace("(", "").replace(")", "").replace("/", "_")
             field_safe_names[field] = safe_name
-            # For statistics keys, also lowercase
             field_stats_keys[field] = safe_name.lower()
         
-        interpolation_stats = {
+        interpolation_stats: Dict[str, Any] = {
             'total_interpolations': 0,
             'total_interpolated_data_points': 0,
             'sequences_processed': 0,
@@ -1051,27 +941,18 @@ class GlucoseMLPreprocessor:
         for field in fields_to_interpolate:
             interpolation_stats[f'{field_stats_keys[field]}_interpolations'] = 0
         
-        # Process each sequence separately       
-        # First, fill missing values at existing timestamps for each continuous field
-        # Then, detect timestamp-based gaps and create new rows
-        
-        # Step 1: For each continuous field, fill missing values at existing timestamps
-        # This handles out-of-sync data where different fields have values at different timestamps
-        from datetime import timedelta
-        
-        interpolation_stats['sequences_processed'] = df['sequence_id'].n_unique()
+        interpolation_stats['sequences_processed'] = df[seq_id_col].n_unique()
         
         # Track per-field interpolations for statistics
         per_field_interpolations = {field: 0 for field in fields_to_interpolate}
         
-        # Process each continuous field to fill missing values at existing timestamps
+        # Step 1: For each continuous field, fill missing values at existing timestamps
         for field in fields_to_interpolate:
-            # For each sequence, find gaps in this specific field and fill missing values
-            sequences = df['sequence_id'].unique().to_list()
+            sequences = df[seq_id_col].unique().to_list()
             
             for seq_id in sequences:
-                seq_mask = pl.col('sequence_id') == seq_id
-                seq_df = df.filter(seq_mask).sort('timestamp')
+                seq_mask = pl.col(seq_id_col) == seq_id
+                seq_df = df.filter(seq_mask).sort(ts_col)
                 
                 # Filter to rows where this field is not null
                 non_null_rows = seq_df.filter(pl.col(field).is_not_null())
@@ -1081,7 +962,7 @@ class GlucoseMLPreprocessor:
                 
                 # Calculate time differences between consecutive non-null values
                 non_null_with_diff = non_null_rows.with_columns([
-                    (pl.col('timestamp').diff().dt.total_seconds() / 60.0)
+                    (pl.col(ts_col).diff().dt.total_seconds() / 60.0)
                     .alias('time_diff_minutes')
                 ])
                 
@@ -1094,36 +975,27 @@ class GlucoseMLPreprocessor:
                 if small_gaps.height == 0:
                     continue
                 
-                # For each gap, collect updates for missing values at existing timestamps
-                # Build a list of (timestamp, value) pairs to update
-                updates = []
+                updates: List[Tuple[datetime, float]] = []
                 
                 for gap_idx in range(len(small_gaps)):
                     gap_row = small_gaps[gap_idx]
-                    curr_timestamp = gap_row['timestamp'][0]
+                    curr_timestamp = gap_row[ts_col][0]
                     time_diff = gap_row['time_diff_minutes'][0]
                     curr_value = gap_row[field][0]
                     
                     # Find previous non-null value
-                    prev_non_null = non_null_rows.filter(pl.col('timestamp') < curr_timestamp).sort('timestamp', descending=True)
+                    prev_non_null = non_null_rows.filter(pl.col(ts_col) < curr_timestamp).sort(ts_col, descending=True)
                     if len(prev_non_null) == 0:
                         continue
-                    prev_timestamp = prev_non_null['timestamp'][0]
+                    prev_timestamp = prev_non_null[ts_col][0]
                     prev_value = prev_non_null[field][0]
                     
-                    # Skip if previous value is None (can't interpolate without both prev and curr)
                     if prev_value is None:
                         continue
                     
-                    # Check the row immediately before the gap end - if it has a value (even None),
-                    # we should use that as the "previous" value for interpolation purposes
-                    # This handles the case where there's a None value right before the gap
-                    row_before_gap = seq_df.filter(pl.col('timestamp') < curr_timestamp).sort('timestamp', descending=True)
+                    row_before_gap = seq_df.filter(pl.col(ts_col) < curr_timestamp).sort(ts_col, descending=True)
                     if len(row_before_gap) > 0:
-                        immediate_prev_timestamp = row_before_gap['timestamp'][0]
                         immediate_prev_value = row_before_gap[field][0]
-                        # If the immediate previous row has None, don't interpolate
-                        # (use the non-null value further back only if immediate prev is also non-null)
                         if immediate_prev_value is None:
                             continue
                     
@@ -1137,35 +1009,32 @@ class GlucoseMLPreprocessor:
                         interp_timestamp = prev_timestamp + timedelta(minutes=j * self.expected_interval_minutes)
                         
                         # Check if a row exists at this timestamp and field is missing
-                        existing_rows = seq_df.filter(pl.col('timestamp') == interp_timestamp)
+                        existing_rows = seq_df.filter(pl.col(ts_col) == interp_timestamp)
                         if existing_rows.height > 0 and existing_rows[field][0] is None:
                             # Interpolate the value
                             alpha = (j * self.expected_interval_minutes) / time_diff
-                            interp_value = prev_value + alpha * (curr_value - prev_value)
+                            interp_value = float(prev_value + alpha * (curr_value - prev_value))
                             updates.append((interp_timestamp, interp_value))
                 
                 # Apply all updates for this field in this sequence at once
                 if updates:
-                    # Count interpolations for statistics
                     per_field_interpolations[field] += len(updates)
                     
-                    # Build conditional expression to update the field
                     update_expr = pl.col(field)
                     for ts, val in updates:
                         update_expr = pl.when(
-                            (pl.col('sequence_id') == seq_id) & (pl.col('timestamp') == ts) & (pl.col(field).is_null())
+                            (pl.col(seq_id_col) == seq_id) & (pl.col(ts_col) == ts) & (pl.col(field).is_null())
                         ).then(pl.lit(val)).otherwise(update_expr)
                     
                     df = df.with_columns([update_expr.alias(field)])
                     
-                    # Update Event Type for interpolated rows - use standard field name
-                    event_type_col = 'event_type'
+                    # Update Event Type for interpolated rows
                     if event_type_col in df.columns:
                         event_update_expr = pl.col(event_type_col)
                         for ts, _ in updates:
                             event_update_expr = pl.when(
-                                (pl.col('sequence_id') == seq_id) & (pl.col('timestamp') == ts) & (pl.col(event_type_col) != 'Interpolated')
-                            ).then(pl.lit('Interpolated')).otherwise(event_update_expr)
+                                (pl.col(seq_id_col) == seq_id) & (pl.col(ts_col) == ts) & (pl.col(event_type_col) != INTERPOLATED_EVENT_TYPE)
+                            ).then(pl.lit(INTERPOLATED_EVENT_TYPE)).otherwise(event_update_expr)
                         df = df.with_columns([event_update_expr.alias(event_type_col)])
         
         # Update statistics for per-field interpolations
@@ -1173,13 +1042,11 @@ class GlucoseMLPreprocessor:
             stats_key = field_stats_keys[field]
             interpolation_stats[f'{stats_key}_interpolations'] = per_field_interpolations[field]
         
-        # Step 2: Process timestamp-based gaps (original logic)
-        # Add row index and time differences within each sequence
+        # Step 2: Process timestamp-based gaps
         df_with_diffs = df.with_row_index('row_idx').with_columns([
-            (pl.col('timestamp').diff().over('sequence_id').dt.total_seconds() / 60.0).alias('time_diff_minutes')
+            (pl.col(ts_col).diff().over(seq_id_col).dt.total_seconds() / 60.0).alias('time_diff_minutes')
         ])
         
-        # Identify small and large gaps
         df_with_gaps = df_with_diffs.with_columns([
             (
                 (pl.col('time_diff_minutes') > self.expected_interval_minutes) &
@@ -1188,47 +1055,36 @@ class GlucoseMLPreprocessor:
             (pl.col('time_diff_minutes') > self.small_gap_max_minutes).alias('is_large_gap')
         ])
         
-        # Count statistics
         small_gaps_df = df_with_gaps.filter(pl.col('is_small_gap'))
         large_gaps_df = df_with_gaps.filter(pl.col('is_large_gap'))
         
-        # Count timestamp-based gaps (add to existing per-field gap count)
         timestamp_based_gaps = small_gaps_df.height
         interpolation_stats['small_gaps_filled'] = timestamp_based_gaps
         interpolation_stats['large_gaps_skipped'] = large_gaps_df.height
         
-        # Update total interpolations
         total_interpolations = sum(per_field_interpolations.values())
         interpolation_stats['total_interpolations'] = total_interpolations
         
-        # Process small gaps to create interpolated rows using fully vectorized Polars operations
         if small_gaps_df.height > 0:
-            # Get previous row values using window functions for all fields to interpolate
             prev_cols = [
-                pl.col('timestamp').shift(1).over('sequence_id').alias('prev_timestamp')
+                pl.col(ts_col).shift(1).over(seq_id_col).alias('prev_timestamp')
             ]
             
-            # Add previous row values for all fields to interpolate
-            # Note: We use shift(1) which gets the previous row's value
-            # The interpolation logic will check if prev is None and skip interpolation if so
             for field in fields_to_interpolate:
                 safe_name = field_safe_names[field]
-                prev_cols.append(pl.col(field).shift(1).over('sequence_id').alias(f'prev_{safe_name}'))
+                prev_cols.append(pl.col(field).shift(1).over(seq_id_col).alias(f'prev_{safe_name}'))
             
-            if 'user_id' in df_with_gaps.columns:
-                prev_cols.append(pl.col('user_id').shift(1).over('sequence_id').alias('prev_user_id'))
+            if user_id_col in df_with_gaps.columns:
+                prev_cols.append(pl.col(user_id_col).shift(1).over(seq_id_col).alias('prev_user_id'))
             
             df_with_prev = df_with_gaps.with_columns(prev_cols)
             
-            # Filter to small gaps only and calculate missing_points
             gaps_to_process = df_with_prev.filter(pl.col('is_small_gap')).with_columns([
                 ((pl.col('time_diff_minutes') / self.expected_interval_minutes).cast(pl.Int64) - 1)
                 .alias('missing_points')
             ]).filter(pl.col('missing_points') > 0)
             
             if gaps_to_process.height > 0:
-                # Create list column with j values [1, 2, ..., missing_points] for each gap
-                # Using map_elements to create variable-length lists
                 gaps_with_j = gaps_to_process.with_columns([
                     pl.col('missing_points').map_elements(
                         lambda mp: list(range(1, int(mp) + 1)) if mp and mp > 0 else [],
@@ -1236,31 +1092,20 @@ class GlucoseMLPreprocessor:
                     ).alias('j_values')
                 ])
                 
-                # Explode to create one row per interpolated point
                 gaps_exploded = gaps_with_j.explode('j_values').with_columns([
                     pl.col('j_values').alias('j')
                 ])
                 
-                # Calculate all interpolated values using vectorized expressions
                 interpolated_cols = [
-                    # Calculate interpolated timestamp
                     (pl.col('prev_timestamp') + 
                      pl.duration(minutes=pl.col('j') * self.expected_interval_minutes))
-                    .alias('timestamp'),
-                    
-                    # Calculate alpha for time-weighted interpolation
-                    # alpha = time_from_start / total_gap_time
-                    # This ensures points closer in time have more influence
+                    .alias(ts_col),
                     ((pl.col('j').cast(pl.Float64) * self.expected_interval_minutes) / 
                      pl.col('time_diff_minutes').cast(pl.Float64))
                     .alias('alpha'),
-                    
-                    # Keep sequence_id
-                    pl.col('sequence_id'),
-                    
+                    pl.col(seq_id_col),
                 ]
                 
-                # Add previous and current values for all fields to interpolate
                 for field in fields_to_interpolate:
                     safe_name = field_safe_names[field]
                     interpolated_cols.extend([
@@ -1268,14 +1113,11 @@ class GlucoseMLPreprocessor:
                         pl.col(field).alias(f'curr_{safe_name}'),
                     ])
                 
-                # Add user_id if it exists
                 if 'prev_user_id' in gaps_exploded.columns:
                     interpolated_cols.append(pl.col('prev_user_id'))
                 
                 gaps_calculated = gaps_exploded.select(interpolated_cols)
                 
-                # Calculate interpolated values for all continuous fields
-                # First, cast all values to float
                 cast_exprs = []
                 for field in fields_to_interpolate:
                     safe_name = field_safe_names[field]
@@ -1286,16 +1128,12 @@ class GlucoseMLPreprocessor:
                 
                 gaps_calculated = gaps_calculated.with_columns(cast_exprs)
                 
-                # Now calculate interpolated values for all fields
                 interpolated_field_exprs = []
                 for field in fields_to_interpolate:
                     safe_name = field_safe_names[field]
                     prev_col_num = f'prev_{safe_name}_num'
                     curr_col_num = f'curr_{safe_name}_num'
                     
-                    # Calculate interpolated value using time-weighted interpolation:
-                    # prev + alpha * (curr - prev)
-                    # Only interpolate if both prev and curr are not null
                     interpolated_field_exprs.append(
                         pl.when(
                             (pl.col(prev_col_num).is_not_null()) & 
@@ -1308,95 +1146,75 @@ class GlucoseMLPreprocessor:
                 
                 interpolated_df = gaps_calculated.with_columns(interpolated_field_exprs)
                 
-                # Build final interpolated DataFrame with all required columns
-                # Start with columns we've already calculated
                 final_cols = [
-                    pl.col('timestamp'),
-                    pl.col('sequence_id'),
+                    pl.col(ts_col),
+                    pl.col(seq_id_col),
                 ]
                 
-                # Add all interpolated fields
                 for field in fields_to_interpolate:
                     final_cols.append(pl.col(field))
                 
-                # Add Event Type - use standard field name
-                event_type_col = 'event_type'
                 if event_type_col in df.columns:
-                    final_cols.append(pl.lit('Interpolated').alias(event_type_col))
+                    final_cols.append(pl.lit(INTERPOLATED_EVENT_TYPE).alias(event_type_col))
                 
-                # Add user_id if it exists
                 if 'prev_user_id' in gaps_calculated.columns:
                     final_cols.append(
                         pl.when(pl.col('prev_user_id').is_not_null())
                         .then(pl.col('prev_user_id'))
                         .otherwise(pl.lit(''))
-                        .alias('user_id')
+                        .alias(user_id_col)
                     )
                 
-                # Initialize all other columns from original schema
                 original_schema = df.schema
-                existing_col_names = ['timestamp', 'sequence_id'] + fields_to_interpolate
-                event_type_col = 'event_type'
+                existing_col_names = [ts_col, seq_id_col] + fields_to_interpolate
                 if event_type_col in df.columns:
                     existing_col_names.append(event_type_col)
                 if 'prev_user_id' in gaps_calculated.columns:
-                    existing_col_names.append('user_id')
+                    existing_col_names.append(user_id_col)
                 
                 for col in df.columns:
                     if col not in existing_col_names:
                         col_type = original_schema[col]
-                        # Check if this column is in occasional or service category
                         is_occasional = col in field_categories_dict.get('occasional', [])
                         is_service = col in field_categories_dict.get('service', [])
                         
                         if is_occasional or is_service:
-                            # Leave occasional/service fields as null/empty
                             if col_type == pl.Utf8 or col_type == pl.String:
                                 final_cols.append(pl.lit('').cast(col_type).alias(col))
                             else:
                                 final_cols.append(pl.lit(None).cast(col_type).alias(col))
                         else:
-                            # Unknown field - leave as null/empty
                             if col_type == pl.Utf8 or col_type == pl.String:
                                 final_cols.append(pl.lit('').cast(col_type).alias(col))
                             else:
                                 final_cols.append(pl.lit(None).cast(col_type).alias(col))
                 
-                # Create interpolated DataFrame with all columns
                 interpolated_df = interpolated_df.select(final_cols)
-                
-                # Ensure columns are in same order as original and cast to correct types
                 interpolated_df = interpolated_df.select(df.columns)
                 
-                # Update statistics for timestamp-based gaps
                 interpolation_stats['total_interpolated_data_points'] = len(interpolated_df)
                 
-                # Count interpolations for each field from timestamp-based gaps
                 timestamp_based_interpolations = 0
                 for field in fields_to_interpolate:
                     stats_key = field_stats_keys[field]
                     field_interpolations = interpolated_df.filter(pl.col(field).is_not_null()).height
-                    # Add to existing per-field interpolations (from Step 1)
                     interpolation_stats[f'{stats_key}_interpolations'] = interpolation_stats.get(f'{stats_key}_interpolations', 0) + field_interpolations
                     timestamp_based_interpolations += field_interpolations
                 
-                # Update total interpolations (add timestamp-based to per-field)
                 interpolation_stats['total_interpolations'] = interpolation_stats.get('total_interpolations', 0) + timestamp_based_interpolations
                 
-                # Combine with original data
                 df = pl.concat([df, interpolated_df], how='vertical_relaxed')
         
-        # Sort by user_id, sequence_id and timestamp if user_id exists, otherwise just by sequence_id and timestamp
-        if 'user_id' in df.columns:
-            df = df.sort(['user_id', 'sequence_id', 'timestamp'])
+        if user_id_col in df.columns:
+            df = df.sort([user_id_col, seq_id_col, ts_col])
         else:
-            df = df.sort(['sequence_id', 'timestamp'])
+            df = df.sort([seq_id_col, ts_col])
         
-        print(f"Identified and processed {interpolation_stats['small_gaps_filled']} small gaps")
-        print(f"Created {interpolation_stats['total_interpolated_data_points']} interpolated data points")
-        print(f"Interpolated {interpolation_stats['total_interpolations']} glucose values")
-        print(f"Skipped {interpolation_stats['large_gaps_skipped']} large gaps")
-        print(f"Processed {interpolation_stats['sequences_processed']} sequences")
+        logger.info(f"Identified and processed {interpolation_stats['small_gaps_filled']} small gaps")
+        logger.info(f"Created {interpolation_stats['total_interpolated_data_points']} interpolated data points")
+        logger.info(f"Interpolated {interpolation_stats['total_interpolations']} glucose values")
+        logger.info(f"Skipped {interpolation_stats['large_gaps_skipped']} large gaps")
+        logger.info(f"Processed {interpolation_stats['sequences_processed']} sequences")
         
         return df, interpolation_stats
     
@@ -1411,11 +1229,13 @@ class GlucoseMLPreprocessor:
         Returns:
             Tuple of (filtered DataFrame, filtering statistics dictionary)
         """
-        print(f"Filtering sequences with length < {self.min_sequence_len}...")
+        logger.info(f"Filtering sequences with length < {self.min_sequence_len}...")
         
+        seq_id_col = StandardFieldNames.SEQUENCE_ID
+
         # Calculate sequence lengths
         # Use len() instead of count() for Polars 1.0+ compatibility
-        sequence_counts = df.group_by('sequence_id').len().sort('sequence_id')
+        sequence_counts = df.group_by(seq_id_col).len().sort(seq_id_col)
         
         # Find sequences to keep (longer than or equal to min_sequence_len)
         sequences_to_keep = sequence_counts.filter(pl.col('len') >= self.min_sequence_len)
@@ -1430,23 +1250,23 @@ class GlucoseMLPreprocessor:
         }
         
         if len(sequences_to_keep) == 0:
-            print("Warning: No sequences meet the minimum length requirement!")
+            logger.info("Warning: No sequences meet the minimum length requirement!")
             return df, filtering_stats
         
         # Filter the DataFrame to keep only sequences that meet the length requirement
-        valid_sequence_ids = sequences_to_keep['sequence_id'].to_list()
-        filtered_df = df.filter(pl.col('sequence_id').is_in(valid_sequence_ids))
+        valid_sequence_ids = sequences_to_keep[seq_id_col].to_list()
+        filtered_df = df.filter(pl.col(seq_id_col).is_in(valid_sequence_ids))
         
         # Update filtering statistics
         filtering_stats['filtered_records'] = len(filtered_df)
         filtering_stats['removed_records'] = len(df) - len(filtered_df)
         
-        print(f"Original sequences: {filtering_stats['original_sequences']}")
-        print(f"Sequences after filtering: {filtering_stats['filtered_sequences']}")
-        print(f"Sequences removed: {filtering_stats['removed_sequences']}")
-        print(f"Original records: {filtering_stats['original_records']:,}")
-        print(f"Records after filtering: {filtering_stats['filtered_records']:,}")
-        print(f"Records removed: {filtering_stats['removed_records']:,}")
+        logger.info(f"Original sequences: {filtering_stats['original_sequences']}")
+        logger.info(f"Sequences after filtering: {filtering_stats['filtered_sequences']}")
+        logger.info(f"Sequences removed: {filtering_stats['removed_sequences']}")
+        logger.info(f"Original records: {filtering_stats['original_records']:,}")
+        logger.info(f"Records after filtering: {filtering_stats['filtered_records']:,}")
+        logger.info(f"Records removed: {filtering_stats['removed_records']:,}")
         
         # Show statistics about removed sequences
         if filtering_stats['removed_sequences'] > 0:
@@ -1455,7 +1275,7 @@ class GlucoseMLPreprocessor:
                 min_len_removed = removed_sequences['len'].min()
                 max_len_removed = removed_sequences['len'].max()
                 avg_len_removed = removed_sequences['len'].mean()
-                print(f"Removed sequence lengths - Min: {min_len_removed}, Max: {max_len_removed}, Avg: {avg_len_removed:.1f}")
+                logger.info(f"Removed sequence lengths - Min: {min_len_removed}, Max: {max_len_removed}, Avg: {avg_len_removed:.1f}")
         
         return filtered_df, filtering_stats
     
@@ -1475,12 +1295,15 @@ class GlucoseMLPreprocessor:
         Returns:
             Tuple of (DataFrame with fixed-frequency data, statistics dictionary)
         """
-        print(f"Creating fixed-frequency data with {self.expected_interval_minutes}-minute intervals...")
+        logger.info(f"Creating fixed-frequency data with {self.expected_interval_minutes}-minute intervals...")
         
+        ts_col = StandardFieldNames.TIMESTAMP
+        seq_id_col = StandardFieldNames.SEQUENCE_ID
+
         # Calculate data density metrics BEFORE processing
         before_density_stats = self._calculate_data_density(df, self.expected_interval_minutes)
         
-        fixed_freq_stats = {
+        fixed_freq_stats: Dict[str, Any] = {
             'sequences_processed': 0,
             'total_records_before': len(df),
             'total_records_after': 0,
@@ -1494,11 +1317,11 @@ class GlucoseMLPreprocessor:
         }
         
         # Process each sequence using Polars-native operations
-        unique_sequences = df['sequence_id'].unique().to_list()
-        all_fixed_sequences = []
+        unique_sequences = df[seq_id_col].unique().to_list()
+        all_fixed_sequences: List[pl.DataFrame] = []
         
         for seq_id in unique_sequences:
-            seq_data = df.filter(pl.col('sequence_id') == seq_id).sort('timestamp')
+            seq_data = df.filter(pl.col(seq_id_col) == seq_id).sort(ts_col)
             
             if len(seq_data) < 2:
                 # Keep single-point sequences as-is, but ensure column order and types match input df
@@ -1518,7 +1341,7 @@ class GlucoseMLPreprocessor:
         # Combine all fixed sequences
         if all_fixed_sequences:
             # All sequences now have identical schema due to select() and cast() above
-            df_fixed = pl.concat(all_fixed_sequences).sort(['sequence_id', 'timestamp'])
+            df_fixed = pl.concat(all_fixed_sequences).sort([seq_id_col, ts_col])
         else:
             df_fixed = df
         
@@ -1538,23 +1361,23 @@ class GlucoseMLPreprocessor:
         fixed_freq_stats['density_change_explanation'] = density_change_explanation
         
         # Print statistics
-        print(f"Processed {fixed_freq_stats['sequences_processed']} sequences")
-        print(f"Time adjustments made: {fixed_freq_stats['time_adjustments']}")
-        print(f"Glucose interpolations: {fixed_freq_stats['glucose_interpolations']}")
-        print(f"Insulin records shifted: {fixed_freq_stats['insulin_shifted_records']}")
-        print(f"Carb records shifted: {fixed_freq_stats['carb_shifted_records']}")
-        print(f"Records before: {fixed_freq_stats['total_records_before']:,}")
-        print(f"Records after: {fixed_freq_stats['total_records_after']:,}")
+        logger.info(f"Processed {fixed_freq_stats['sequences_processed']} sequences")
+        logger.info(f"Time adjustments made: {fixed_freq_stats['time_adjustments']}")
+        logger.info(f"Glucose interpolations: {fixed_freq_stats['glucose_interpolations']}")
+        logger.info(f"Insulin records shifted: {fixed_freq_stats['insulin_shifted_records']}")
+        logger.info(f"Carb records shifted: {fixed_freq_stats['carb_shifted_records']}")
+        logger.info(f"Records before: {fixed_freq_stats['total_records_before']:,}")
+        logger.info(f"Records after: {fixed_freq_stats['total_records_after']:,}")
         
         # Print data density and change explanation
         before_density = fixed_freq_stats['data_density_before']
         after_density = fixed_freq_stats['data_density_after']
         explanation = fixed_freq_stats['density_change_explanation']
         
-        print(f"Data density: {before_density['avg_points_per_interval']:.2f} -> {after_density['avg_points_per_interval']:.2f} points/interval ({explanation.get('density_change_pct', 0):+.1f}%)")
-        print(f"Change explained by density: {explanation.get('explained_pct', 0):.1f}%")
+        logger.info(f"Data density: {before_density['avg_points_per_interval']:.2f} -> {after_density['avg_points_per_interval']:.2f} points/interval ({explanation.get('density_change_pct', 0):+.1f}%)")
+        logger.info(f"Change explained by density: {explanation.get('explained_pct', 0):.1f}%")
         
-        print("Fixed-frequency data creation complete")
+        logger.info("Fixed-frequency data creation complete")
         
         return df_fixed, fixed_freq_stats
     
@@ -1570,6 +1393,9 @@ class GlucoseMLPreprocessor:
         Returns:
             Dictionary with density statistics
         """
+        ts_col = StandardFieldNames.TIMESTAMP
+        seq_id_col = StandardFieldNames.SEQUENCE_ID
+
         if len(df) == 0:
             return {
                 'avg_points_per_interval': 0.0,
@@ -1582,8 +1408,8 @@ class GlucoseMLPreprocessor:
         total_points = 0
         total_intervals = 0
         
-        for seq_id in df['sequence_id'].unique().to_list():
-            seq_data = df.filter(pl.col('sequence_id') == seq_id).sort('timestamp')
+        for seq_id in df[seq_id_col].unique().to_list():
+            seq_data = df.filter(pl.col(seq_id_col) == seq_id).sort(ts_col)
             
             if len(seq_data) < 2:
                 # Single point sequence - density is 1
@@ -1591,8 +1417,10 @@ class GlucoseMLPreprocessor:
                 total_intervals += 1
                 continue
             
-            first_ts = seq_data['timestamp'].min()
-            last_ts = seq_data['timestamp'].max()
+            first_ts = seq_data[ts_col].min()
+            last_ts = seq_data[ts_col].max()
+            if first_ts is None or last_ts is None:
+                continue
             duration_seconds = (last_ts - first_ts).total_seconds()
             
             # Calculate number of intervals
@@ -1675,9 +1503,17 @@ class GlucoseMLPreprocessor:
         Returns:
             Fixed-frequency sequence as Polars DataFrame
         """
+        ts_col = StandardFieldNames.TIMESTAMP
+        seq_id_col = StandardFieldNames.SEQUENCE_ID
+        glucose_col = StandardFieldNames.GLUCOSE_VALUE
+        event_type_col = StandardFieldNames.EVENT_TYPE
+        user_id_col = StandardFieldNames.USER_ID
+
         # Get first and last timestamps
-        first_timestamp = seq_data['timestamp'].min()
-        last_timestamp = seq_data['timestamp'].max()
+        first_timestamp = seq_data[ts_col].min()
+        last_timestamp = seq_data[ts_col].max()
+        if first_timestamp is None or last_timestamp is None:
+            return seq_data
         
         # Calculate aligned start time
         first_second = first_timestamp.second
@@ -1704,39 +1540,32 @@ class GlucoseMLPreprocessor:
         
         # Create fixed timestamps DataFrame
         fixed_timestamps = pl.DataFrame({
-            'timestamp': fixed_timestamps_list,
-            'sequence_id': [seq_id] * len(fixed_timestamps_list)
+            ts_col: fixed_timestamps_list,
+            seq_id_col: [seq_id] * len(fixed_timestamps_list)
         })
         
         # 1. Interpolate Continuous Fields (Linear interpolation)
-        # Determine continuous fields from schema categories (flexible fields).
-        # If no categories are provided, default to glucose-only (backward compatible).
         service_fields: List[str] = field_categories_dict.get('service', []).copy() if field_categories_dict else []
         if field_categories_dict is None:
-            continuous_fields = ['glucose_value_mgdl'] if 'glucose_value_mgdl' in seq_data.columns else []
+            continuous_fields = [glucose_col] if glucose_col in seq_data.columns else []
         else:
             continuous_fields = [f for f in field_categories_dict.get('continuous', []) if f in seq_data.columns]
             # Always include glucose if it exists (safety)
-            if 'glucose_value_mgdl' in seq_data.columns and 'glucose_value_mgdl' not in continuous_fields:
-                continuous_fields.append('glucose_value_mgdl')
+            if glucose_col in seq_data.columns and glucose_col not in continuous_fields:
+                continuous_fields.append(glucose_col)
         
         # Interpolate all continuous fields
         result_df = self._interpolate_continuous_fields_linear(fixed_timestamps, seq_data, stats, continuous_fields)
         
         # 2. Shift Events (Nearest Neighbor / Rounding)
-        # Event fields come from schema categories (occasional + selected service fields).
-        # We do NOT guess "event-like continuous" here; if the schema marks insulin as continuous,
-        # it will be interpolated. This matches the schema-driven behavior you want.
         occasional_fields: List[str] = []
         if field_categories_dict is not None:
             occasional_fields = [f for f in field_categories_dict.get('occasional', []) if f in seq_data.columns]
         
-        # Include event_type and user_id if they exist, but do not include columns that are already present
-        # in the fixed-frequency grid/result_df (notably 'timestamp' and 'sequence_id') to avoid duplicate joins.
         event_cols: List[str] = []
         seen_cols = set()
-        result_existing = set(result_df.columns)  # includes 'timestamp' and 'sequence_id'
-        for col in occasional_fields + service_fields + ['event_type', 'user_id']:
+        result_existing = set(result_df.columns)
+        for col in occasional_fields + service_fields + [event_type_col, user_id_col]:
             if col in result_existing:
                 continue
             if col in seq_data.columns and col not in continuous_fields and col not in seen_cols:
@@ -1753,10 +1582,9 @@ class GlucoseMLPreprocessor:
                 numeric_cols_hint=numeric_hint,
             )
             # Join events with result (left join to keep all fixed timestamps)
-            result_df = result_df.join(events_df, on='timestamp', how='left')
+            result_df = result_df.join(events_df, on=ts_col, how='left')
         
         # Ensure all columns from original schema are present
-        # Add any missing columns as None/empty
         original_cols = set(seq_data.columns)
         result_cols = set(result_df.columns)
         missing_cols = original_cols - result_cols
@@ -1770,7 +1598,6 @@ class GlucoseMLPreprocessor:
                     result_df = result_df.with_columns([pl.lit(None).cast(col_type).alias(col)])
         
         # Ensure columns are in same order as original
-        # Use select to reorder columns to match seq_data
         result_df = result_df.select(seq_data.columns)
         
         return result_df
@@ -1788,6 +1615,9 @@ class GlucoseMLPreprocessor:
         Returns:
             DataFrame with all continuous fields interpolated
         """
+        ts_col = StandardFieldNames.TIMESTAMP
+        glucose_col = StandardFieldNames.GLUCOSE_VALUE
+
         if not continuous_fields:
             return fixed_timestamps
         
@@ -1796,85 +1626,69 @@ class GlucoseMLPreprocessor:
         # Interpolate each continuous field
         for field in continuous_fields:
             if field not in seq_data.columns:
-                # Field doesn't exist - add as None
                 result_df = result_df.with_columns([pl.lit(None).cast(pl.Float64, strict=False).alias(field)])
                 continue
             
-            # Prepare sequence data with original timestamp preserved
-            # Ensure field is float for interpolation
-            seq_data_ts = seq_data.select(['timestamp', field]).with_columns([
-                pl.col('timestamp').alias('ts_orig'),
+            seq_data_ts = seq_data.select([ts_col, field]).with_columns([
+                pl.col(ts_col).alias('ts_orig'),
                 pl.col(field).cast(pl.Float64, strict=False)
             ]).filter(pl.col(field).is_not_null())
             
             if len(seq_data_ts) == 0:
-                # No non-null values - add as None
                 result_df = result_df.with_columns([pl.lit(None).cast(pl.Float64, strict=False).alias(field)])
                 continue
             
-            # Create safe field name for temporary columns
             safe_name = field.replace(" ", "_").replace("(", "").replace(")", "").replace("/", "_")
             
-            # Forward join (finds next point)
             forward = result_df.join_asof(
                 seq_data_ts, 
-                on='timestamp', 
+                on=ts_col, 
                 strategy='forward'
             ).rename({field: f'{safe_name}_next', 'ts_orig': f'ts_{safe_name}_next'})
             
-            # Backward join (finds prev point)
             backward = result_df.join_asof(
                 seq_data_ts, 
-                on='timestamp', 
+                on=ts_col, 
                 strategy='backward'
-            ).select(['timestamp', field, 'ts_orig']).rename({field: f'{safe_name}_prev', 'ts_orig': f'ts_{safe_name}_prev'})
+            ).select([ts_col, field, 'ts_orig']).rename({field: f'{safe_name}_prev', 'ts_orig': f'ts_{safe_name}_prev'})
             
-            # Combine
-            combined = forward.join(backward.select(['timestamp', f'{safe_name}_prev', f'ts_{safe_name}_prev']), on='timestamp', how='left')
-            
-            # Calculate interpolation
-            # y = y_prev + (y_next - y_prev) * (t - t_prev) / (t_next - t_prev)
+            combined = forward.join(backward.select([ts_col, f'{safe_name}_prev', f'ts_{safe_name}_prev']), on=ts_col, how='left')
             
             combined = combined.with_columns([
-                pl.when(pl.col(f'ts_{safe_name}_prev') == pl.col(f'ts_{safe_name}_next')) # Exact match (or only one point)
+                pl.when(pl.col(f'ts_{safe_name}_prev') == pl.col(f'ts_{safe_name}_next')) # Exact match
                 .then(pl.col(f'{safe_name}_prev'))
-                .when(pl.col(f'ts_{safe_name}_prev').is_null()) # No prev (start of series)
+                .when(pl.col(f'ts_{safe_name}_prev').is_null()) # No prev
                 .then(pl.col(f'{safe_name}_next'))
-                .when(pl.col(f'ts_{safe_name}_next').is_null()) # No next (end of series)
+                .when(pl.col(f'ts_{safe_name}_next').is_null()) # No next
                 .then(pl.col(f'{safe_name}_prev'))
                 .otherwise(
                     pl.col(f'{safe_name}_prev') + (
                         (pl.col(f'{safe_name}_next') - pl.col(f'{safe_name}_prev')) * 
-                        (pl.col('timestamp') - pl.col(f'ts_{safe_name}_prev')).dt.total_seconds() / 
+                        (pl.col(ts_col) - pl.col(f'ts_{safe_name}_prev')).dt.total_seconds() / 
                         (pl.col(f'ts_{safe_name}_next') - pl.col(f'ts_{safe_name}_prev')).dt.total_seconds()
                     )
                 ).alias(field)
             ])
             
-            # Update result_df with interpolated field
-            # Select only the interpolated field from combined
-            interpolated_field = combined.select(['timestamp', field])
+            interpolated_field = combined.select([ts_col, field])
             
-            # Join and update result_df
-            # If field already exists in result_df, we need to replace it
             if field in result_df.columns:
                 result_df = result_df.drop(field).join(
                     interpolated_field,
-                    on='timestamp',
+                    on=ts_col,
                     how='left'
                 )
             else:
                 result_df = result_df.join(
                     interpolated_field,
-                    on='timestamp',
+                    on=ts_col,
                     how='left'
                 )
             
-            # Update stats for glucose (backward compatibility)
-            if field == 'glucose_value_mgdl':
+            if field == glucose_col:
                 interpolated_count = combined.filter(
                     pl.col(field).is_not_null() & 
-                    (pl.col(f'ts_{safe_name}_next') != pl.col('timestamp')) # Not an exact match
+                    (pl.col(f'ts_{safe_name}_next') != pl.col(ts_col))
                 ).height
                 stats['glucose_interpolations'] += interpolated_count
         
@@ -1901,92 +1715,72 @@ class GlucoseMLPreprocessor:
         Returns:
             DataFrame with events shifted to nearest grid points
         """
+        ts_col = StandardFieldNames.TIMESTAMP
+        user_id_col = StandardFieldNames.USER_ID
+        event_type_col = StandardFieldNames.EVENT_TYPE
+
         if len(fixed_timestamps_list) == 0:
-            return pl.DataFrame({'timestamp': []})
+            return pl.DataFrame({ts_col: []})
         
-        # Select relevant columns
-        events = seq_data.select(['timestamp'] + cols)
-        
-        # Filter out rows where all event columns are null
-        # This prevents "empty" rows from creating 0-valued event records
+        events = seq_data.select([ts_col] + cols)
         events = events.filter(~pl.all_horizontal([pl.col(c).is_null() for c in cols]))
         
         if len(events) == 0:
-            return pl.DataFrame({'timestamp': fixed_timestamps_list[:0]})
+            return pl.DataFrame({ts_col: fixed_timestamps_list[:0]})
         
-        # Create a DataFrame with fixed timestamps for nearest neighbor lookup
-        # Sort to ensure join_asof works correctly
-        # Rename to avoid column name conflict
         fixed_timestamps_df = pl.DataFrame({
             'fixed_timestamp': fixed_timestamps_list
         }).sort('fixed_timestamp')
         
-        # Use join_asof to find nearest fixed timestamp for each event
-        # Strategy 'nearest' finds the closest timestamp
-        # Join on timestamp, matching to fixed_timestamp
         events_shifted = events.join_asof(
             fixed_timestamps_df,
-            left_on='timestamp',
+            left_on=ts_col,
             right_on='fixed_timestamp',
             strategy='nearest'
         ).with_columns([
-            # Replace original timestamp with the nearest fixed timestamp
-            pl.col('fixed_timestamp').alias('timestamp')
+            pl.col('fixed_timestamp').alias(ts_col)
         ]).drop('fixed_timestamp')
         
-        # Determine numeric columns in a stable way.
-        # Prefer a schema/category-driven hint so column dtypes don't vary across sequences.
         numeric_cols: List[str] = []
         if numeric_cols_hint is not None:
             numeric_cols = [
                 c for c in cols
-                if c in numeric_cols_hint and c not in {'event_type', 'user_id'} and not c.endswith('_id')
+                if c in numeric_cols_hint and c not in {event_type_col, user_id_col} and not c.endswith('_id')
             ]
         else:
-            # Fallback: infer from data (may vary per sequence; use only when no hint is available)
             for c in cols:
-                if c in {'event_type', 'user_id'} or c.endswith('_id'):
+                if c in {event_type_col, user_id_col} or c.endswith('_id'):
                     continue
                 try:
                     any_numeric = seq_data.select(
                         pl.col(c).cast(pl.Float64, strict=False).is_not_null().any()
                     ).item()
-                except Exception:
+                except (ValueError, TypeError, AttributeError):
                     any_numeric = False
                 if any_numeric:
                     numeric_cols.append(c)
         cast_exprs = []
         for col in cols:
             if col in numeric_cols:
-                # Cast to Float64, handling nulls and strings
                 cast_exprs.append(pl.col(col).cast(pl.Float64, strict=False).alias(col))
             else:
-                # Keep non-numeric columns as-is
                 cast_exprs.append(pl.col(col))
         
         if cast_exprs:
             events_shifted = events_shifted.with_columns(cast_exprs)
         
-        # Update stats - count events shifted (after casting to ensure proper null detection)
-        # Initialize stats keys if they don't exist
         if 'carb_shifted_records' not in stats:
             stats['carb_shifted_records'] = 0
         if 'insulin_shifted_records' not in stats:
             stats['insulin_shifted_records'] = 0
             
-        # Update stats without hardcoding specific field names
         for col in cols:
             if col in numeric_cols:
                 stats['insulin_shifted_records'] += events_shifted.filter(pl.col(col).is_not_null()).height
         
-        # Define aggregations
         agg_exprs = []
         for col in cols:
             if col in numeric_cols:
-                # Sum numeric events (e.g. two small boluses)
-                # Use sum() which handles nulls correctly (nulls are ignored in sum)
-                # But we need to return null if all values in the group are null
-                # So we use: if any non-null values exist, sum them; otherwise null
                 agg_exprs.append(
                     pl.when(pl.col(col).is_not_null().any())
                     .then(pl.col(col).sum())
@@ -1994,15 +1788,10 @@ class GlucoseMLPreprocessor:
                     .alias(col)
                 )
             else:
-                # For categorical/IDs, take the first
                 agg_exprs.append(pl.col(col).first().alias(col))
         
-        # Group and aggregate by shifted timestamp
-        shifted = events_shifted.group_by('timestamp').agg(agg_exprs)
+        shifted = events_shifted.group_by(ts_col).agg(agg_exprs)
 
-        # Stabilize dtypes across sequences to avoid concat errors:
-        # - numeric cols -> Float64 (even if all-null in a sequence)
-        # - non-numeric cols -> Utf8 (even if all-null in a sequence)
         stabilize_exprs = []
         for c in cols:
             if c not in shifted.columns:
@@ -2026,8 +1815,14 @@ class GlucoseMLPreprocessor:
         Returns:
             Tuple of (filtered DataFrame with only glucose data, filtering statistics)
         """
-        print("Filtering to glucose-only data...")
+        logger.info("Filtering to glucose-only data...")
         
+        glucose_col = StandardFieldNames.GLUCOSE_VALUE
+        event_type_col = StandardFieldNames.EVENT_TYPE
+        fast_acting_col = StandardFieldNames.FAST_ACTING_INSULIN
+        long_acting_col = StandardFieldNames.LONG_ACTING_INSULIN
+        carb_col = StandardFieldNames.CARB_VALUE
+
         filtering_stats = {
             'original_records': len(df),
             'glucose_only_enabled': self.glucose_only,
@@ -2037,16 +1832,15 @@ class GlucoseMLPreprocessor:
         }
         
         if not self.glucose_only:
-            print("Glucose-only filtering is disabled - keeping all data")
+            logger.info("Glucose-only filtering is disabled - keeping all data")
             filtering_stats['records_after_filtering'] = len(df)
             return df, filtering_stats
         
         # Filter to keep only rows with non-null glucose values - use standard field name
-        glucose_col = 'glucose_value_mgdl'
         df_filtered = df.filter(pl.col(glucose_col).is_not_null())
         
         # Remove specified fields - use standard field names
-        fields_to_remove = ['event_type', 'fast_acting_insulin_u', 'long_acting_insulin_u', 'carb_grams']
+        fields_to_remove = [event_type_col, fast_acting_col, long_acting_col, carb_col]
         existing_fields_to_remove = [field for field in fields_to_remove if field in df_filtered.columns]
         
         if existing_fields_to_remove:
@@ -2057,12 +1851,12 @@ class GlucoseMLPreprocessor:
         filtering_stats['records_after_filtering'] = len(df_filtered)
         filtering_stats['records_removed'] = len(df) - len(df_filtered)
         
-        print(f"Original records: {filtering_stats['original_records']:,}")
-        print(f"Records with glucose values: {filtering_stats['records_after_filtering']:,}")
-        print(f"Records removed (no glucose): {filtering_stats['records_removed']:,}")
+        logger.info(f"Original records: {filtering_stats['original_records']:,}")
+        logger.info(f"Records with glucose values: {filtering_stats['records_after_filtering']:,}")
+        logger.info(f"Records removed (no glucose): {filtering_stats['records_removed']:,}")
         if filtering_stats['fields_removed']:
-            print(f"Fields removed: {', '.join(filtering_stats['fields_removed'])}")
-        print("OK: Glucose-only filtering complete")
+            logger.info(f"Fields removed: {', '.join(filtering_stats['fields_removed'])}")
+        logger.info("OK: Glucose-only filtering complete")
         
         return df_filtered, filtering_stats
     
@@ -2079,12 +1873,16 @@ class GlucoseMLPreprocessor:
         Returns:
             Final DataFrame ready for ML training
         """
-        print("Preparing final ML dataset...")
+        logger.info("Preparing final ML dataset...")
         
+        ts_col = StandardFieldNames.TIMESTAMP
+        seq_id_col = StandardFieldNames.SEQUENCE_ID
+        user_id_col = StandardFieldNames.USER_ID
+
         cast_exprs: List[pl.Expr] = []
         
         # Get field categories to determine field types dynamically
-        field_categories_dict = getattr(self, '_field_categories_dict', None)
+        field_categories_dict = self._field_categories_dict
         continuous_fields = set(field_categories_dict.get('continuous', [])) if field_categories_dict else set()
         occasional_fields = set(field_categories_dict.get('occasional', [])) if field_categories_dict else set()
         service_fields = set(field_categories_dict.get('service', [])) if field_categories_dict else set()
@@ -2094,8 +1892,7 @@ class GlucoseMLPreprocessor:
         all_output_fields = set(output_fields)
         
         # Special fields that always have specific types
-        id_fields = {'sequence_id', 'user_id'}  # Int64
-        timestamp_field = {'timestamp'}  # Utf8 (ISO format string)
+        id_fields = {seq_id_col, user_id_col}  # Int64
         
         # Process each column in the DataFrame
         for col in df.columns:
@@ -2105,11 +1902,11 @@ class GlucoseMLPreprocessor:
                 continue
             
             # Special handling for timestamp
-            if col == 'timestamp':
-                if df.schema.get('timestamp') == pl.Datetime:
-                    cast_exprs.append(pl.col('timestamp').dt.strftime('%Y-%m-%dT%H:%M:%S').alias('timestamp'))
+            if col == ts_col:
+                if df.schema.get(ts_col) == pl.Datetime:
+                    cast_exprs.append(pl.col(ts_col).dt.strftime('%Y-%m-%dT%H:%M:%S').alias(ts_col))
                 else:
-                    cast_exprs.append(pl.col('timestamp').cast(pl.Utf8, strict=False).alias('timestamp'))
+                    cast_exprs.append(pl.col(ts_col).cast(pl.Utf8, strict=False).alias(ts_col))
                 continue
             
             # Determine type based on field categories (priority)
@@ -2143,7 +1940,6 @@ class GlucoseMLPreprocessor:
                     # Default to string for unknown types
                     cast_exprs.append(pl.col(col).cast(pl.Utf8, strict=False).alias(col))
             # For fields not in output_fields but present in DataFrame, preserve their type
-            # (they might be added by processing steps like user_id)
             else:
                 # Keep original type, but ensure it's a stable type
                 current_type = df.schema.get(col)
@@ -2163,56 +1959,49 @@ class GlucoseMLPreprocessor:
         output_fields = CSVFormatConverter.get_output_fields()
         
         # Always include sequence_id and user_id at the beginning if present
-        preferred = ['sequence_id'] if 'sequence_id' in df.columns else []
-        preferred.extend([f for f in output_fields if f != 'sequence_id'])
-        if 'user_id' in df.columns and 'user_id' not in preferred:
-            preferred.append('user_id')
+        preferred = [seq_id_col] if seq_id_col in df.columns else []
+        preferred.extend([f for f in output_fields if f != seq_id_col])
+        if user_id_col in df.columns and user_id_col not in preferred:
+            preferred.append(user_id_col)
         
         # Order columns: preferred fields first, then any remaining columns
         ordered = [c for c in preferred if c in df.columns] + [c for c in df.columns if c not in set(preferred)]
         ml_df = df.select(ordered)
         
         # Convert standard field names to display names for CSV output
-        # Get field to display name mapping
         field_to_display_map = CSVFormatConverter.get_field_to_display_name_map()
         
         # Rename columns: use display name if mapping exists, otherwise use standard name
-        rename_map = {}
+        rename_map: Dict[str, str] = {}
         for col in ml_df.columns:
             if col in field_to_display_map:
                 rename_map[col] = field_to_display_map[col]
-            # If not in map, keep original name (fields like heart_rate will use their standard name)
         
         if rename_map:
             ml_df = ml_df.rename(rename_map)
 
         # Optional strict output filtering:
-        # Keep only configured output_fields + selected service fields (+ sequence_id/user_id if present).
         if bool(self.config.get("restrict_output_to_config_fields", False)):
             service_allow = self.config.get("service_fields_allowlist")
             if isinstance(service_allow, list):
                 service_keep = {str(x) for x in service_allow}
             else:
-                # default: keep all service fields (standard names)
                 service_keep = set(service_fields)
 
-            allowed_standard = set(output_fields) | service_keep | {"sequence_id"}
-            if "user_id" in df.columns:
-                allowed_standard.add("user_id")
+            allowed_standard = set(output_fields) | service_keep | {seq_id_col}
+            if user_id_col in df.columns:
+                allowed_standard.add(user_id_col)
 
-            # Convert to final/output column names (after display-name mapping)
             allowed_cols = {field_to_display_map.get(c, c) for c in allowed_standard}
 
-            # Always keep sequence_id if present
-            if "sequence_id" in ml_df.columns:
-                allowed_cols.add("sequence_id")
+            if seq_id_col in ml_df.columns:
+                allowed_cols.add(seq_id_col)
 
-            # Filter columns, preserving order
             ml_df = ml_df.select([c for c in ml_df.columns if c in allowed_cols])
         
         return ml_df
     
-    def get_statistics(self, df: pl.DataFrame, gap_stats: Dict, interp_stats: Dict, removal_stats: Dict = None, filter_stats: Dict = None, replacement_stats: Dict = None, glucose_filter_stats: Dict = None, fixed_freq_stats: Dict = None) -> Dict[str, Any]:
+    def get_statistics(self, df: pl.DataFrame, gap_stats: Dict[str, Any], interp_stats: Dict[str, Any], removal_stats: Optional[Dict[str, Any]] = None, filter_stats: Optional[Dict[str, Any]] = None, replacement_stats: Optional[Dict[str, Any]] = None, glucose_filter_stats: Optional[Dict[str, Any]] = None, fixed_freq_stats: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Generate comprehensive statistics about the processed data.
         
@@ -2229,44 +2018,61 @@ class GlucoseMLPreprocessor:
         Returns:
             Dictionary with comprehensive statistics
         """
+        ts_col = StandardFieldNames.TIMESTAMP
+        seq_id_col = StandardFieldNames.SEQUENCE_ID
+        event_type_col = StandardFieldNames.EVENT_TYPE
+        glucose_col = StandardFieldNames.GLUCOSE_VALUE
+        fast_insulin_col = StandardFieldNames.FAST_ACTING_INSULIN
+        long_insulin_col = StandardFieldNames.LONG_ACTING_INSULIN
+        carb_col = StandardFieldNames.CARB_VALUE
+
         # Get date range from timestamp column if available (supports Datetime or string timestamps)
         date_range = {'start': 'N/A', 'end': 'N/A'}
-        if 'timestamp' in df.columns:
-            ts_dtype = df.schema.get('timestamp')
-            valid_timestamps = df.filter(pl.col('timestamp').is_not_null())
+        if ts_col in df.columns:
+            ts_dtype = df.schema.get(ts_col)
+            valid_timestamps = df.filter(pl.col(ts_col).is_not_null())
             if len(valid_timestamps) > 0:
                 if ts_dtype == pl.Datetime:
-                    timestamps = valid_timestamps['timestamp'].dt.strftime('%Y-%m-%dT%H:%M:%S').sort()
+                    timestamps = valid_timestamps[ts_col].dt.strftime('%Y-%m-%dT%H:%M:%S').sort()
                 else:
-                    timestamps = valid_timestamps['timestamp'].cast(pl.Utf8, strict=False).sort()
+                    timestamps = valid_timestamps[ts_col].cast(pl.Utf8, strict=False).sort()
                 date_range = {'start': timestamps[0], 'end': timestamps[-1]}
         
         # Calculate sequence statistics
         # Use len() instead of count() for Polars 1.0+ compatibility
-        sequence_counts = df.group_by('sequence_id').len().sort('sequence_id')
-        sequence_lengths = sequence_counts['len'].to_list()
+        sequence_counts = df.group_by(seq_id_col).len().sort(seq_id_col)
+        seq_lens = sequence_counts['len']
         
+        sequence_lengths_stats = {
+            'count': len(seq_lens),
+            'mean': seq_lens.mean() if not seq_lens.is_empty() else 0,
+            'std': seq_lens.std() if not seq_lens.is_empty() else 0,
+            'min': seq_lens.min() if not seq_lens.is_empty() else 0,
+            '25%': seq_lens.quantile(0.25) if not seq_lens.is_empty() else 0,
+            '50%': seq_lens.median() if not seq_lens.is_empty() else 0,
+            '75%': seq_lens.quantile(0.75) if not seq_lens.is_empty() else 0,
+            'max': seq_lens.max() if not seq_lens.is_empty() else 0
+        }
+        
+        # Calculate sequences by length
+        if not seq_lens.is_empty():
+            counts_df = seq_lens.value_counts().sort("len")
+            sequences_by_length = dict(zip(counts_df["len"].to_list(), counts_df["count"].to_list()))
+        else:
+            sequences_by_length = {}
+
         stats = {
             'dataset_overview': {
                 'total_records': len(df),
-                'total_sequences': df['sequence_id'].n_unique(),
+                'total_sequences': df[seq_id_col].n_unique() if seq_id_col in df.columns else 0,
                 'date_range': date_range,
                 'original_records': getattr(self, '_original_record_count', len(df))
             },
             'sequence_analysis': {
-                'sequence_lengths': {
-                    'count': len(sequence_lengths),
-                    'mean': sum(sequence_lengths) / len(sequence_lengths) if sequence_lengths else 0,
-                    'std': np.std(sequence_lengths) if sequence_lengths else 0,
-                    'min': min(sequence_lengths) if sequence_lengths else 0,
-                    '25%': np.percentile(sequence_lengths, 25) if sequence_lengths else 0,
-                    '50%': np.percentile(sequence_lengths, 50) if sequence_lengths else 0,
-                    '75%': np.percentile(sequence_lengths, 75) if sequence_lengths else 0,
-                    'max': max(sequence_lengths) if sequence_lengths else 0
-                },
-                'longest_sequence': max(sequence_lengths) if sequence_lengths else 0,
-                'shortest_sequence': min(sequence_lengths) if sequence_lengths else 0,
-                'sequences_by_length': dict(zip(*np.unique(sequence_lengths, return_counts=True)))
+                'sequence_lengths': sequence_lengths_stats,
+                'longest_sequence': sequence_lengths_stats['max'],
+                'shortest_sequence': sequence_lengths_stats['min'],
+                'sequences_by_length': sequences_by_length
             },
             'gap_analysis': gap_stats,
             'interpolation_analysis': interp_stats,
@@ -2280,16 +2086,16 @@ class GlucoseMLPreprocessor:
         
         # Build data_quality section using standard field names
         stats['data_quality'] = {
-            'glucose_data_completeness': (1 - df['glucose_value_mgdl'].null_count() / len(df)) * 100 if 'glucose_value_mgdl' in df.columns else 0,
-            'fast_acting_insulin_data_completeness': (1 - df['fast_acting_insulin_u'].null_count() / len(df)) * 100 if 'fast_acting_insulin_u' in df.columns else 0,
-            'long_acting_insulin_data_completeness': (1 - df['long_acting_insulin_u'].null_count() / len(df)) * 100 if 'long_acting_insulin_u' in df.columns else 0,
-            'carb_data_completeness': (1 - df['carb_grams'].null_count() / len(df)) * 100 if 'carb_grams' in df.columns else 0,
-            'interpolated_records': df.filter(pl.col('event_type') == 'Interpolated').height if 'event_type' in df.columns else 0
+            'glucose_data_completeness': (1 - df[glucose_col].null_count() / len(df)) * 100 if glucose_col in df.columns and len(df) > 0 else 0,
+            'fast_acting_insulin_data_completeness': (1 - df[fast_insulin_col].null_count() / len(df)) * 100 if fast_insulin_col in df.columns and len(df) > 0 else 0,
+            'long_acting_insulin_data_completeness': (1 - df[long_insulin_col].null_count() / len(df)) * 100 if long_insulin_col in df.columns and len(df) > 0 else 0,
+            'carb_data_completeness': (1 - df[carb_col].null_count() / len(df)) * 100 if carb_col in df.columns and len(df) > 0 else 0,
+            'interpolated_records': df.filter(pl.col(event_type_col) == INTERPOLATED_EVENT_TYPE).height if event_type_col in df.columns else 0
         }
         
         return stats
     
-    def process(self, csv_folder: str, output_file: str = None, last_sequence_id: int = 0) -> Tuple[pl.DataFrame, Dict[str, Any], int]:
+    def process(self, csv_folder: Path, output_file: Optional[Path] = None, last_sequence_id: int = 0) -> Tuple[pl.DataFrame, Dict[str, Any], int]:
         """
         Complete preprocessing pipeline with mandatory consolidation.
         
@@ -2301,21 +2107,19 @@ class GlucoseMLPreprocessor:
         Returns:
             Tuple of (processed DataFrame, statistics dictionary, last_sequence_id)
         """
-        print("Starting glucose data preprocessing for ML...")
-        print(f"Time discretization interval: {self.expected_interval_minutes} minutes")
-        print(f"Small gap max (interpolation limit): {self.small_gap_max_minutes} minutes")
-        print(f"Save intermediate files: {self.save_intermediate_files}")
-        print("-" * 50)
+        logger.info("Starting glucose data preprocessing for ML...")
+        logger.info(f"Time discretization interval: {self.expected_interval_minutes} minutes")
+        logger.info(f"Small gap max (interpolation limit): {self.small_gap_max_minutes} minutes")
+        logger.info(f"Save intermediate files: {self.save_intermediate_files}")
+        logger.info("-" * 50)
         
         # Detect database type to extract field categories for interpolation
         db_detector = DatabaseDetector()
         database_type = db_detector.detect_database_type(csv_folder)
         field_categories_dict = self.extract_field_categories(database_type) if database_type != 'unknown' else None
-        # Keep for downstream flexible-field casting/statistics
         self._field_categories_dict = field_categories_dict
         
-        # Generic bounded-memory streaming: if converter exposes `iter_user_event_frames`
-        # and an output_file is provided, stream to disk instead of building a giant DataFrame.
+        # Generic bounded-memory streaming
         database_converter = db_detector.get_database_converter(database_type, self.config or {})
         if (
             output_file
@@ -2331,150 +2135,146 @@ class GlucoseMLPreprocessor:
             )
         
         # Step 1: Consolidate CSV files (mandatory step)
-        if self.save_intermediate_files:
-            consolidated_file = "consolidated_data.csv"
-        else:
-            consolidated_file = None
+        consolidated_file = Path("consolidated_data.csv") if self.save_intermediate_files else None
         
-        print("STEP 1: Consolidating CSV files (mandatory step)...")
+        logger.info("STEP 1: Consolidating CSV files (mandatory step)...")
         df = self.consolidate_glucose_data(csv_folder, consolidated_file)
         
         if self.save_intermediate_files:
-            print(f"Consolidated data saved to: {consolidated_file}")
+            logger.info(f"Consolidated data saved to: {consolidated_file}")
         
-        print("-" * 40)
+        logger.info("-" * 40)
         
         # Step 2: Detect gaps and create sequences
-        print("STEP 2: Detecting gaps and creating sequences...")
+        logger.info("STEP 2: Detecting gaps and creating sequences...")
         df, gap_stats, last_sequence_id = self.detect_gaps_and_sequences(df, last_sequence_id, field_categories_dict)
-        print("OK: Gap detection and sequence creation complete")
+        logger.info("OK: Gap detection and sequence creation complete")
         
         if self.save_intermediate_files:
-            intermediate_file = "step2_sequences_created.csv"
-            df.write_csv(intermediate_file, null_value="")
-            print(f"Data with sequences saved to: {intermediate_file}")
+            intermediate_file = Path("step2_sequences_created.csv")
+            df.write_csv(intermediate_file)
+            logger.info(f"Data with sequences saved to: {intermediate_file}")
         
-        print("-" * 40)
+        logger.info("-" * 40)
         
         # Step 3: Interpolate missing values
-        print("STEP 3: Interpolating missing values...")
+        logger.info("STEP 3: Interpolating missing values...")
         df, interp_stats = self.interpolate_missing_values(df, field_categories_dict)
-        print("OK: Missing value interpolation complete")
+        logger.info("OK: Missing value interpolation complete")
         
         if self.save_intermediate_files:
-            intermediate_file = "step3_interpolated_values.csv"
-            df.write_csv(intermediate_file, null_value="")
-            print(f"Data with interpolated values saved to: {intermediate_file}")
+            intermediate_file = Path("step3_interpolated_values.csv")
+            df.write_csv(intermediate_file)
+            logger.info(f"Data with interpolated values saved to: {intermediate_file}")
         
-        print("-" * 40)
+        logger.info("-" * 40)
         
         # Step 4: Filter sequences by minimum length
-        print("STEP 4: Filtering sequences by minimum length...")
+        logger.info("STEP 4: Filtering sequences by minimum length...")
         df, filter_stats = self.filter_sequences_by_length(df)
-        print("OK: Sequence filtering complete")
+        logger.info("OK: Sequence filtering complete")
         
         if self.save_intermediate_files:
-            intermediate_file = "step4_filtered_sequences.csv"
-            df.write_csv(intermediate_file, null_value="")
-            print(f"Filtered data saved to: {intermediate_file}")
+            intermediate_file = Path("step4_filtered_sequences.csv")
+            df.write_csv(intermediate_file)
+            logger.info(f"Filtered data saved to: {intermediate_file}")
         
-        print("-" * 40)
+        logger.info("-" * 40)
         
         # Step 5: Create fixed-frequency data (if enabled)
         if self.create_fixed_frequency:
-            print("STEP 5: Creating fixed-frequency data...")
+            logger.info("STEP 5: Creating fixed-frequency data...")
             df, fixed_freq_stats = self.create_fixed_frequency_data(df, field_categories_dict)
-            print("Fixed-frequency data creation complete")
+            logger.info("Fixed-frequency data creation complete")
             
             if self.save_intermediate_files:
-                intermediate_file = "step5_fixed_frequency.csv"
-                df.write_csv(intermediate_file, null_value="")
-                print(f"Fixed-frequency data saved to: {intermediate_file}")
+                intermediate_file = Path("step5_fixed_frequency.csv")
+                df.write_csv(intermediate_file)
+                logger.info(f"Fixed-frequency data saved to: {intermediate_file}")
         else:
-            print("STEP 5: Fixed-frequency data creation is disabled - skipping")
+            logger.info("STEP 5: Fixed-frequency data creation is disabled - skipping")
             fixed_freq_stats = {}
         
-        print("-" * 40)
+        logger.info("-" * 40)
         
         # Step 6: Filter to glucose-only data (if requested)
-        print("STEP 6: Filtering to glucose-only data...")
+        logger.info("STEP 6: Filtering to glucose-only data...")
         df, glucose_filter_stats = self.filter_glucose_only(df)
-        print("OK: Glucose-only filtering complete")
+        logger.info("OK: Glucose-only filtering complete")
         
         if self.save_intermediate_files:
-            intermediate_file = "step6_glucose_only.csv"
-            df.write_csv(intermediate_file, null_value="")
-            print(f"Glucose-only data saved to: {intermediate_file}")
+            intermediate_file = Path("step6_glucose_only.csv")
+            df.write_csv(intermediate_file)
+            logger.info(f"Glucose-only data saved to: {intermediate_file}")
         
-        print("-" * 40)
+        logger.info("-" * 40)
         
         # Step 7: Prepare final ML dataset
-        print("STEP 7: Preparing final ML dataset...")
+        logger.info("STEP 7: Preparing final ML dataset...")
         ml_df = self.prepare_ml_data(df)
-        print("OK: ML dataset preparation complete")
+        logger.info("OK: ML dataset preparation complete")
         
         if self.save_intermediate_files:
-            intermediate_file = "step7_ml_ready.csv"
-            ml_df.write_csv(intermediate_file, null_value="")
-            print(f"ML-ready data saved to: {intermediate_file}")
+            intermediate_file = Path("step7_ml_ready.csv")
+            ml_df.write_csv(intermediate_file)
+            logger.info(f"ML-ready data saved to: {intermediate_file}")
         
-        print("-" * 40)
+        logger.info("-" * 40)
         
-        # Generate statistics (removed database-specific stats that are now handled by converters)
+        # Generate statistics
         stats = self.get_statistics(ml_df, gap_stats, interp_stats, None, filter_stats, None, glucose_filter_stats, fixed_freq_stats)
         
         # Save final output if specified
         if output_file:
-            ml_df.write_csv(output_file, null_value="")
-            print(f"Final processed data saved to: {output_file}")
+            ml_df.write_csv(output_file)
+            logger.info(f"Final processed data saved to: {output_file}")
         
-        print("-" * 50)
-        print("Preprocessing completed successfully!")
+        logger.info("-" * 50)
+        logger.info("Preprocessing completed successfully!")
         
         return ml_df, stats, last_sequence_id
 
-    
-    def process_multiple_databases(self, csv_folders: List[str], output_file: str = None, last_sequence_id: int = 0) -> Tuple[pl.DataFrame, Dict[str, Any], int]:
+    def process_multiple_databases(self, csv_folders: List[Path], output_file: Optional[Path] = None, last_sequence_id: int = 0) -> Tuple[pl.DataFrame, Dict[str, Any], int]:
         """
         Process multiple databases with different formats and combine them into a single output.
         Sequence IDs are tracked consistently across databases using last_sequence_id parameter.
         
-        Note: The user_id column (present in multi-user databases like UoM) is automatically 
-        removed to ensure schema compatibility when combining databases with different structures.
-        
         Args:
-            csv_folders: List of paths to folders containing CSV files (each can be different format)
+            csv_folders: List of paths to folders containing CSV files
             output_file: Optional path to save combined processed data
             last_sequence_id: Last sequence ID used (sequences will start from last_sequence_id + 1)
             
         Returns:
             Tuple of (combined DataFrame, aggregated statistics dictionary, last_sequence_id)
         """
-        print(f"Starting multi-database processing for {len(csv_folders)} databases...")
-        print(f"Databases to process: {', '.join(csv_folders)}")
-        print("-" * 50)
+        logger.info(f"Starting multi-database processing for {len(csv_folders)} databases...")
+        logger.info(f"Databases to process: {', '.join(str(p) for p in csv_folders)}")
+        logger.info("-" * 50)
 
         db_detector = DatabaseDetector()
-        db_types: list[str] = []
+        db_types: List[str] = []
         for p in csv_folders:
             try:
                 db_types.append(db_detector.detect_database_type(p))
-            except Exception:
+            except (ValueError, OSError):
                 db_types.append("unknown")
         
-        # Generic streaming multi-db writer: if any converter supports `iter_user_event_frames`
-        # and output_file is provided, stream-combine outputs to avoid large in-memory concatenations.
         converters = [db_detector.get_database_converter(t, self.config or {}) for t in db_types]
         streaming_capable = any(c is not None and callable(getattr(c, "iter_user_event_frames", None)) for c in converters)
+        
+        ts_col = StandardFieldNames.TIMESTAMP
+        seq_id_col = StandardFieldNames.SEQUENCE_ID
+        user_id_col = StandardFieldNames.USER_ID
+
         if streaming_capable and output_file:
             expected_cols = self._compute_expected_output_columns(db_types)
             max_bytes = self._streaming_buffer_max_bytes()
             max_users = self._streaming_flush_max_users()
-            Path(output_file).write_text("", encoding="utf-8")
+            output_file.write_text("", encoding="utf-8")
 
             current_last_sequence_id = last_sequence_id
             wrote_header = False
-            buffered: list[pl.DataFrame] = []
+            buffered: List[pl.DataFrame] = []
             buffered_bytes = 0
             buffered_users = 0
             total_records = 0
@@ -2496,15 +2296,15 @@ class GlucoseMLPreprocessor:
                         frame = frame.with_columns([pl.lit(None).alias(c) for c in missing])
                     frame = frame.select([c for c in expected_cols if c in frame.columns])
                     total_records += len(frame)
-                    if "sequence_id" in frame.columns:
-                        total_sequences += int(frame["sequence_id"].n_unique())
+                    if seq_id_col in frame.columns:
+                        total_sequences += int(frame[seq_id_col].n_unique())
                     self._write_csv_append(frame, output_file=output_file, include_header=not wrote_header)
                     wrote_header = True
 
             for idx, (csv_folder, db_type, converter) in enumerate(zip(csv_folders, db_types, converters), 1):
-                print(f"\n{'=' * 60}")
-                print(f"PROCESSING DATABASE {idx}/{len(csv_folders)}: {csv_folder}")
-                print(f"{'=' * 60}\n")
+                logger.info(f"\n{'=' * 60}")
+                logger.info(f"PROCESSING DATABASE {idx}/{len(csv_folders)}: {csv_folder}")
+                logger.info(f"{'=' * 60}\n")
 
                 if converter is not None and callable(getattr(converter, "iter_user_event_frames", None)):
                     field_categories_dict = self.extract_field_categories(db_type) if db_type != "unknown" else None
@@ -2512,17 +2312,16 @@ class GlucoseMLPreprocessor:
                         if len(user_df) == 0:
                             continue
 
-                        # Track date range
                         try:
-                            umin = user_df["timestamp"].min()
-                            umax = user_df["timestamp"].max()
+                            umin = user_df[ts_col].min()
+                            umax = user_df[ts_col].max()
                             if umin is not None:
                                 s = umin.strftime("%Y-%m-%dT%H:%M:%S")
                                 min_ts = s if (min_ts is None or s < min_ts) else min_ts
                             if umax is not None:
                                 s = umax.strftime("%Y-%m-%dT%H:%M:%S")
                                 max_ts = s if (max_ts is None or s > max_ts) else max_ts
-                        except Exception:
+                        except (KeyError, AttributeError, ValueError):
                             pass
 
                         df, _gap_stats, current_last_sequence_id = self.detect_gaps_and_sequences(
@@ -2546,7 +2345,6 @@ class GlucoseMLPreprocessor:
                         if buffered_bytes >= max_bytes or buffered_users >= max_users:
                             flush()
                 else:
-                    # Process in-memory and append
                     ml_df, stats, current_last_sequence_id = self.process(
                         csv_folder, output_file=None, last_sequence_id=current_last_sequence_id
                     )
@@ -2556,7 +2354,7 @@ class GlucoseMLPreprocessor:
                             min_ts = dr["start"] if (min_ts is None or dr["start"] < min_ts) else min_ts
                         if dr.get("end") and dr["end"] != "N/A":
                             max_ts = dr["end"] if (max_ts is None or dr["end"] > max_ts) else max_ts
-                    except Exception:
+                    except (KeyError, AttributeError, ValueError):
                         pass
 
                     missing = [c for c in expected_cols if c not in ml_df.columns]
@@ -2595,77 +2393,66 @@ class GlucoseMLPreprocessor:
                 "data_quality": {},
             }
 
-            placeholder = pl.DataFrame({"sequence_id": pl.Series([], dtype=pl.Int64)})
+            placeholder = pl.DataFrame({seq_id_col: pl.Series([], dtype=pl.Int64)})
             return placeholder, aggregated_stats, current_last_sequence_id
         
-        all_dataframes = []
-        all_statistics = []
+        all_dataframes: List[pl.DataFrame] = []
+        all_statistics: List[Dict[str, Any]] = []
         current_last_sequence_id = last_sequence_id
         
         for idx, csv_folder in enumerate(csv_folders, 1):
-            print(f"\n{'=' * 60}")
-            print(f"PROCESSING DATABASE {idx}/{len(csv_folders)}: {csv_folder}")
-            print(f"{'=' * 60}\n")
+            logger.info(f"\n{'=' * 60}")
+            logger.info(f"PROCESSING DATABASE {idx}/{len(csv_folders)}: {csv_folder}")
+            logger.info(f"{'=' * 60}\n")
             
-            # Process this database (without saving final output yet)
-            # Pass current_last_sequence_id to ensure consistent sequence ID tracking
             ml_df, stats, current_last_sequence_id = self.process(csv_folder, output_file=None, last_sequence_id=current_last_sequence_id)
             
-            # Remove user_id column if present (to ensure consistent schema across databases)
-            # Unless user_id is explicitly requested in output_fields
             output_fields = CSVFormatConverter.get_output_fields()
-            if 'user_id' in ml_df.columns and 'user_id' not in output_fields:
-                print(f"\n⚙️  Removing user_id column for multi-database compatibility...")
-                ml_df = ml_df.drop('user_id')
+            if user_id_col in ml_df.columns and user_id_col not in output_fields:
+                logger.info(f"\nRemoving user_id column for multi-database compatibility...")
+                ml_df = ml_df.drop(user_id_col)
             
-            # Get sequence ID range for statistics
-            max_sequence_id = ml_df['sequence_id'].max() if len(ml_df) > 0 else current_last_sequence_id
-            min_sequence_id = ml_df['sequence_id'].min() if len(ml_df) > 0 else current_last_sequence_id
+            max_seq_id = ml_df[seq_id_col].max() if len(ml_df) > 0 else current_last_sequence_id
+            min_seq_id = ml_df[seq_id_col].min() if len(ml_df) > 0 else current_last_sequence_id
             
-            # Add database identifier to statistics
             stats['database_info'] = {
                 'database_index': idx,
-                'database_path': csv_folder,
-                'sequence_id_start': current_last_sequence_id + 1 if idx == 1 else None,  # Track where this DB started
+                'database_path': str(csv_folder),
+                'sequence_id_start': current_last_sequence_id + 1 if idx == 1 else None,
                 'sequence_id_range': {
-                    'min': min_sequence_id,
-                    'max': max_sequence_id
+                    'min': int(min_seq_id) if min_seq_id is not None else current_last_sequence_id,
+                    'max': int(max_seq_id) if max_seq_id is not None else current_last_sequence_id
                 }
             }
             
             all_dataframes.append(ml_df)
             all_statistics.append(stats)
             
-            print(f"\n✅ Database {idx} processed: {len(ml_df):,} records, {ml_df['sequence_id'].n_unique():,} sequences")
-            print(f"   Sequence ID range: {min_sequence_id} - {max_sequence_id}")
-            print(f"   Last sequence ID after processing: {current_last_sequence_id}")
+            logger.info(f"\nDatabase {idx} processed: {len(ml_df):,} records, {ml_df[seq_id_col].n_unique():,} sequences")
+            logger.info(f"   Sequence ID range: {min_seq_id} - {max_seq_id}")
+            logger.info(f"   Last sequence ID after processing: {current_last_sequence_id}")
         
-        # Combine all DataFrames
-        print(f"\n{'=' * 60}")
-        print("COMBINING ALL DATABASES")
-        print(f"{'=' * 60}\n")
+        logger.info(f"\n{'=' * 60}")
+        logger.info("COMBINING ALL DATABASES")
+        logger.info(f"{'=' * 60}\n")
         
         combined_df = pl.concat(all_dataframes)
+        combined_df = combined_df.sort([seq_id_col, ts_col])
         
-        # Sort by sequence_id and timestamp (user_id is removed for multi-database consistency)
-        combined_df = combined_df.sort(['sequence_id', 'timestamp'])
-        
-        # Aggregate statistics from all databases
         combined_stats = self._aggregate_statistics(all_statistics, csv_folders)
         
-        print(f"✅ Combined {len(csv_folders)} databases:")
-        print(f"   Total records: {len(combined_df):,}")
-        print(f"   Total sequences: {combined_df['sequence_id'].n_unique():,}")
-        print(f"   Sequence ID range: {combined_df['sequence_id'].min()} - {combined_df['sequence_id'].max()}")
+        logger.info(f"Combined {len(csv_folders)} databases:")
+        logger.info(f"   Total records: {len(combined_df):,}")
+        logger.info(f"   Total sequences: {combined_df[seq_id_col].n_unique():,}")
+        logger.info(f"   Sequence ID range: {combined_df[seq_id_col].min()} - {combined_df[seq_id_col].max()}")
         
-        # Save final output if specified
         if output_file:
-            combined_df.write_csv(output_file, null_value="")
-            print(f"\n💾 Final combined data saved to: {output_file}")
+            combined_df.write_csv(output_file)
+            logger.info(f"\nFinal combined data saved to: {output_file}")
         
-        print("-" * 50)
-        print(f"Multi-database preprocessing completed successfully!")
-        print(f"Final last sequence ID: {current_last_sequence_id}")
+        logger.info("-" * 50)
+        logger.info(f"Multi-database preprocessing completed successfully!")
+        logger.info(f"Final last sequence ID: {current_last_sequence_id}")
         
         return combined_df, combined_stats, current_last_sequence_id
     
@@ -2923,130 +2710,130 @@ def print_statistics(stats: Dict[str, Any], preprocessor: 'GlucoseMLPreprocessor
         stats: Statistics dictionary from preprocessor
         preprocessor: Optional preprocessor instance to show parameters
     """
-    print("\n" + "="*60)
-    print("GLUCOSE DATA PREPROCESSING STATISTICS")
-    print("="*60)
+    logger.info("\n" + "="*60)
+    logger.info("GLUCOSE DATA PREPROCESSING STATISTICS")
+    logger.info("="*60)
     
     # Show multi-database information if present
     if 'multi_database_info' in stats:
         multi_db_info = stats['multi_database_info']
-        print(f"\nMULTI-DATABASE PROCESSING:")
-        print(f"   Total Databases Combined: {multi_db_info['total_databases']}")
-        print(f"   Database Paths:")
+        logger.info(f"\nMULTI-DATABASE PROCESSING:")
+        logger.info(f"   Total Databases Combined: {multi_db_info['total_databases']}")
+        logger.info(f"   Database Paths:")
         for i, path in enumerate(multi_db_info['database_paths'], 1):
-            print(f"      {i}. {path}")
+            logger.info(f"      {i}. {path}")
         
-        print(f"\n   Processed Databases Details:")
+        logger.info(f"\n   Processed Databases Details:")
         for db in multi_db_info['databases_processed']:
             db_idx = db.get('database_index', 'N/A')
             db_name = db.get('database_name', 'Unknown')
             seq_range = db.get('sequence_id_range', {})
-            print(f"      Database {db_idx} ({db_name}):")
-            print(f"         Sequence ID Range: {seq_range.get('min', 'N/A')} - {seq_range.get('max', 'N/A')}")
+            logger.info(f"      Database {db_idx} ({db_name}):")
+            logger.info(f"         Sequence ID Range: {seq_range.get('min', 'N/A')} - {seq_range.get('max', 'N/A')}")
     
     # Show parameters if preprocessor is provided
     if preprocessor:
-        print(f"\nPARAMETERS USED:")
-        print(f"   Time Discretization Interval: {preprocessor.expected_interval_minutes} minutes")
-        print(f"   Small Gap Max (Interpolation Limit): {preprocessor.small_gap_max_minutes} minutes")
-        print(f"   Remove Calibration Events: {preprocessor.remove_calibration}")
-        print(f"   Minimum Sequence Length: {preprocessor.min_sequence_len}")
-        print(f"   Calibration Period Threshold: {preprocessor.calibration_period_minutes} minutes")
-        print(f"   Remove After Calibration: {preprocessor.remove_after_calibration_hours} hours")
-        print(f"   Create Fixed-Frequency Data: {preprocessor.create_fixed_frequency}")
+        logger.info(f"\nPARAMETERS USED:")
+        logger.info(f"   Time Discretization Interval: {preprocessor.expected_interval_minutes} minutes")
+        logger.info(f"   Small Gap Max (Interpolation Limit): {preprocessor.small_gap_max_minutes} minutes")
+        logger.info(f"   Remove Calibration Events: {preprocessor.remove_calibration}")
+        logger.info(f"   Minimum Sequence Length: {preprocessor.min_sequence_len}")
+        logger.info(f"   Calibration Period Threshold: {preprocessor.calibration_period_minutes} minutes")
+        logger.info(f"   Remove After Calibration: {preprocessor.remove_after_calibration_hours} hours")
+        logger.info(f"   Create Fixed-Frequency Data: {preprocessor.create_fixed_frequency}")
     
     # Dataset Overview
     overview = stats['dataset_overview']
-    print(f"\nDATASET OVERVIEW:")
-    print(f"   Total Records: {overview['total_records']:,}")
-    print(f"   Total Sequences: {overview['total_sequences']:,}")
-    print(f"   Date Range: {overview['date_range']['start']} to {overview['date_range']['end']}")
+    logger.info(f"\nDATASET OVERVIEW:")
+    logger.info(f"   Total Records: {overview['total_records']:,}")
+    logger.info(f"   Total Sequences: {overview['total_sequences']:,}")
+    logger.info(f"   Date Range: {overview['date_range']['start']} to {overview['date_range']['end']}")
     
     # Show data preservation percentage
     original_records = overview.get('original_records', overview['total_records'])
     final_records = overview['total_records']
     preservation_percentage = (final_records / original_records * 100) if original_records > 0 else 100
-    print(f"   Data Preservation: {preservation_percentage:.1f}% ({final_records:,}/{original_records:,} records)")
+    logger.info(f"   Data Preservation: {preservation_percentage:.1f}% ({final_records:,}/{original_records:,} records)")
     
     # Sequence Analysis
     seq_analysis = stats['sequence_analysis']
-    print(f"\nSEQUENCE ANALYSIS:")
-    print(f"   Longest Sequence: {seq_analysis['longest_sequence']:,} records")
-    print(f"   Shortest Sequence: {seq_analysis['shortest_sequence']:,} records")
-    print(f"   Average Sequence Length: {seq_analysis['sequence_lengths']['mean']:.1f} records")
-    print(f"   Median Sequence Length: {seq_analysis['sequence_lengths']['50%']:.1f} records")
+    logger.info(f"\nSEQUENCE ANALYSIS:")
+    logger.info(f"   Longest Sequence: {seq_analysis['longest_sequence']:,} records")
+    logger.info(f"   Shortest Sequence: {seq_analysis['shortest_sequence']:,} records")
+    logger.info(f"   Average Sequence Length: {seq_analysis['sequence_lengths']['mean']:.1f} records")
+    logger.info(f"   Median Sequence Length: {seq_analysis['sequence_lengths']['50%']:.1f} records")
     
     # Gap Analysis
     gap_analysis = stats.get('gap_analysis', {})
     if gap_analysis:
-        print(f"\nGAP ANALYSIS:")
-        print(f"   Total Gaps > {preprocessor.small_gap_max_minutes if preprocessor else 'N/A'} minutes: {gap_analysis.get('total_gaps', 0):,}")
-        print(f"   Sequences Created: {gap_analysis.get('total_sequences', 0):,}")
+        logger.info(f"\nGAP ANALYSIS:")
+        logger.info(f"   Total Gaps > {preprocessor.small_gap_max_minutes if preprocessor else 'N/A'} minutes: {gap_analysis.get('total_gaps', 0):,}")
+        logger.info(f"   Sequences Created: {gap_analysis.get('total_sequences', 0):,}")
     
     # Calibration Period Analysis
     if 'calibration_period_analysis' in gap_analysis and gap_analysis['calibration_period_analysis']:
         calib_analysis = gap_analysis['calibration_period_analysis']
-        print(f"\nCALIBRATION PERIOD ANALYSIS:")
-        print(f"   Calibration Periods Detected: {calib_analysis.get('calibration_periods_detected', 0):,}")
-        print(f"   Records Removed After Calibration: {calib_analysis.get('total_records_marked_for_removal', 0):,}")
-        print(f"   Sequences Affected: {calib_analysis.get('sequences_marked_for_removal', 0):,}")
+        logger.info(f"\nCALIBRATION PERIOD ANALYSIS:")
+        logger.info(f"   Calibration Periods Detected: {calib_analysis.get('calibration_periods_detected', 0):,}")
+        logger.info(f"   Records Removed After Calibration: {calib_analysis.get('total_records_marked_for_removal', 0):,}")
+        logger.info(f"   Sequences Affected: {calib_analysis.get('sequences_marked_for_removal', 0):,}")
     
     # High/Low Value Replacement Analysis
     if 'replacement_analysis' in stats and stats['replacement_analysis']:
         replacement_analysis = stats['replacement_analysis']
-        print(f"\nHIGH/LOW VALUE REPLACEMENT ANALYSIS:")
-        print(f"   High Values Replaced (-> 401): {replacement_analysis['high_replacements']:,}")
-        print(f"   Low Values Replaced (-> 39): {replacement_analysis['low_replacements']:,}")
-        print(f"   Total Replacements: {replacement_analysis['total_replacements']:,}")
-        print(f"   Glucose Field Type: {'Float64' if replacement_analysis['glucose_field_converted_to_float'] else 'String'}")
+        logger.info(f"\nHIGH/LOW VALUE REPLACEMENT ANALYSIS:")
+        logger.info(f"   High Values Replaced (-> 401): {replacement_analysis['high_replacements']:,}")
+        logger.info(f"   Low Values Replaced (-> 39): {replacement_analysis['low_replacements']:,}")
+        logger.info(f"   Total Replacements: {replacement_analysis['total_replacements']:,}")
+        logger.info(f"   Glucose Field Type: {'Float64' if replacement_analysis['glucose_field_converted_to_float'] else 'String'}")
     
     # Interpolation Analysis
     interp_analysis = stats.get('interpolation_analysis', {})
     if interp_analysis:
-        print(f"\nINTERPOLATION ANALYSIS:")
-        print(f"   Small Gaps Identified and Processed: {interp_analysis.get('small_gaps_filled', 0):,}")
-        print(f"   Interpolated Data Points Created: {interp_analysis.get('total_interpolated_data_points', 0):,}")
-        print(f"   Total Field Interpolations: {interp_analysis.get('total_interpolations', 0):,}")
+        logger.info(f"\nINTERPOLATION ANALYSIS:")
+        logger.info(f"   Small Gaps Identified and Processed: {interp_analysis.get('small_gaps_filled', 0):,}")
+        logger.info(f"   Interpolated Data Points Created: {interp_analysis.get('total_interpolated_data_points', 0):,}")
+        logger.info(f"   Total Field Interpolations: {interp_analysis.get('total_interpolations', 0):,}")
         # Handle both old format (with slash) and new format (without slash)
         glucose_interps = interp_analysis.get('glucose_value_mgdl_interpolations', 
                                               interp_analysis.get('glucose_value_mg/dl_interpolations', 0))
-        print(f"   Glucose Interpolations: {glucose_interps:,}")
-        print(f"   Insulin Interpolations: {interp_analysis.get('insulin_value_u_interpolations', 0):,}")
-        print(f"   Carb Interpolations: {interp_analysis.get('carb_value_grams_interpolations', 0):,}")
-        print(f"   Large Gaps Skipped: {interp_analysis.get('large_gaps_skipped', 0):,}")
-        print(f"   Sequences Processed: {interp_analysis.get('sequences_processed', 0):,}")
+        logger.info(f"   Glucose Interpolations: {glucose_interps:,}")
+        logger.info(f"   Insulin Interpolations: {interp_analysis.get('insulin_value_u_interpolations', 0):,}")
+        logger.info(f"   Carb Interpolations: {interp_analysis.get('carb_value_grams_interpolations', 0):,}")
+        logger.info(f"   Large Gaps Skipped: {interp_analysis.get('large_gaps_skipped', 0):,}")
+        logger.info(f"   Sequences Processed: {interp_analysis.get('sequences_processed', 0):,}")
     
     # Calibration Removal Analysis
     if 'calibration_removal_analysis' in stats and stats['calibration_removal_analysis']:
         removal_analysis = stats['calibration_removal_analysis']
-        print(f"\nCALIBRATION REMOVAL ANALYSIS:")
-        print(f"   Calibration Events Removed: {removal_analysis.get('calibration_events_removed', 0):,}")
-        print(f"   Records Before Removal: {removal_analysis.get('records_before_removal', 0):,}")
-        print(f"   Records After Removal: {removal_analysis.get('records_after_removal', 0):,}")
-        print(f"   Removal Enabled: {removal_analysis.get('calibration_removal_enabled', False)}")
+        logger.info(f"\nCALIBRATION REMOVAL ANALYSIS:")
+        logger.info(f"   Calibration Events Removed: {removal_analysis.get('calibration_events_removed', 0):,}")
+        logger.info(f"   Records Before Removal: {removal_analysis.get('records_before_removal', 0):,}")
+        logger.info(f"   Records After Removal: {removal_analysis.get('records_after_removal', 0):,}")
+        logger.info(f"   Removal Enabled: {removal_analysis.get('calibration_removal_enabled', False)}")
     
     # Filtering Analysis
     if 'filtering_analysis' in stats and stats['filtering_analysis']:
         filter_analysis = stats['filtering_analysis']
-        print(f"\nSEQUENCE FILTERING ANALYSIS:")
-        print(f"   Original Sequences: {filter_analysis.get('original_sequences', 0):,}")
-        print(f"   Sequences After Filtering: {filter_analysis.get('filtered_sequences', 0):,}")
-        print(f"   Sequences Removed: {filter_analysis.get('removed_sequences', 0):,}")
-        print(f"   Original Records: {filter_analysis.get('original_records', 0):,}")
-        print(f"   Records After Filtering: {filter_analysis.get('filtered_records', 0):,}")
-        print(f"   Records Removed: {filter_analysis.get('removed_records', 0):,}")
+        logger.info(f"\nSEQUENCE FILTERING ANALYSIS:")
+        logger.info(f"   Original Sequences: {filter_analysis.get('original_sequences', 0):,}")
+        logger.info(f"   Sequences After Filtering: {filter_analysis.get('filtered_sequences', 0):,}")
+        logger.info(f"   Sequences Removed: {filter_analysis.get('removed_sequences', 0):,}")
+        logger.info(f"   Original Records: {filter_analysis.get('original_records', 0):,}")
+        logger.info(f"   Records After Filtering: {filter_analysis.get('filtered_records', 0):,}")
+        logger.info(f"   Records Removed: {filter_analysis.get('removed_records', 0):,}")
     
     # Fixed-Frequency Analysis
     if 'fixed_frequency_analysis' in stats and stats['fixed_frequency_analysis']:
         fixed_freq_analysis = stats['fixed_frequency_analysis']
-        print(f"\nFIXED-FREQUENCY ANALYSIS:")
-        print(f"   Sequences Processed: {fixed_freq_analysis.get('sequences_processed', 0):,}")
-        print(f"   Time Adjustments Made: {fixed_freq_analysis.get('time_adjustments', 0):,}")
-        print(f"   Glucose Interpolations: {fixed_freq_analysis.get('glucose_interpolations', 0):,}")
-        print(f"   Insulin Records Shifted: {fixed_freq_analysis.get('insulin_shifted_records', 0):,}")
-        print(f"   Carb Records Shifted: {fixed_freq_analysis.get('carb_shifted_records', 0):,}")
-        print(f"   Records Before: {fixed_freq_analysis.get('total_records_before', 0):,}")
-        print(f"   Records After: {fixed_freq_analysis.get('total_records_after', 0):,}")
+        logger.info(f"\nFIXED-FREQUENCY ANALYSIS:")
+        logger.info(f"   Sequences Processed: {fixed_freq_analysis.get('sequences_processed', 0):,}")
+        logger.info(f"   Time Adjustments Made: {fixed_freq_analysis.get('time_adjustments', 0):,}")
+        logger.info(f"   Glucose Interpolations: {fixed_freq_analysis.get('glucose_interpolations', 0):,}")
+        logger.info(f"   Insulin Records Shifted: {fixed_freq_analysis.get('insulin_shifted_records', 0):,}")
+        logger.info(f"   Carb Records Shifted: {fixed_freq_analysis.get('carb_shifted_records', 0):,}")
+        logger.info(f"   Records Before: {fixed_freq_analysis.get('total_records_before', 0):,}")
+        logger.info(f"   Records After: {fixed_freq_analysis.get('total_records_after', 0):,}")
         
         # Data Density Analysis and Change Explanation
         if 'data_density_before' in fixed_freq_analysis and 'data_density_after' in fixed_freq_analysis:
@@ -3054,92 +2841,46 @@ def print_statistics(stats: Dict[str, Any], preprocessor: 'GlucoseMLPreprocessor
             after_density = fixed_freq_analysis['data_density_after']
             interval_minutes = preprocessor.expected_interval_minutes
             
-            print(f"\n   DATA DENSITY ({interval_minutes}-minute intervals):")
-            print(f"      Before: {before_density.get('avg_points_per_interval', 0.0):.2f} points/interval")
-            print(f"      After: {after_density.get('avg_points_per_interval', 0.0):.2f} points/interval")
+            logger.info(f"\n   DATA DENSITY ({interval_minutes}-minute intervals):")
+            logger.info(f"      Before: {before_density.get('avg_points_per_interval', 0.0):.2f} points/interval")
+            logger.info(f"      After: {after_density.get('avg_points_per_interval', 0.0):.2f} points/interval")
             
             if 'density_change_explanation' in fixed_freq_analysis:
                 explanation = fixed_freq_analysis['density_change_explanation']
                 density_change = explanation.get('density_change_pct', 0.0)
-                print(f"      Density Change: {density_change:+.1f}%")
-                print(f"      Change Explained by Density: {explanation.get('explained_pct', 0.0):.1f}%")
+                logger.info(f"      Density Change: {density_change:+.1f}%")
+                logger.info(f"      Change Explained by Density: {explanation.get('explained_pct', 0.0):.1f}%")
     
     # Glucose Filtering Analysis
     if 'glucose_filtering_analysis' in stats and stats['glucose_filtering_analysis']:
         glucose_filter_analysis = stats['glucose_filtering_analysis']
-        print(f"\nGLUCOSE-ONLY FILTERING ANALYSIS:")
-        print(f"   Glucose-Only Mode Enabled: {glucose_filter_analysis.get('glucose_only_enabled', False)}")
-        print(f"   Original Records: {glucose_filter_analysis.get('original_records', 0):,}")
-        print(f"   Records After Filtering: {glucose_filter_analysis.get('records_after_filtering', 0):,}")
-        print(f"   Records Removed (No Glucose): {glucose_filter_analysis.get('records_removed', 0):,}")
+        logger.info(f"\nGLUCOSE-ONLY FILTERING ANALYSIS:")
+        logger.info(f"   Glucose-Only Mode Enabled: {glucose_filter_analysis.get('glucose_only_enabled', False)}")
+        logger.info(f"   Original Records: {glucose_filter_analysis.get('original_records', 0):,}")
+        logger.info(f"   Records After Filtering: {glucose_filter_analysis.get('records_after_filtering', 0):,}")
+        logger.info(f"   Records Removed (No Glucose): {glucose_filter_analysis.get('records_removed', 0):,}")
         if glucose_filter_analysis.get('fields_removed', []):
-            print(f"   Fields Removed: {', '.join(glucose_filter_analysis['fields_removed'])}")
+            logger.info(f"   Fields Removed: {', '.join(glucose_filter_analysis['fields_removed'])}")
     
     # Data Quality
     quality = stats['data_quality']
-    print(f"\nDATA QUALITY:")
-    print(f"   Glucose Data Completeness: {quality.get('glucose_data_completeness', 0):.1f}%")
+    logger.info(f"\nDATA QUALITY:")
+    logger.info(f"   Glucose Data Completeness: {quality.get('glucose_data_completeness', 0):.1f}%")
     
     # Handle both insulin completeness formats
     if 'insulin_data_completeness' in quality:
-        print(f"   Insulin Data Completeness: {quality['insulin_data_completeness']:.1f}%")
+        logger.info(f"   Insulin Data Completeness: {quality['insulin_data_completeness']:.1f}%")
     else:
         fast_acting = quality.get('fast_acting_insulin_data_completeness', 0)
         long_acting = quality.get('long_acting_insulin_data_completeness', 0)
         if fast_acting > 0 or long_acting > 0:
-            print(f"   Fast-Acting Insulin Data Completeness: {fast_acting:.1f}%")
-            print(f"   Long-Acting Insulin Data Completeness: {long_acting:.1f}%")
+            logger.info(f"   Fast-Acting Insulin Data Completeness: {fast_acting:.1f}%")
+            logger.info(f"   Long-Acting Insulin Data Completeness: {long_acting:.1f}%")
         else:
-            print(f"   Insulin Data Completeness: 0.0%")
+            logger.info(f"   Insulin Data Completeness: 0.0%")
     
-    print(f"   Carb Data Completeness: {quality.get('carb_data_completeness', 0):.1f}%")
-    print(f"   Interpolated Records: {quality.get('interpolated_records', 0):,}")
+    logger.info(f"   Carb Data Completeness: {quality.get('carb_data_completeness', 0):.1f}%")
+    logger.info(f"   Interpolated Records: {quality.get('interpolated_records', 0):,}")
     
-    print("\n" + "="*60)
+    logger.info("\n" + "="*60)
 
-
-if __name__ == "__main__":
-    # Configuration
-    DATA_FOLDER = "zendo_small"  # Folder containing data files (can be any supported database type)
-    OUTPUT_FILE = "glucose_ml_ready_test.csv"  # Final ML-ready output
-    CONFIG_FILE = "glucose_config_new.yaml"  # Configuration file
-    
-    # Initialize preprocessor from configuration file
-    try:
-        preprocessor = GlucoseMLPreprocessor.from_config_file(CONFIG_FILE)
-        print(f"Loaded configuration from: {CONFIG_FILE}")
-    except FileNotFoundError:
-        print(f"Configuration file {CONFIG_FILE} not found, using default settings")
-        # Fallback to default configuration
-    preprocessor = GlucoseMLPreprocessor(
-        expected_interval_minutes=5,   # Time discretization interval
-        small_gap_max_minutes=15,      # Maximum gap size to interpolate
-        remove_calibration=True,       # Remove calibration events to create interpolatable gaps
-        min_sequence_len=200,          # Minimum sequence length to keep for ML training
-        calibration_period_minutes=60*2 + 45,  # Gap duration considered as calibration period (2h 45m)
-        remove_after_calibration_hours=24      # Hours of data to remove after calibration period
-    )
-    
-    # Process data
-    try:
-        # Start from data folder and consolidate (database type auto-detected)
-        print("Starting glucose data processing...")
-        print(f"Data folder: {DATA_FOLDER}")
-        print(f"Output file: {OUTPUT_FILE}")
-        print("-" * 50)
-       
-        ml_data, statistics, _ = preprocessor.process(DATA_FOLDER, OUTPUT_FILE)
-        
-        # Print statistics
-        print_statistics(statistics, preprocessor)
-        
-        # Show sample of processed data
-        print(f"\nSAMPLE OF PROCESSED DATA:")
-        print(ml_data.head(10))
-        
-        print(f"\nOutput file: {OUTPUT_FILE}")
-        print(f"Ready for machine learning training!")
-        
-    except Exception as e:
-        print(f"Error during processing: {e}")
-        raise

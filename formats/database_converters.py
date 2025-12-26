@@ -10,6 +10,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import polars as pl
+from loguru import logger
 from datetime import datetime, timedelta
 from formats.base_converter import CSVFormatConverter
 from formats.format_detector import CSVFormatDetector
@@ -145,15 +146,15 @@ class MonoUserDatabaseConverter(DatabaseConverter):
         if not csv_files:
             raise ValueError(f"No CSV files found in directory: {data_folder}")
         
-        print(f"Found {len(csv_files)} CSV files to consolidate")
+        logger.info(f"Found {len(csv_files)} CSV files to consolidate")
         
         for csv_file in csv_files:
-            print(f"Processing: {csv_file.name}")
+            logger.info(f"Processing: {csv_file.name}")
             file_data = self._process_csv_file(csv_file)
             all_data.extend(file_data)
-            print(f"  OK: Extracted {len(file_data)} records")
+            logger.info(f"  OK: Extracted {len(file_data)} records")
         
-        print(f"\nTotal records collected: {len(all_data):,}")
+        logger.info(f"\nTotal records collected: {len(all_data):,}")
         
         if not all_data:
             raise ValueError("No valid data found in CSV files!")
@@ -185,7 +186,7 @@ class MonoUserDatabaseConverter(DatabaseConverter):
         df = self._enforce_output_schema(df)
         
         # Parse timestamps and sort
-        print("Parsing timestamps and sorting...")
+        logger.info("Parsing timestamps and sorting...")
         # timestamp column now uses standard name and may already be datetime or string
         # Try to parse if it's a string
         timestamp_col_type = df['timestamp'].dtype
@@ -197,7 +198,7 @@ class MonoUserDatabaseConverter(DatabaseConverter):
         # Remove rows where timestamp parsing failed
         df = df.filter(pl.col('timestamp').is_not_null())
         
-        print(f"Records with valid timestamps: {len(df):,}")
+        logger.info(f"Records with valid timestamps: {len(df):,}")
         
         # Sort by timestamp (oldest first)
         df = df.sort('timestamp')
@@ -207,18 +208,18 @@ class MonoUserDatabaseConverter(DatabaseConverter):
         
         # Write to output file
         if output_file:
-            print(f"Writing consolidated data to: {output_file}")
+            logger.info(f"Writing consolidated data to: {output_file}")
             df.write_csv(output_file)
         
-        print(f"OK: Consolidation complete!")
-        print(f"Total records in output: {len(df):,}")
+        logger.info(f"OK: Consolidation complete!")
+        logger.info(f"Total records in output: {len(df):,}")
         
         # Show date range
         if len(df) > 0 and 'timestamp' in df.columns:
             # Format timestamp for display
             first_date = df['timestamp'][0].strftime('%Y-%m-%dT%H:%M:%S') if hasattr(df['timestamp'][0], 'strftime') else str(df['timestamp'][0])
             last_date = df['timestamp'][-1].strftime('%Y-%m-%dT%H:%M:%S') if hasattr(df['timestamp'][-1], 'strftime') else str(df['timestamp'][-1])
-            print(f"Date range: {first_date} to {last_date}")
+            logger.info(f"Date range: {first_date} to {last_date}")
 
         return df
     
@@ -231,10 +232,10 @@ class MonoUserDatabaseConverter(DatabaseConverter):
             converter = self.format_detector.detect_format(file_path)
             
             if converter is None:
-                print(f"Warning: Could not detect format for {file_path}, skipping file")
+                logger.info(f"Warning: Could not detect format for {file_path}, skipping file")
                 return data
             
-            print(f"Detected format: {converter.get_format_name()} for {file_path.name}")
+            logger.info(f"Detected format: {converter.get_format_name()} for {file_path.name}")
             
             with open(file_path, 'r', encoding='utf-8-sig') as file:  # utf-8-sig handles BOM
                 lines = file.readlines()
@@ -260,7 +261,7 @@ class MonoUserDatabaseConverter(DatabaseConverter):
                         break
                 
                 if header_line_num is None:
-                    print(f"Could not find headers for {file_path}")
+                    logger.info(f"Could not find headers for {file_path}")
                     return data
                 
                 # Create a new file-like object starting from the header line
@@ -278,7 +279,7 @@ class MonoUserDatabaseConverter(DatabaseConverter):
                         data.append(converted_record)
                     
         except Exception as e:
-            print(f"Error processing {file_path}: {e}")
+            logger.info(f"Error processing {file_path}: {e}")
         
         return data
     
@@ -362,28 +363,28 @@ class MultiUserDatabaseConverter(DatabaseConverter):
                     found = True
                     break
             if found:
-                print(f"Skipping users before {start_user_id} (found at index {start_index})")
+                logger.info(f"Skipping users before {start_user_id} (found at index {start_index})")
                 sorted_users = sorted_users[start_index:]
             else:
-                print(f"Warning: start_with_user_id '{start_user_id}' not found in database. Processing all users.")
+                logger.info(f"Warning: start_with_user_id '{start_user_id}' not found in database. Processing all users.")
 
         # Apply first_n_users filtering if specified
         first_n_users = self.config.get('first_n_users')
         if first_n_users and first_n_users > 0:
             users_processed = dict(sorted_users[:first_n_users])
-            print(f"Found {len(users_processed)} users to process (limited to first {first_n_users} users)")
+            logger.info(f"Found {len(users_processed)} users to process (limited to first {first_n_users} users)")
         else:
             users_processed = dict(sorted_users)
-            print(f"Found {len(users_processed)} users to process")
+            logger.info(f"Found {len(users_processed)} users to process")
         
         for user_id, user_files in sorted(users_processed.items()):
-            print(f"\nProcessing user: {user_id}")
+            logger.info(f"\nProcessing user: {user_id}")
             user_data = self._process_user_data(user_id, user_files)
             if user_data:
                 all_user_data.extend(user_data)
-                print(f"  OK: Extracted {len(user_data)} records for user {user_id}")
+                logger.info(f"  OK: Extracted {len(user_data)} records for user {user_id}")
         
-        print(f"\nTotal records collected: {len(all_user_data):,}")
+        logger.info(f"\nTotal records collected: {len(all_user_data):,}")
         
         if not all_user_data:
             raise ValueError("No valid data found in data files!")
@@ -413,7 +414,7 @@ class MultiUserDatabaseConverter(DatabaseConverter):
         df = self._enforce_output_schema(df)
         
         # Parse timestamps and sort by user and timestamp
-        print("Parsing timestamps and sorting by user and time...")
+        logger.info("Parsing timestamps and sorting by user and time...")
         # timestamp column now uses standard name and may already be datetime or string
         # Try to parse if it's a string
         timestamp_col_type = df['timestamp'].dtype
@@ -425,24 +426,24 @@ class MultiUserDatabaseConverter(DatabaseConverter):
         # Remove rows where timestamp parsing failed
         df = df.filter(pl.col('timestamp').is_not_null())
         
-        print(f"Records with valid timestamps: {len(df):,}")
+        logger.info(f"Records with valid timestamps: {len(df):,}")
         
         # Sort by user_id and timestamp (each user's data sorted individually)
         df = df.sort(['user_id', 'timestamp'])
         
         # Write to output file
         if output_file:
-            print(f"Writing consolidated data to: {output_file}")
+            logger.info(f"Writing consolidated data to: {output_file}")
             df.write_csv(output_file)
         
-        print(f"OK: Multi-user consolidation complete!")
-        print(f"Total records in output: {len(df):,}")
+        logger.info(f"OK: Multi-user consolidation complete!")
+        logger.info(f"Total records in output: {len(df):,}")
         
         # Show user statistics
         user_counts = df.group_by('user_id').count().sort('user_id')
-        print(f"Users processed: {len(user_counts)}")
+        logger.info(f"Users processed: {len(user_counts)}")
         for row in user_counts.iter_rows(named=True):
-            print(f"  User {row['user_id']}: {row['count']:,} records")
+            logger.info(f"  User {row['user_id']}: {row['count']:,} records")
 
         return df
     
@@ -501,7 +502,7 @@ class MultiUserDatabaseConverter(DatabaseConverter):
         
         # Sort files for deterministic processing order
         for file_path in sorted(user_files):
-            print(f"  Processing: {file_path.name}")
+            logger.info(f"  Processing: {file_path.name}")
             file_data = self._process_csv_file(file_path, user_id)
             user_data.extend(file_data)
         
@@ -516,10 +517,10 @@ class MultiUserDatabaseConverter(DatabaseConverter):
             converter = self.format_detector.detect_format(file_path)
             
             if converter is None:
-                print(f"Warning: Could not detect format for {file_path}, skipping file")
+                logger.info(f"Warning: Could not detect format for {file_path}, skipping file")
                 return data
             
-            print(f"    Detected format: {converter.get_format_name()} for {file_path.name}")
+            logger.info(f"    Detected format: {converter.get_format_name()} for {file_path.name}")
             
             with open(file_path, 'r', encoding='utf-8-sig') as file:  # utf-8-sig handles BOM
                 lines = file.readlines()
@@ -545,7 +546,7 @@ class MultiUserDatabaseConverter(DatabaseConverter):
                         break
                 
                 if header_line_num is None:
-                    print(f"Could not find headers for {file_path}")
+                    logger.info(f"Could not find headers for {file_path}")
                     return data
                 
                 # Create a new file-like object starting from the header line
@@ -565,7 +566,7 @@ class MultiUserDatabaseConverter(DatabaseConverter):
                         data.append(converted_record)
                     
         except Exception as e:
-            print(f"Error processing {file_path}: {e}")
+            logger.info(f"Error processing {file_path}: {e}")
         
         return data
     

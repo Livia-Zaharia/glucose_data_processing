@@ -10,6 +10,7 @@ dependencies = [
     "typer>=0.12.0",
     "pyyaml>=6.0",
     "eliot",
+    "loguru>=0.7.3",
 ]
 
 [dependency-groups]

@@ -11,8 +11,10 @@ This script compares:
 
 from __future__ import annotations
 
+import sys
 import typer
 import polars as pl
+from loguru import logger
 from pathlib import Path
 from typing import Any, Optional
 import re
@@ -608,133 +610,133 @@ def print_comparison_report(
     value_comp: dict[str, Any],
 ):
     """Print a formatted comparison report."""
-    print("\n" + "="*80)
-    print("CHECKPOINT COMPARISON REPORT")
-    print("="*80)
-    print(f"\nFile 1: {file1_path}")
-    print(f"File 2: {file2_path}")
+    logger.info("\n" + "="*80)
+    logger.info("CHECKPOINT COMPARISON REPORT")
+    logger.info("="*80)
+    logger.info(f"\nFile 1: {file1_path}")
+    logger.info(f"File 2: {file2_path}")
     
     # Schema comparison
-    print("\n" + "-"*80)
-    print("SCHEMA COMPARISON")
-    print("-"*80)
-    print(f"Field count - File 1: {schema_comp['field_count_1']}, File 2: {schema_comp['field_count_2']}")
-    print(f"Field count match: {'[OK]' if schema_comp['field_count_match'] else '[FAIL]'}")
-    print(f"Field names match: {'[OK]' if schema_comp['field_names_match'] else '[FAIL]'}")
+    logger.info("\n" + "-"*80)
+    logger.info("SCHEMA COMPARISON")
+    logger.info("-"*80)
+    logger.info(f"Field count - File 1: {schema_comp['field_count_1']}, File 2: {schema_comp['field_count_2']}")
+    logger.info(f"Field count match: {'[OK]' if schema_comp['field_count_match'] else '[FAIL]'}")
+    logger.info(f"Field names match: {'[OK]' if schema_comp['field_names_match'] else '[FAIL]'}")
     # Order is informational: we treat different ordering as non-fatal for "same schema".
     if "field_order_match" in schema_comp:
-        print(f"Field order match: {'[OK]' if schema_comp['field_order_match'] else '[WARN]'}")
-    print(f"Field types match: {'[OK]' if schema_comp['field_types_match'] else '[FAIL]'}")
+        logger.info(f"Field order match: {'[OK]' if schema_comp['field_order_match'] else '[WARN]'}")
+    logger.info(f"Field types match: {'[OK]' if schema_comp['field_types_match'] else '[FAIL]'}")
 
     if schema_comp["missing_in_2_count"]:
-        print(
+        logger.info(
             f"\n[WARNING] Fields in File 1 but not in File 2: {schema_comp['missing_in_2_count']} "
             f"(sample: {schema_comp['missing_in_2_sample']})"
         )
     if schema_comp["missing_in_1_count"]:
-        print(
+        logger.info(
             f"[WARNING] Fields in File 2 but not in File 1: {schema_comp['missing_in_1_count']} "
             f"(sample: {schema_comp['missing_in_1_sample']})"
         )
     if schema_comp["type_differences_count"]:
-        print(f"\n[WARNING] Type differences: {schema_comp['type_differences_count']} (sample below)")
+        logger.info(f"\n[WARNING] Type differences: {schema_comp['type_differences_count']} (sample below)")
         for col, diff in schema_comp["type_differences_sample"].items():
-            print(f"   {col}: {diff['type_1']} vs {diff['type_2']}")
+            logger.info(f"   {col}: {diff['type_1']} vs {diff['type_2']}")
     
     # Sequence comparison
-    print("\n" + "-"*80)
-    print("SEQUENCE COMPARISON")
-    print("-"*80)
+    logger.info("\n" + "-"*80)
+    logger.info("SEQUENCE COMPARISON")
+    logger.info("-"*80)
     if "error" in seq_comp:
-        print(f"[WARNING] Sequence comparison error: {seq_comp['error']}")
+        logger.info(f"[WARNING] Sequence comparison error: {seq_comp['error']}")
     else:
-        print(
+        logger.info(
             f"Total sequences - File 1: {seq_comp['total_sequences_1']:,}, File 2: {seq_comp['total_sequences_2']:,}"
         )
-        print(f"Common sequences: {seq_comp['common_sequences']:,}")
-        print(f"Sequence IDs match: {'[OK]' if seq_comp['sequence_ids_match'] else '[FAIL]'}")
+        logger.info(f"Common sequences: {seq_comp['common_sequences']:,}")
+        logger.info(f"Sequence IDs match: {'[OK]' if seq_comp['sequence_ids_match'] else '[FAIL]'}")
 
         if seq_comp["only_in_1"] > 0:
-            print(f"\n[WARNING] Sequences only in File 1: {seq_comp['only_in_1']}")
+            logger.info(f"\n[WARNING] Sequences only in File 1: {seq_comp['only_in_1']}")
             if seq_comp["only_in_1_ids"]:
-                print(f"   Sample IDs: {seq_comp['only_in_1_ids']}")
+                logger.info(f"   Sample IDs: {seq_comp['only_in_1_ids']}")
 
         if seq_comp["only_in_2"] > 0:
-            print(f"[WARNING] Sequences only in File 2: {seq_comp['only_in_2']}")
+            logger.info(f"[WARNING] Sequences only in File 2: {seq_comp['only_in_2']}")
             if seq_comp["only_in_2_ids"]:
-                print(f"   Sample IDs: {seq_comp['only_in_2_ids']}")
+                logger.info(f"   Sample IDs: {seq_comp['only_in_2_ids']}")
 
-        print(f"\nRow count matches: {seq_comp['row_count_matches']:,}/{seq_comp['common_sequences']:,}")
+        logger.info(f"\nRow count matches: {seq_comp['row_count_matches']:,}/{seq_comp['common_sequences']:,}")
         if seq_comp["row_count_differences"] > 0:
-            print(f"[WARNING] Sequences with different row counts: {seq_comp['row_count_differences']}")
+            logger.info(f"[WARNING] Sequences with different row counts: {seq_comp['row_count_differences']}")
             if seq_comp["row_count_differences_details"]:
-                print("   Sample differences:")
+                logger.info("   Sample differences:")
                 for diff in seq_comp["row_count_differences_details"][:10]:
-                    print(
+                    logger.info(
                         f"      Sequence {diff['sequence_id']}: {diff['row_count_1']} vs {diff['row_count_2']} "
                         f"(diff: {diff['difference']:+d})"
                     )
     
     # Value comparison
     if 'error' not in value_comp:
-        print("\n" + "-"*80)
-        print("VALUE COMPARISON")
-        print("-"*80)
-        print(f"Total rows - File 1: {value_comp['total_rows_1']:,}, File 2: {value_comp['total_rows_2']:,}")
-        print(f"Key columns: {value_comp.get('key_columns')}")
+        logger.info("\n" + "-"*80)
+        logger.info("VALUE COMPARISON")
+        logger.info("-"*80)
+        logger.info(f"Total rows - File 1: {value_comp['total_rows_1']:,}, File 2: {value_comp['total_rows_2']:,}")
+        logger.info(f"Key columns: {value_comp.get('key_columns')}")
         if value_comp.get("duplicate_key_groups_1", 0) or value_comp.get("duplicate_key_groups_2", 0):
-            print(
+            logger.info(
                 f"Duplicate key groups - File 1: {value_comp.get('duplicate_key_groups_1', 0):,}, "
                 f"File 2: {value_comp.get('duplicate_key_groups_2', 0):,}"
             )
-        print(f"Matched rows: {value_comp['matched_rows']:,}")
-        print(f"Only in File 1: {value_comp['only_in_1']:,}")
-        print(f"Only in File 2: {value_comp['only_in_2']:,}")
-        print(f"Match percentage: {value_comp['match_percentage']:.2f}%")
+        logger.info(f"Matched rows: {value_comp['matched_rows']:,}")
+        logger.info(f"Only in File 1: {value_comp['only_in_1']:,}")
+        logger.info(f"Only in File 2: {value_comp['only_in_2']:,}")
+        logger.info(f"Match percentage: {value_comp['match_percentage']:.2f}%")
 
         if value_comp.get("warning"):
-            print(f"\n[WARNING] {value_comp['warning']}")
+            logger.info(f"\n[WARNING] {value_comp['warning']}")
         
         if value_comp.get("incompatible_columns"):
             inc = value_comp["incompatible_columns"]
-            print(f"\n[WARNING] Incompatible columns skipped: {len(inc)} (sample below)")
+            logger.info(f"\n[WARNING] Incompatible columns skipped: {len(inc)} (sample below)")
             for name, meta in list(inc.items())[:10]:
                 reason = meta.get("reason", "incompatible")
-                print(f"   {name}: {meta.get('type_1')} vs {meta.get('type_2')} ({reason})")
+                logger.info(f"   {name}: {meta.get('type_1')} vs {meta.get('type_2')} ({reason})")
 
         if value_comp['value_comparisons']:
-            print(
+            logger.info(
                 f"\nField-by-field comparison (showing {len(value_comp['value_comparisons'])} columns"
                 f"{' of ' + str(value_comp.get('total_common_columns')) if value_comp.get('total_common_columns') is not None else ''}"
                 f"; numeric tolerance={value_comp.get('tolerance', 0.01)}):"
             )
             for col, comp in value_comp['value_comparisons'].items():
-                print(f"\n  {col} ({comp['type']}):")
-                print(f"    Total rows compared: {comp['total_rows']:,}")
+                logger.info(f"\n  {col} ({comp['type']}):")
+                logger.info(f"    Total rows compared: {comp['total_rows']:,}")
                 if comp['type'] == 'numeric':
-                    print(f"    Exact matches: {comp['exact_matches']:,} ({comp['match_percentage']:.2f}%)")
-                    print(f"    Approx matches (<= tolerance): {comp.get('approx_matches', 0):,}")
-                    print(f"    Null mismatch (one null): {comp.get('null_one', 0):,}")
-                    print(f"    Non-null differences: {comp.get('diff_non_null', 0):,}")
-                    print(f"    Total differences: {comp.get('diff_total', 0):,}")
+                    logger.info(f"    Exact matches: {comp['exact_matches']:,} ({comp['match_percentage']:.2f}%)")
+                    logger.info(f"    Approx matches (<= tolerance): {comp.get('approx_matches', 0):,}")
+                    logger.info(f"    Null mismatch (one null): {comp.get('null_one', 0):,}")
+                    logger.info(f"    Non-null differences: {comp.get('diff_non_null', 0):,}")
+                    logger.info(f"    Total differences: {comp.get('diff_total', 0):,}")
                     if comp['max_difference'] is not None:
-                        print(f"    Max difference: {comp['max_difference']:.6f}")
+                        logger.info(f"    Max difference: {comp['max_difference']:.6f}")
                     if comp['mean_difference'] is not None:
-                        print(f"    Mean difference: {comp['mean_difference']:.6f}")
+                        logger.info(f"    Mean difference: {comp['mean_difference']:.6f}")
                 else:
-                    print(f"    Exact matches: {comp['exact_matches']:,} ({comp['match_percentage']:.2f}%)")
-                    print(f"    Both null: {comp.get('null_both', 0):,}")
-                    print(f"    One null: {comp.get('null_one', 0):,}")
-                    print(f"    Non-null differences: {comp.get('diff_non_null', 0):,}")
-                    print(f"    Total differences: {comp.get('diff_total', 0):,}")
+                    logger.info(f"    Exact matches: {comp['exact_matches']:,} ({comp['match_percentage']:.2f}%)")
+                    logger.info(f"    Both null: {comp.get('null_both', 0):,}")
+                    logger.info(f"    One null: {comp.get('null_one', 0):,}")
+                    logger.info(f"    Non-null differences: {comp.get('diff_non_null', 0):,}")
+                    logger.info(f"    Total differences: {comp.get('diff_total', 0):,}")
         else:
             total_common = value_comp.get("total_common_columns")
             if total_common is not None:
-                print(f"\n[OK] No value differences found in {total_common} common columns.")
+                logger.info(f"\n[OK] No value differences found in {total_common} common columns.")
     else:
-        print(f"\n[WARNING] Value comparison error: {value_comp['error']}")
+        logger.info(f"\n[WARNING] Value comparison error: {value_comp['error']}")
     
-    print("\n" + "="*80)
+    logger.info("\n" + "="*80)
 
 
 @app.command()
@@ -800,7 +802,7 @@ def compare(
         "--require-unique-keys/--allow-non-unique-keys",
         help="Safety guard: if key columns are not unique, skip per-row field comparison to avoid join explosion",
     ),
-):
+) -> None:
     """
     Compare two checkpoint CSV files and provide detailed statistics.
     
@@ -808,6 +810,10 @@ def compare(
         compare_checkpoints.py checkpoint1.csv checkpoint2.csv
         compare_checkpoints.py checkpoint1.csv checkpoint2.csv --key-columns "sequence_id,timestamp"
     """
+    # Configure loguru to show only the message
+    logger.remove()
+    logger.add(sys.stdout, format="{message}")
+
     # Validate file paths
     file1_path = Path(file1)
     file2_path = Path(file2)
@@ -900,9 +906,9 @@ def compare(
         print_comparison_report(str(file1_path), str(file2_path), schema_comp, seq_comp, value_comp)
         
         # Summary
-        print("\n" + "="*80)
-        print("SUMMARY")
-        print("="*80)
+        logger.info("\n" + "="*80)
+        logger.info("SUMMARY")
+        logger.info("="*80)
         
         all_match = (
             schema_comp['field_count_match'] and

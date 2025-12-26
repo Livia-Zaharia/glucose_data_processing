@@ -9,6 +9,7 @@ Handles High/Low value replacement and calibration removal specific to Dexcom.
 from typing import Any, Dict
 
 import polars as pl
+from loguru import logger
 
 from formats.database_converters import MonoUserDatabaseConverter
 
@@ -34,15 +35,15 @@ class DexcomDatabaseConverter(MonoUserDatabaseConverter):
 
         # Step 1: Replace High/Low glucose values
         if "Glucose Value (mg/dL)" in df.columns:
-            print("Applying Dexcom-specific High/Low value replacement...")
+            logger.info("Applying Dexcom-specific High/Low value replacement...")
 
             # Count High and Low values before replacement
             high_count = df.filter(pl.col("Glucose Value (mg/dL)") == "High").height
             low_count = df.filter(pl.col("Glucose Value (mg/dL)") == "Low").height
 
             if high_count > 0 or low_count > 0:
-                print(f"  Replacing {high_count} 'High' values with {high_value}")
-                print(f"  Replacing {low_count} 'Low' values with {low_value}")
+                logger.info(f"  Replacing {high_count} 'High' values with {high_value}")
+                logger.info(f"  Replacing {low_count} 'Low' values with {low_value}")
 
                 # Replace High and Low with configurable values, then convert to float
                 df = df.with_columns(
@@ -54,21 +55,21 @@ class DexcomDatabaseConverter(MonoUserDatabaseConverter):
                         .alias("Glucose Value (mg/dL)")
                     ]
                 )
-                print("  OK: Glucose field converted to Float64 type")
+                logger.info("  OK: Glucose field converted to Float64 type")
 
         # Step 2: Remove calibration events
         if remove_calibration and "Event Type" in df.columns:
-            print("Applying Dexcom-specific calibration event removal...")
+            logger.info("Applying Dexcom-specific calibration event removal...")
 
             calibration_events = df.filter(pl.col("Event Type") == "Calibration")
             calibration_count = len(calibration_events)
 
             if calibration_count > 0:
-                print(f"  Removing {calibration_count} calibration events")
+                logger.info(f"  Removing {calibration_count} calibration events")
                 df = df.filter(pl.col("Event Type") != "Calibration")
-                print("  OK: Calibration events removed")
+                logger.info("  OK: Calibration events removed")
             else:
-                print("  No calibration events found")
+                logger.info("  No calibration events found")
 
         return df
 

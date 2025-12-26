@@ -6,11 +6,12 @@ This script provides a CLI wrapper around the glucose preprocessing functionalit
 allowing users to process glucose data from CSV folders through command line arguments.
 """
 
-import typer
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 import sys
+import typer
 import polars as pl
+from loguru import logger
 from glucose_ml_preprocessor import GlucoseMLPreprocessor, print_statistics
 
 # Optional cycle data parser (research-phase convenience)
@@ -19,8 +20,9 @@ try:
 except ImportError:
     CycleDataParser = None
 
+app = typer.Typer(help="Glucose Data Preprocessing CLI")
 
-def _resolve_config_file(config_file: Optional[str]) -> Optional[str]:
+def _resolve_config_file(config_file: Optional[Path]) -> Optional[Path]:
     """
     Resolve the config file path to use.
 
@@ -33,21 +35,22 @@ def _resolve_config_file(config_file: Optional[str]) -> Optional[str]:
         return config_file
     default_cfg = Path("glucose_config.yaml")
     if default_cfg.exists() and default_cfg.is_file():
-        return str(default_cfg)
+        return default_cfg
     return None
 
+@app.command()
 def main(
-    input_folders: List[str] = typer.Argument(
+    input_folders: List[Path] = typer.Argument(
         ..., 
         help="Path(s) to input datasets to process. Each input can be a folder (CSV datasets) or a .zip (AI-READI). Multiple inputs can be combined."
     ),
-    config_file: str = typer.Option(
+    config_file: Optional[Path] = typer.Option(
         None,
         "--config", "-c",
         help="Path to YAML configuration file (command line args override config values)"
     ),
-    output_file: str = typer.Option(
-        "glucose_ml_ready.csv",
+    output_file: Path = typer.Option(
+        Path("glucose_ml_ready.csv"),
         "--output", "-o",
         help="Output file path for ML-ready data"
     ),
@@ -106,7 +109,7 @@ def main(
         "--fixed-frequency/--no-fixed-frequency",
         help="Create fixed-frequency data with consistent intervals (default: enabled)"
     ),
-    cycle_data_file: Optional[str] = typer.Option(
+    cycle_data_file: Optional[Path] = typer.Option(
         None,
         "--cycle",
         help="Path to cycle data CSV file with columns: date, flow_amount. Glucose data will be filtered to cycle data date range."
@@ -116,7 +119,7 @@ def main(
         "--first-n-users",
         help="Process only the first n users (for multi-user databases). If 0 or not specified, all users are processed."
     )
-):
+) -> None:
     """
     Process glucose data from CSV folder(s) for machine learning.
     
@@ -126,123 +129,90 @@ def main(
     
     When multiple folders are provided, sequence IDs are tracked and offset to ensure consistency
     across different databases, producing a single unified output file.
-    
-    Examples:
-        # Use default settings with a single folder
-        glucose-cli ./csv-folder --output ml_data.csv --verbose
-        
-        # Process multiple databases into one file
-        glucose-cli ./data/000-csv ./data/libre3 ./data/zendo_small --output combined_ml_data.csv
-        
-        # Use configuration file with CLI overrides
-        glucose-cli ./csv-folder --config glucose_config.yaml --output ml_data.csv
-        
-        # Override specific parameters from config file
-        glucose-cli ./csv-folder --config glucose_config.yaml --interval 10 --gap-max 30
-        
-        # Combine multiple databases with verbose output
-        glucose-cli ./dexcom_data ./libre3_data --output combined.csv --verbose
     """
+    # Configure loguru to show only the message, matching the old print() behavior
+    logger.remove()
+    logger.add(sys.stdout, format="{message}")
     
     # Validate input paths
-    validated_folders = []
+    validated_folders: List[Path] = []
     for input_folder in input_folders:
-        input_path_obj = Path(input_folder)
-        if not input_path_obj.exists():
-            typer.echo(f"❌ Error: Input folder '{input_folder}' does not exist", err=True)
+        if not input_folder.exists():
+            logger.error(f"Error: Input path '{input_folder}' does not exist")
             raise typer.Exit(1)
         
-        if not input_path_obj.is_dir():
+        if not input_folder.is_dir():
             # Allow zip-backed datasets (AI-READI)
-            if not (input_path_obj.is_file() and input_path_obj.suffix.lower() == ".zip"):
-                typer.echo(
-                    f"❌ Error: Input must be a folder containing CSV files or a .zip dataset, got: '{input_folder}'",
-                    err=True,
+            if not (input_folder.is_file() and input_folder.suffix.lower() == ".zip"):
+                logger.error(
+                    f"Error: Input must be a folder containing CSV files or a .zip dataset, got: '{input_folder}'"
                 )
                 raise typer.Exit(1)
         
         validated_folders.append(input_folder)
     
-    # Initialize preprocessor
+    # Initialize preprocessor info
     if verbose:
-        typer.echo("⚙️  Initializing glucose data preprocessor...")
+        logger.info("Initializing glucose data preprocessor...")
         if len(validated_folders) == 1:
-            typer.echo(f"   📁 Input folder: {validated_folders[0]}")
+            logger.info(f"   Input folder: {validated_folders[0]}")
         else:
-            typer.echo(f"   📁 Input folders ({len(validated_folders)}):")
+            logger.info(f"   Input folders ({len(validated_folders)}):")
             for i, folder in enumerate(validated_folders, 1):
-                typer.echo(f"      {i}. {folder}")
-        typer.echo(f"   📄 Output file: {output_file}")
-        typer.echo(f"   ⏱️  Time interval: {interval_minutes} minutes")
-        typer.echo(f"   📏 Gap max: {gap_max_minutes} minutes")
-        typer.echo(f"   📊 Min sequence length: {min_sequence_len}")
-        typer.echo(f"   🗑️  Remove calibration events: {remove_calibration}")
-        typer.echo(f"   🕐 Calibration period: {calibration_period_minutes} minutes")
-        typer.echo(f"   🗑️  Remove after calibration: {remove_after_calibration_hours} hours")
-        typer.echo(f"   💾 Save intermediate files: {save_intermediate_files}")
-        typer.echo(f"   🍯 Glucose only mode: {glucose_only}")
-        typer.echo(f"   ⏱️  Fixed-frequency data: {create_fixed_frequency}")
+                logger.info(f"      {i}. {folder}")
+        logger.info(f"   Output file: {output_file}")
+        logger.info(f"   Time interval: {interval_minutes} minutes")
+        logger.info(f"   Gap max: {gap_max_minutes} minutes")
+        logger.info(f"   Min sequence length: {min_sequence_len}")
+        logger.info(f"   Remove calibration events: {remove_calibration}")
+        logger.info(f"   Calibration period: {calibration_period_minutes} minutes")
+        logger.info(f"   Remove after calibration: {remove_after_calibration_hours} hours")
+        logger.info(f"   Save intermediate files: {save_intermediate_files}")
+        logger.info(f"   Glucose only mode: {glucose_only}")
+        logger.info(f"   Fixed-frequency data: {create_fixed_frequency}")
         if cycle_data_file:
-            typer.echo(f"   🔄 Cycle data file: {cycle_data_file}")
+            logger.info(f"   Cycle data file: {cycle_data_file}")
     
     try:
         resolved_config_file = _resolve_config_file(config_file)
         if verbose and resolved_config_file and not config_file:
-            typer.echo(f"📄 Auto-loading default configuration from: {resolved_config_file}")
+            logger.info(f"Auto-loading default configuration from: {resolved_config_file}")
 
-        # Create preprocessor from config file if provided, otherwise use CLI arguments
+        # CLI arguments override config file values
+        cli_overrides: Dict[str, Any] = {
+            'expected_interval_minutes': interval_minutes,
+            'small_gap_max_minutes': gap_max_minutes,
+            'remove_calibration': remove_calibration,
+            'min_sequence_len': min_sequence_len,
+            'save_intermediate_files': save_intermediate_files,
+            'calibration_period_minutes': calibration_period_minutes,
+            'remove_after_calibration_hours': remove_after_calibration_hours,
+            'glucose_only': glucose_only,
+            'create_fixed_frequency': create_fixed_frequency,
+            'first_n_users': first_n_users if first_n_users and first_n_users > 0 else None
+        }
+
+        # Create preprocessor
         if resolved_config_file:
-            config_path_obj = Path(resolved_config_file)
-            if not config_path_obj.exists():
-                typer.echo(f"❌ Error: Config file '{resolved_config_file}' does not exist", err=True)
-                raise typer.Exit(1)
-            
             if verbose:
-                typer.echo(f"📄 Loading configuration from: {resolved_config_file}")
-            
-            # CLI arguments override config file values
-            cli_overrides = {
-                'expected_interval_minutes': interval_minutes,
-                'small_gap_max_minutes': gap_max_minutes,
-                'remove_calibration': remove_calibration,
-                'min_sequence_len': min_sequence_len,
-                'save_intermediate_files': save_intermediate_files,
-                'calibration_period_minutes': calibration_period_minutes,
-                'remove_after_calibration_hours': remove_after_calibration_hours,
-                'glucose_only': glucose_only,
-                'create_fixed_frequency': create_fixed_frequency,
-                'first_n_users': first_n_users if first_n_users and first_n_users > 0 else None
-            }
-            
+                logger.info(f"Loading configuration from: {resolved_config_file}")
             preprocessor = GlucoseMLPreprocessor.from_config_file(resolved_config_file, **cli_overrides)
         else:
             # Use CLI arguments directly
-            preprocessor = GlucoseMLPreprocessor(
-                expected_interval_minutes=interval_minutes,
-                small_gap_max_minutes=gap_max_minutes,
-                remove_calibration=remove_calibration,
-                min_sequence_len=min_sequence_len,
-                save_intermediate_files=save_intermediate_files,
-                calibration_period_minutes=calibration_period_minutes,
-                remove_after_calibration_hours=remove_after_calibration_hours,
-                glucose_only=glucose_only,
-                create_fixed_frequency=create_fixed_frequency,
-                first_n_users=first_n_users if first_n_users and first_n_users > 0 else None
-            )
+            preprocessor = GlucoseMLPreprocessor(**cli_overrides)
         
         # Parse cycle data if provided
         cycle_parser = None
         if cycle_data_file:
             if CycleDataParser is None:
-                typer.echo("❌ Error: cycle_data_parser module not found. Cannot process --cycle.", err=True)
+                logger.error("Error: cycle_data_parser module not found. Cannot process --cycle.")
                 raise typer.Exit(1)
-            cycle_path_obj = Path(cycle_data_file)
-            if not cycle_path_obj.exists():
-                typer.echo(f"❌ Error: Cycle data file '{cycle_data_file}' does not exist", err=True)
+            if not cycle_data_file.exists():
+                logger.error(f"Error: Cycle data file '{cycle_data_file}' does not exist")
                 raise typer.Exit(1)
             
             if verbose:
-                typer.echo("🔄 Parsing cycle data...")
+                logger.info("Parsing cycle data...")
             
             cycle_parser = CycleDataParser()
             cycle_parser.parse_cycle_file(cycle_data_file)
@@ -250,9 +220,9 @@ def main(
         # Process data
         if verbose:
             if len(validated_folders) == 1:
-                typer.echo("🔄 Starting glucose data processing pipeline...")
+                logger.info("Starting glucose data processing pipeline...")
             else:
-                typer.echo(f"🔄 Starting multi-database processing pipeline for {len(validated_folders)} databases...")
+                logger.info(f"Starting multi-database processing pipeline for {len(validated_folders)} databases...")
         
         # Process single or multiple databases
         if len(validated_folders) == 1:
@@ -267,24 +237,24 @@ def main(
         # Merge cycle data if provided
         if cycle_parser:
             if verbose:
-                typer.echo("🔄 Integrating cycle data...")
+                logger.info("Integrating cycle data...")
             ml_data = preprocessor.merge_cycle_data(ml_data, cycle_parser)
             
             # Save the final data with cycle information
             if output_file:
-                ml_data.write_csv(output_file, null_value="")
+                ml_data.write_csv(output_file)
                 if verbose:
-                    typer.echo(f"💾 Final data with cycle information saved to: {output_file}")
+                    logger.info(f"Final data with cycle information saved to: {output_file}")
         
         # Show results
-        typer.echo(f"✅ Processing completed successfully!")
-        # Streaming modes (e.g., AI-READI) may return a placeholder DataFrame to avoid
-        # loading huge outputs into memory. Prefer statistics when available.
+        logger.info(f"Processing completed successfully!")
+        
+        # Extract record and sequence counts safely
         try:
             overview = statistics.get("dataset_overview", {}) if isinstance(statistics, dict) else {}
             stats_records = int(overview.get("total_records", 0))
             stats_sequences = int(overview.get("total_sequences", 0))
-        except Exception:
+        except (ValueError, TypeError, AttributeError):
             stats_records = 0
             stats_sequences = 0
 
@@ -296,68 +266,52 @@ def main(
         out_records = stats_records if (df_records == 0 and stats_records > 0) else df_records
         out_sequences = stats_sequences if (df_sequences == 0 and stats_sequences > 0) else df_sequences
 
-        typer.echo(f"📊 Output: {out_records:,} records in {out_sequences:,} sequences")
-        typer.echo(f"💾 Saved to: {output_file}")
+        logger.info(f"Output: {out_records:,} records in {out_sequences:,} sequences")
+        logger.info(f"Saved to: {output_file}")
         
         # Show statistics if requested
         if show_stats:
             if verbose:
-                typer.echo("\n" + "="*60)
-                typer.echo("DETAILED STATISTICS")
-                typer.echo("="*60)
                 print_statistics(statistics, preprocessor)
             else:
                 # Show summary statistics only
                 overview = statistics['dataset_overview']
                 seq_analysis = statistics['sequence_analysis']
-                typer.echo(f"\n📈 Summary:")
-                typer.echo(f"   📅 Date range: {overview['date_range']['start']} to {overview['date_range']['end']}")
-                typer.echo(f"   📏 Longest sequence: {seq_analysis['longest_sequence']:,} records")
-                typer.echo(f"   📊 Average sequence: {seq_analysis['sequence_lengths']['mean']:.1f} records")
+                logger.info(f"\nSummary:")
+                logger.info(f"   Date range: {overview['date_range']['start']} to {overview['date_range']['end']}")
+                logger.info(f"   Longest sequence: {seq_analysis['longest_sequence']:,} records")
+                logger.info(f"   Average sequence: {seq_analysis['sequence_lengths']['mean']:.1f} records")
                 
                 # Show data preservation percentage
-                original_records = overview.get('original_records', overview['total_records'])
-                final_records = overview['total_records']
-                preservation_percentage = (final_records / original_records * 100) if original_records > 0 else 100
-                typer.echo(f"   💾 Data preserved: {preservation_percentage:.1f}% ({final_records:,}/{original_records:,} records)")
-                
-                # Show replacement summary
-                if 'replacement_analysis' in statistics and statistics['replacement_analysis']:
-                    replacement_analysis = statistics['replacement_analysis']
-                    if replacement_analysis.get('total_replacements', 0) > 0:
-                        typer.echo(f"   🔄 High/Low replacements: {replacement_analysis['total_replacements']:,} values")
+                original_recs = overview.get('original_records', overview['total_records'])
+                final_recs = overview['total_records']
+                preservation_pct = (final_recs / original_recs * 100) if original_recs > 0 else 100
+                logger.info(f"   Data preserved: {preservation_pct:.1f}% ({final_recs:,}/{original_recs:,} records)")
                 
                 # Show interpolation summary
                 interp_analysis = statistics['interpolation_analysis']
-                typer.echo(f"   🔧 Gaps processed: {interp_analysis['small_gaps_filled']:,} gaps")
-                typer.echo(f"   🔧 Data points created: {interp_analysis['total_interpolated_data_points']:,} points")
-                typer.echo(f"   🔧 Field interpolations: {interp_analysis['total_interpolations']:,} values")
-                
-                # Show calibration removal summary if enabled
-                if remove_calibration and 'calibration_removal_analysis' in statistics and statistics['calibration_removal_analysis']:
-                    removal_analysis = statistics['calibration_removal_analysis']
-                    if removal_analysis.get('calibration_events_removed', 0) > 0:
-                        typer.echo(f"   🗑️  Calibration events removed: {removal_analysis['calibration_events_removed']:,}")
+                logger.info(f"   Gaps processed: {interp_analysis.get('small_gaps_filled', 0):,} gaps")
+                logger.info(f"   Data points created: {interp_analysis.get('total_interpolated_data_points', 0):,} points")
+                logger.info(f"   Field interpolations: {interp_analysis.get('total_interpolations', 0):,} values")
                 
                 # Show filtering summary
-                if 'filtering_analysis' in statistics and statistics['filtering_analysis']:
+                if 'filtering_analysis' in statistics:
                     filter_analysis = statistics['filtering_analysis']
-                    typer.echo(f"   🔍 Sequences filtered: {filter_analysis.get('removed_sequences', 0):,} removed")
+                    logger.info(f"   Sequences filtered: {filter_analysis.get('removed_sequences', 0):,} removed")
                 
                 # Show calibration period summary
                 gap_analysis = statistics.get('gap_analysis', {})
-                if 'calibration_period_analysis' in gap_analysis and gap_analysis['calibration_period_analysis']:
+                if 'calibration_period_analysis' in gap_analysis:
                     calib_analysis = gap_analysis['calibration_period_analysis']
                     if calib_analysis.get('calibration_periods_detected', 0) > 0:
-                        typer.echo(f"   🔬 Calibration periods: {calib_analysis['calibration_periods_detected']:,} detected, {calib_analysis.get('total_records_marked_for_removal', 0):,} records removed")
+                        logger.info(f"   Calibration periods: {calib_analysis['calibration_periods_detected']:,} detected, {calib_analysis.get('total_records_marked_for_removal', 0):,} records removed")
         
     except Exception as e:
-        typer.echo(f"❌ Error during processing: {e}", err=True)
+        logger.error(f"Error during processing: {e}")
         if verbose:
             import traceback
-            typer.echo(f"Traceback:\n{traceback.format_exc()}", err=True)
+            logger.error(f"Traceback:\n{traceback.format_exc()}")
         raise typer.Exit(1)
 
-
 if __name__ == "__main__":
-    typer.run(main)
+    app()

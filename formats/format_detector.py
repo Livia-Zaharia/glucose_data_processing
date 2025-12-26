@@ -8,7 +8,7 @@ CSV formats and returns the appropriate converter.
 
 from pathlib import Path
 from typing import List, Optional
-
+from loguru import logger
 from formats.base_converter import CSVFormatConverter
 from formats.dexcom.dexcom_g6_converter import DexcomG6Converter
 from formats.libre3.freestyle_libre3_converter import FreeStyleLibre3Converter
@@ -92,7 +92,7 @@ class CSVFormatDetector:
                 return None
                 
         except Exception as e:
-            print(f"Error detecting format for {file_path}: {e}")
+            logger.info(f"Error detecting format for {file_path}: {e}")
             return None
     
     def add_converter(self, converter: CSVFormatConverter) -> None:

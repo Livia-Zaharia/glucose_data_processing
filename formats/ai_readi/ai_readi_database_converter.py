@@ -17,6 +17,7 @@ from typing import Any, Iterable, Optional, Union
 import zipfile
 
 import polars as pl
+from loguru import logger
 
 from formats.database_converters import DatabaseConverter
 
@@ -167,17 +168,17 @@ class AIReadIDatabaseConverter(DatabaseConverter):
                         found = True
                         break
                 if found:
-                    print(f"Skipping AI-READI users before {start_user_id} (found at index {start_index})")
+                    logger.info(f"Skipping AI-READI users before {start_user_id} (found at index {start_index})")
                     user_ids = user_ids[start_index:]
                 else:
-                    print(f"Warning: start_with_user_id '{start_user_id}' not found in AI-READI database.")
+                    logger.info(f"Warning: start_with_user_id '{start_user_id}' not found in AI-READI database.")
 
             # Apply first_n_users filtering if specified
             first_n_users = self.config.get("first_n_users")
             if first_n_users and int(first_n_users) > 0:
                 user_ids = user_ids[: int(first_n_users)]
 
-            print(f"Processing {len(user_ids)} AI-READI users...")
+            logger.info(f"Processing {len(user_ids)} AI-READI users...")
 
             for user_id in user_ids:
                 df = self._extract_user_frame(zip_ref, layout, user_id, participants[user_id], interval_minutes=interval_minutes)
