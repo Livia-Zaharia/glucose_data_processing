@@ -57,7 +57,7 @@ class TestCalibrationSchemaLogic:
             'remove_after_calibration': True
         }
         
-        df_seq, stats, _ = preprocessor.detect_gaps_and_sequences(df, field_categories_dict=field_categories)
+        df_seq, stats, _ = preprocessor.gap_detector.detect_gaps_and_sequences(df, field_categories_dict=field_categories)
         
         # Verify stats show calibration detected and records removed
         calib_stats = stats.get('calibration_period_analysis', {})
@@ -80,7 +80,7 @@ class TestCalibrationSchemaLogic:
             'remove_after_calibration': False
         }
         
-        df_seq, stats, _ = preprocessor.detect_gaps_and_sequences(df, field_categories_dict=field_categories)
+        df_seq, stats, _ = preprocessor.gap_detector.detect_gaps_and_sequences(df, field_categories_dict=field_categories)
         
         # Verify stats show calibration detected but NO records removed
         calib_stats = stats.get('calibration_period_analysis', {})
@@ -101,7 +101,7 @@ class TestCalibrationSchemaLogic:
             'service': []
         }
         
-        df_seq, stats, _ = preprocessor.detect_gaps_and_sequences(df, field_categories_dict=field_categories)
+        df_seq, stats, _ = preprocessor.gap_detector.detect_gaps_and_sequences(df, field_categories_dict=field_categories)
         
         # Verify stats show calibration detected and records removed (default = True)
         calib_stats = stats.get('calibration_period_analysis', {})

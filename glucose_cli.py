@@ -12,7 +12,8 @@ import sys
 import typer
 import polars as pl
 from loguru import logger
-from glucose_ml_preprocessor import GlucoseMLPreprocessor, print_statistics
+from glucose_ml_preprocessor import GlucoseMLPreprocessor
+from processing.stats_manager import print_statistics as sm_print_statistics
 
 # Optional cycle data parser (research-phase convenience)
 try:
@@ -272,7 +273,16 @@ def main(
         # Show statistics if requested
         if show_stats:
             if verbose:
-                print_statistics(statistics, preprocessor)
+                params = {
+                    'expected_interval_minutes': preprocessor.expected_interval_minutes,
+                    'small_gap_max_minutes': preprocessor.small_gap_max_minutes,
+                    'remove_calibration': preprocessor.remove_calibration,
+                    'min_sequence_len': preprocessor.min_sequence_len,
+                    'calibration_period_minutes': preprocessor.calibration_period_minutes,
+                    'remove_after_calibration_hours': preprocessor.remove_after_calibration_hours,
+                    'create_fixed_frequency': preprocessor.create_fixed_frequency
+                }
+                sm_print_statistics(statistics, params)
             else:
                 # Show summary statistics only
                 overview = statistics['dataset_overview']

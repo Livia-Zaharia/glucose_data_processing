@@ -102,7 +102,7 @@ def test_multiple_continuous_fields_out_of_sync():
     }
     
     # This should fail - method doesn't handle multiple continuous fields yet
-    df_fixed, stats = preprocessor.create_fixed_frequency_data(df, field_categories)
+    df_fixed, stats = preprocessor.fixed_freq_generator.create_fixed_frequency_data(df, field_categories)
     
     # Expected fixed-frequency grid: 10:00, 10:05, 10:10, 10:15, 10:20
     # All continuous fields should be interpolated at these points
@@ -182,7 +182,7 @@ def test_continuous_fields_with_missing_values_at_grid_points():
         "service": ["event_type"],
     }
     
-    df_fixed, stats = preprocessor.create_fixed_frequency_data(df, field_categories)
+    df_fixed, stats = preprocessor.fixed_freq_generator.create_fixed_frequency_data(df, field_categories)
     
     # All grid points should have interpolated values
     assert df_fixed["glucose_value_mgdl"].null_count() == 0, \
@@ -253,7 +253,7 @@ def test_three_continuous_fields_different_patterns():
         "service": ["event_type"],
     }
     
-    df_fixed, stats = preprocessor.create_fixed_frequency_data(df, field_categories)
+    df_fixed, stats = preprocessor.fixed_freq_generator.create_fixed_frequency_data(df, field_categories)
     
     # All fields should be interpolated
     assert df_fixed["glucose_value_mgdl"].null_count() == 0, \
@@ -326,7 +326,7 @@ def test_continuous_fields_with_irregular_timestamps():
         "service": ["event_type"],
     }
     
-    df_fixed, stats = preprocessor.create_fixed_frequency_data(df, field_categories)
+    df_fixed, stats = preprocessor.fixed_freq_generator.create_fixed_frequency_data(df, field_categories)
     
     # Fixed grid should be aligned to round minutes
     fixed_timestamps = df_fixed['timestamp'].to_list()
@@ -403,7 +403,7 @@ def test_continuous_fields_only_glucose_in_categories():
         "service": ["event_type"],
     }
     
-    df_fixed, stats = preprocessor.create_fixed_frequency_data(df, field_categories)
+    df_fixed, stats = preprocessor.fixed_freq_generator.create_fixed_frequency_data(df, field_categories)
     
     # Glucose should be interpolated
     assert df_fixed['glucose_value_mgdl'].null_count() == 0, \
@@ -468,7 +468,7 @@ def test_occasional_fields_shifted_with_multiple_continuous_fields():
         'service': ['Event Type']
     }
     
-    df_fixed, stats = preprocessor.create_fixed_frequency_data(df, field_categories)
+    df_fixed, stats = preprocessor.fixed_freq_generator.create_fixed_frequency_data(df, field_categories)
     
     # Fixed grid should be: 10:00, 10:05, 10:10, 10:15, 10:20
     assert len(df_fixed) == 5, f"Expected 5 rows in fixed grid, got {len(df_fixed)}"
@@ -564,7 +564,7 @@ def test_occasional_fields_collision_with_multiple_continuous_fields():
         'service': ['Event Type']
     }
     
-    df_fixed, stats = preprocessor.create_fixed_frequency_data(df, field_categories)
+    df_fixed, stats = preprocessor.fixed_freq_generator.create_fixed_frequency_data(df, field_categories)
     
     # First verify occasional fields are shifted and summed correctly (this should work)
     # Check insulin events are shifted and summed at 10:00
@@ -659,7 +659,7 @@ def test_mixed_continuous_and_occasional_fields_out_of_sync():
         'service': ['Event Type']
     }
     
-    df_fixed, stats = preprocessor.create_fixed_frequency_data(df, field_categories)
+    df_fixed, stats = preprocessor.fixed_freq_generator.create_fixed_frequency_data(df, field_categories)
     
     # Fixed grid: 10:00, 10:05, 10:10, 10:15, 10:20
     assert len(df_fixed) == 5, f"Expected 5 rows in fixed grid, got {len(df_fixed)}"

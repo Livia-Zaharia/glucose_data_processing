@@ -41,7 +41,7 @@ class TestFixedFrequencyLogic:
             "fast_acting_insulin_u": [None, 1.0, 2.0, None]
         })
         
-        df_fixed, _ = preprocessor.create_fixed_frequency_data(
+        df_fixed, _ = preprocessor.fixed_freq_generator.create_fixed_frequency_data(
             df,
             {"continuous": ["glucose_value_mgdl"], "occasional": ["fast_acting_insulin_u"], "service": ["event_type"]},
         )
@@ -73,7 +73,7 @@ class TestFixedFrequencyLogic:
             "fast_acting_insulin_u": [None, 5.0, None]
         })
         
-        df_fixed, _ = preprocessor.create_fixed_frequency_data(
+        df_fixed, _ = preprocessor.fixed_freq_generator.create_fixed_frequency_data(
             df,
             {"continuous": ["glucose_value_mgdl"], "occasional": ["fast_acting_insulin_u"], "service": ["event_type"]},
         )
@@ -104,7 +104,7 @@ class TestFixedFrequencyLogic:
             "fast_acting_insulin_u": [None, 1.0, 2.0, None]
         })
         
-        df_fixed, _ = preprocessor.create_fixed_frequency_data(
+        df_fixed, _ = preprocessor.fixed_freq_generator.create_fixed_frequency_data(
             df,
             {"continuous": ["glucose_value_mgdl"], "occasional": ["fast_acting_insulin_u"], "service": ["event_type"]},
         )
@@ -135,7 +135,7 @@ class TestFixedFrequencyLogic:
             "fast_acting_insulin_u": [None, None, 5.0, None]
         })
         
-        df_fixed, _ = preprocessor.create_fixed_frequency_data(
+        df_fixed, _ = preprocessor.fixed_freq_generator.create_fixed_frequency_data(
             df,
             {"continuous": ["glucose_value_mgdl"], "occasional": ["carb_grams", "fast_acting_insulin_u"], "service": ["event_type"]},
         )
@@ -166,7 +166,7 @@ class TestFixedFrequencyLogic:
             "glucose_value_mgdl": [100.0, 110.0]
         })
         
-        df_fixed, _ = preprocessor.create_fixed_frequency_data(df)
+        df_fixed, _ = preprocessor.fixed_freq_generator.create_fixed_frequency_data(df)
         
         assert len(df_fixed) == 3 # 00, 05, 10
         

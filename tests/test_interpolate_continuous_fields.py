@@ -81,7 +81,7 @@ def test_multiple_continuous_fields_same_points():
         'service': ['service_field', 'event_type']
     }
     
-    result, stats = preprocessor.interpolate_missing_values(df, field_categories)
+    result, stats = preprocessor.interpolator.interpolate_missing_values(df, field_categories)
     
     # Should have 5 rows (4 original + 1 interpolated)
     assert len(result) == 5, f"Expected 5 rows, got {len(result)}"
@@ -148,7 +148,7 @@ def test_continuous_field_with_fewer_points():
         'service': ['event_type']
     }
     
-    result, stats = preprocessor.interpolate_missing_values(df, field_categories)
+    result, stats = preprocessor.interpolator.interpolate_missing_values(df, field_categories)
     
     # Check interpolated point
     interpolated_row = result.filter(
@@ -176,7 +176,7 @@ def test_continuous_field_with_fewer_points():
         continuous_field1_values=continuous_with_none
     )
     
-    result2, _ = preprocessor.interpolate_missing_values(df2, field_categories)
+    result2, _ = preprocessor.interpolator.interpolate_missing_values(df2, field_categories)
     interpolated_row2 = result2.filter(
         pl.col('timestamp') == base_time + timedelta(minutes=10)
     )
@@ -213,7 +213,7 @@ def test_no_continuous_fields_except_glucose():
         'service': ['event_type']
     }
     
-    result, stats = preprocessor.interpolate_missing_values(df, field_categories)
+    result, stats = preprocessor.interpolator.interpolate_missing_values(df, field_categories)
     
     # Should still interpolate glucose (always included)
     # 10-minute gap = 1 missing point, so 2 original + 1 interpolated = 3 total
@@ -257,7 +257,7 @@ def test_large_gap_not_interpolated():
         'service': ['event_type']
     }
     
-    result, stats = preprocessor.interpolate_missing_values(df, field_categories)
+    result, stats = preprocessor.interpolator.interpolate_missing_values(df, field_categories)
     
     # Should not interpolate (gap too large)
     assert len(result) == 2, f"Expected 2 rows (no interpolation), got {len(result)}"
@@ -332,7 +332,7 @@ def test_continuous_field_out_of_sync_with_glucose():
     print(f"Input DataFrame:")
     print(df)
     
-    result, stats = preprocessor.interpolate_missing_values(df, field_categories)
+    result, stats = preprocessor.interpolator.interpolate_missing_values(df, field_categories)
     
     print(f"\nResult DataFrame:")
     print(result.sort('timestamp'))
@@ -415,7 +415,7 @@ def test_continuous_field_out_of_sync_with_glucose():
         'service': ['Event Type']
     }
     
-    result_glucose_only, stats_glucose_only = preprocessor.interpolate_missing_values(df_glucose_only, field_categories_glucose_only)
+    result_glucose_only, stats_glucose_only = preprocessor.interpolator.interpolate_missing_values(df_glucose_only, field_categories_glucose_only)
     
     print(f"\nGlucose-only input: {len(df_glucose_only)} rows")
     print(f"Glucose-only result: {len(result_glucose_only)} rows")
@@ -572,7 +572,7 @@ def test_detect_gaps_with_continuous_fields():
     print(df.select(['timestamp', 'Glucose Value (mg/dL)', 'Heart Rate']))
     
     # Test gap detection with continuous fields
-    result, stats, _ = preprocessor.detect_gaps_and_sequences(df, last_sequence_id=0, field_categories_dict=field_categories)
+    result, stats, _ = preprocessor.gap_detector.detect_gaps_and_sequences(df, last_sequence_id=0, field_categories_dict=field_categories)
     
     print(f"\n{'='*80}")
     print("RESULTS")

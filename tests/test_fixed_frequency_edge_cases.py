@@ -37,7 +37,7 @@ class TestFixedFrequencyEdgeCases:
             "glucose_value_mgdl": [100.0, 200.0]
         })
         
-        fixed_df, _ = preprocessor.create_fixed_frequency_data(df)
+        fixed_df, _ = preprocessor.fixed_freq_generator.create_fixed_frequency_data(df)
         
         # Find 10:05 entry
         target_time = datetime(2023,1,1,10,5)
@@ -68,7 +68,7 @@ class TestFixedFrequencyEdgeCases:
             "carb_grams": [None, 10.0, 20.0, None]
         })
 
-        fixed_df, _ = preprocessor.create_fixed_frequency_data(
+        fixed_df, _ = preprocessor.fixed_freq_generator.create_fixed_frequency_data(
             df,
             {"continuous": ["glucose_value_mgdl"], "occasional": ["carb_grams"], "service": ["event_type"]},
         )
@@ -107,7 +107,7 @@ class TestFixedFrequencyEdgeCases:
             "carb_grams": [None, 10.0, 20.0, None]
         })
 
-        fixed_df, _ = preprocessor.create_fixed_frequency_data(
+        fixed_df, _ = preprocessor.fixed_freq_generator.create_fixed_frequency_data(
             df,
             {"continuous": ["glucose_value_mgdl"], "occasional": ["carb_grams"], "service": ["event_type"]},
         )
@@ -140,7 +140,7 @@ class TestFixedFrequencyEdgeCases:
             "fast_acting_insulin_u": [None, None, 5.0, None]
         })
 
-        fixed_df, _ = preprocessor.create_fixed_frequency_data(
+        fixed_df, _ = preprocessor.fixed_freq_generator.create_fixed_frequency_data(
             df,
             {"continuous": ["glucose_value_mgdl"], "occasional": ["carb_grams", "fast_acting_insulin_u"], "service": ["event_type"]},
         )
@@ -175,7 +175,7 @@ class TestFixedFrequencyEdgeCases:
             "carb_grams": [None, 10.0, None]
         })
 
-        fixed_df, _ = preprocessor.create_fixed_frequency_data(
+        fixed_df, _ = preprocessor.fixed_freq_generator.create_fixed_frequency_data(
             df,
             {"continuous": ["glucose_value_mgdl"], "occasional": ["carb_grams"], "service": ["event_type"]},
         )

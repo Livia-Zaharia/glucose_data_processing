@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from glucose_ml_preprocessor import GlucoseMLPreprocessor
 from formats.base_converter import CSVFormatConverter
+from processing.core.utils import parse_timestamp
 
 class TestGlucoseMLPreprocessorSteps:
     """
@@ -50,13 +51,13 @@ class TestGlucoseMLPreprocessorSteps:
     def test_parse_timestamp(self, preprocessor):
         """Test timestamp parsing with various formats."""
         # Valid formats
-        assert preprocessor.parse_timestamp("2023-01-01 12:00:00") == datetime(2023, 1, 1, 12, 0, 0)
-        assert preprocessor.parse_timestamp("2023-01-01T12:00:00") == datetime(2023, 1, 1, 12, 0, 0)
+        assert parse_timestamp("2023-01-01 12:00:00") == datetime(2023, 1, 1, 12, 0, 0)
+        assert parse_timestamp("2023-01-01T12:00:00") == datetime(2023, 1, 1, 12, 0, 0)
         
         # Invalid inputs
-        assert preprocessor.parse_timestamp("") is None
-        assert preprocessor.parse_timestamp(None) is None
-        assert preprocessor.parse_timestamp("invalid-date") is None
+        assert parse_timestamp("") is None
+        assert parse_timestamp(None) is None
+        assert parse_timestamp("invalid-date") is None
 
     def test_consolidate_glucose_data_dexcom_format(self, preprocessor):
         """Test data consolidation with mocked Dexcom CSV files."""
@@ -89,7 +90,7 @@ class TestGlucoseMLPreprocessorSteps:
             "Glucose Value (mg/dL)": [100.0] * 20
         })
         
-        df_seq, stats, _ = preprocessor.detect_gaps_and_sequences(df)
+        df_seq, stats, _ = preprocessor.gap_detector.detect_gaps_and_sequences(df)
         
         # Should be 1 sequence
         assert df_seq["sequence_id"].n_unique() == 1
@@ -108,7 +109,7 @@ class TestGlucoseMLPreprocessorSteps:
             "Glucose Value (mg/dL)": [100.0] * 10
         })
         
-        df_seq, stats, _ = preprocessor.detect_gaps_and_sequences(df)
+        df_seq, stats, _ = preprocessor.gap_detector.detect_gaps_and_sequences(df)
         
         # Should be 2 sequences
         assert df_seq["sequence_id"].n_unique() == 2
@@ -129,7 +130,7 @@ class TestGlucoseMLPreprocessorSteps:
             "Glucose Value (mg/dL)": [100.0] * 10
         })
         
-        df_seq, stats, last_seq_id = preprocessor.detect_gaps_and_sequences(df)
+        df_seq, stats, last_seq_id = preprocessor.gap_detector.detect_gaps_and_sequences(df)
         
         # Should be 2 sequences (1 per user)
         assert df_seq["sequence_id"].n_unique() == 2
@@ -199,7 +200,7 @@ class TestGlucoseMLPreprocessorSteps:
         expected_removed_count = post_calib_within_window_count  # 288
         
         # Run gap detection
-        df_seq, stats, _ = preprocessor.detect_gaps_and_sequences(df)
+        df_seq, stats, _ = preprocessor.gap_detector.detect_gaps_and_sequences(df)
         
         # Check calibration period analysis in stats
         calib_analysis = stats.get("calibration_period_analysis", {})
@@ -303,7 +304,7 @@ class TestGlucoseMLPreprocessorSteps:
             "event_type": ["EGV", "EGV"]
         })
         
-        df_interp, stats = preprocessor.interpolate_missing_values(df)
+        df_interp, stats = preprocessor.interpolator.interpolate_missing_values(df)
         
         # Should now have 3 rows (10:00, 10:05 interpolated, 10:10)
         assert len(df_interp) == 3
@@ -332,7 +333,7 @@ class TestGlucoseMLPreprocessorSteps:
             "event_type": ["EGV", "EGV"]
         })
         
-        df_interp, stats = preprocessor.interpolate_missing_values(df)
+        df_interp, stats = preprocessor.interpolator.interpolate_missing_values(df)
         
         # Should now have 4 rows (10:00, 10:05 interpolated, 10:10 interpolated, 10:15)
         assert len(df_interp) == 4
@@ -372,7 +373,7 @@ class TestGlucoseMLPreprocessorSteps:
             "event_type": ["EGV", "EGV"]
         })
         
-        df_interp, stats = preprocessor.interpolate_missing_values(df)
+        df_interp, stats = preprocessor.interpolator.interpolate_missing_values(df)
         
         # Should still have only 2 rows (no interpolation for large gaps)
         assert len(df_interp) == 2
@@ -414,7 +415,7 @@ class TestGlucoseMLPreprocessorSteps:
             "event_type": ["EGV", "EGV"]
         })
         
-        df_interp, stats = preprocessor.interpolate_missing_values(df)
+        df_interp, stats = preprocessor.interpolator.interpolate_missing_values(df)
         
         # Should have 3 rows (original 2 + 1 interpolated)
         assert len(df_interp) == 3
@@ -488,7 +489,7 @@ class TestGlucoseMLPreprocessorSteps:
             "event_type": ["EGV", "EGV"]
         })
         
-        df_interp, stats = preprocessor_large.interpolate_missing_values(df)
+        df_interp, stats = preprocessor_large.interpolator.interpolate_missing_values(df)
         
         # missing_points = (19/5).cast(Int64) - 1 = 3 - 1 = 2
         # Should have 4 rows (original 2 + 2 interpolated)
@@ -560,7 +561,7 @@ class TestGlucoseMLPreprocessorSteps:
             "event_type": ["EGV", "EGV"]
         })
         
-        df_interp, stats = preprocessor.interpolate_missing_values(df)
+        df_interp, stats = preprocessor.interpolator.interpolate_missing_values(df)
         
         # Should have 3 rows (original 2 + 1 interpolated)
         assert len(df_interp) == 3
@@ -600,7 +601,7 @@ class TestGlucoseMLPreprocessorSteps:
             "Glucose Value (mg/dL)": [100.0]*13
         })
         
-        df_filtered, stats = preprocessor.filter_sequences_by_length(df)
+        df_filtered, stats = preprocessor.filter_step.filter_sequences_by_length(df)
         
         assert len(df_filtered) == 10
         assert df_filtered["sequence_id"].unique()[0] == 1
@@ -621,7 +622,7 @@ class TestGlucoseMLPreprocessorSteps:
             "glucose_value_mgdl": [100.0, 110.0]
         })
         
-        df_fixed, stats = preprocessor.create_fixed_frequency_data(df)
+        df_fixed, stats = preprocessor.fixed_freq_generator.create_fixed_frequency_data(df)
         
         # Should align to 10:00:00 (closest min? Logic aligns start)
         # Logic: first_second >= 30 -> +60-s, else -s.
@@ -680,7 +681,7 @@ class TestGlucoseMLPreprocessorSteps:
         event_cols = ['Carb Value (grams)', 'Fast-Acting Insulin Value (u)']
         
         # Call the method with fixed timestamps
-        shifted_df = preprocessor._shift_events_rounding(
+        shifted_df = preprocessor.fixed_freq_generator._shift_events_rounding(
             seq_data, 
             event_cols, 
             stats,
@@ -724,7 +725,7 @@ class TestGlucoseMLPreprocessorSteps:
             "Carb Value (grams)": [30.0, 20.0],
         })
         
-        shifted_multiple = preprocessor._shift_events_rounding(
+        shifted_multiple = preprocessor.fixed_freq_generator._shift_events_rounding(
             seq_data_multiple,
             ['Carb Value (grams)'],
             {},
@@ -737,16 +738,16 @@ class TestGlucoseMLPreprocessorSteps:
 
     def test_filter_glucose_only(self, preprocessor):
         """Test filtering to glucose only columns."""
-        preprocessor.glucose_only = True
-        
+        preprocessor.filter_step.glucose_only = True
+    
         df = pl.DataFrame({
             "timestamp": [datetime(2023,1,1)],
             "glucose_value_mgdl": [100.0],
             "carb_grams": [50.0],
             "event_type": ["EGV"]
         })
-        
-        df_filtered, stats = preprocessor.filter_glucose_only(df)
+    
+        df_filtered, stats = preprocessor.filter_step.filter_glucose_only(df)
         
         assert "carb_grams" not in df_filtered.columns
         assert "event_type" not in df_filtered.columns
@@ -771,7 +772,7 @@ class TestGlucoseMLPreprocessorSteps:
             "glucose_value_mgdl": ["100"] # String
         })
         
-        ml_df = preprocessor.prepare_ml_data(df)
+        ml_df = preprocessor.ml_preparer.prepare_ml_data(df, preprocessor._field_categories_dict)
         
         # Check column order: sequence_id first
         assert ml_df.columns[0] == "sequence_id"
@@ -815,7 +816,7 @@ class TestGlucoseMLPreprocessorSteps:
             "Glucose Value (mg/dL)": [100.0] * 10
         })
         
-        df_seq, stats, last_seq_id = preprocessor._create_sequences_for_user(df, last_sequence_id=0)
+        df_seq, stats, last_seq_id = preprocessor.gap_detector._create_sequences_for_user(df, last_sequence_id=0)
         
         # Should create 1 sequence with ID 1 (starting from last_sequence_id + 1)
         assert df_seq["sequence_id"].n_unique() == 1
@@ -835,7 +836,7 @@ class TestGlucoseMLPreprocessorSteps:
         })
         
         # Start from last_sequence_id = 5
-        df_seq, stats, last_seq_id = preprocessor._create_sequences_for_user(df, last_sequence_id=5)
+        df_seq, stats, last_seq_id = preprocessor.gap_detector._create_sequences_for_user(df, last_sequence_id=5)
         
         # Should create 1 sequence with ID 6 (5 + 1)
         assert df_seq["sequence_id"].n_unique() == 1
@@ -856,7 +857,7 @@ class TestGlucoseMLPreprocessorSteps:
         })
         
         # Start from last_sequence_id = 10
-        df_seq, stats, last_seq_id = preprocessor._create_sequences_for_user(df, last_sequence_id=10)
+        df_seq, stats, last_seq_id = preprocessor.gap_detector._create_sequences_for_user(df, last_sequence_id=10)
         
         # Should create 2 sequences: 11 and 12
         assert df_seq["sequence_id"].n_unique() == 2
@@ -872,7 +873,7 @@ class TestGlucoseMLPreprocessorSteps:
             "Glucose Value (mg/dL)": []
         })
         
-        df_seq, stats, last_seq_id = preprocessor._create_sequences_for_user(df, last_sequence_id=5)
+        df_seq, stats, last_seq_id = preprocessor.gap_detector._create_sequences_for_user(df, last_sequence_id=5)
         
         # Should return empty DataFrame and preserve last_sequence_id
         assert len(df_seq) == 0
@@ -885,7 +886,7 @@ class TestGlucoseMLPreprocessorSteps:
             "Glucose Value (mg/dL)": [100.0]
         })
         
-        df_seq, stats, last_seq_id = preprocessor._create_sequences_for_user(df, last_sequence_id=3)
+        df_seq, stats, last_seq_id = preprocessor.gap_detector._create_sequences_for_user(df, last_sequence_id=3)
         
         # Should create 1 sequence with ID 4
         assert df_seq["sequence_id"].n_unique() == 1
@@ -905,7 +906,7 @@ class TestGlucoseMLPreprocessorSteps:
         
         # Start from very large last_sequence_id
         large_offset = 1000000
-        df_seq, stats, last_seq_id = preprocessor._create_sequences_for_user(df, last_sequence_id=large_offset)
+        df_seq, stats, last_seq_id = preprocessor.gap_detector._create_sequences_for_user(df, last_sequence_id=large_offset)
         
         # Should create sequence with ID large_offset + 1
         assert df_seq["sequence_id"].unique()[0] == large_offset + 1
@@ -922,7 +923,7 @@ class TestGlucoseMLPreprocessorSteps:
         })
         
         # Pass user_id but sequence IDs should still start from last_sequence_id + 1
-        df_seq, stats, last_seq_id = preprocessor._create_sequences_for_user(
+        df_seq, stats, last_seq_id = preprocessor.gap_detector._create_sequences_for_user(
             df, last_sequence_id=7, user_id="user123"
         )
         
@@ -941,7 +942,7 @@ class TestGlucoseMLPreprocessorSteps:
             "Glucose Value (mg/dL)": [100.0] * 10
         })
         
-        df_seq, stats, last_seq_id = preprocessor.detect_gaps_and_sequences(df, last_sequence_id=20)
+        df_seq, stats, last_seq_id = preprocessor.gap_detector.detect_gaps_and_sequences(df, last_sequence_id=20)
         
         # Should create 1 sequence with ID 21
         assert df_seq["sequence_id"].n_unique() == 1
@@ -963,7 +964,7 @@ class TestGlucoseMLPreprocessorSteps:
             "Glucose Value (mg/dL)": [100.0] * 9
         })
         
-        df_seq, stats, last_seq_id = preprocessor.detect_gaps_and_sequences(df, last_sequence_id=15)
+        df_seq, stats, last_seq_id = preprocessor.gap_detector.detect_gaps_and_sequences(df, last_sequence_id=15)
         
         # Should create 3 sequences: 16, 17, 18
         assert df_seq["sequence_id"].n_unique() == 3
@@ -985,7 +986,7 @@ class TestGlucoseMLPreprocessorSteps:
             "Glucose Value (mg/dL)": [100.0] * 10
         })
         
-        df_seq, stats, last_seq_id = preprocessor.detect_gaps_and_sequences(df, last_sequence_id=50)
+        df_seq, stats, last_seq_id = preprocessor.gap_detector.detect_gaps_and_sequences(df, last_sequence_id=50)
         
         # Should create 2 sequences: 51 (user 1), 52 (user 2)
         assert df_seq["sequence_id"].n_unique() == 2
@@ -1010,7 +1011,7 @@ class TestGlucoseMLPreprocessorSteps:
             "Glucose Value (mg/dL)": [100.0] * 12
         })
         
-        df_seq, stats, last_seq_id = preprocessor.detect_gaps_and_sequences(df, last_sequence_id=100)
+        df_seq, stats, last_seq_id = preprocessor.gap_detector.detect_gaps_and_sequences(df, last_sequence_id=100)
         
         # Should create 4 sequences: 101, 102 (user 1), 103, 104 (user 2)
         assert df_seq["sequence_id"].n_unique() == 4
@@ -1026,7 +1027,7 @@ class TestGlucoseMLPreprocessorSteps:
             "Glucose Value (mg/dL)": []
         })
         
-        df_seq, stats, last_seq_id = preprocessor.detect_gaps_and_sequences(df, last_sequence_id=10)
+        df_seq, stats, last_seq_id = preprocessor.gap_detector.detect_gaps_and_sequences(df, last_sequence_id=10)
         
         # Should return empty DataFrame and preserve last_sequence_id
         assert len(df_seq) == 0
@@ -1043,7 +1044,7 @@ class TestGlucoseMLPreprocessorSteps:
             "Glucose Value (mg/dL)": [100.0] * 5
         })
         
-        df_seq, stats, last_seq_id = preprocessor.detect_gaps_and_sequences(df)
+        df_seq, stats, last_seq_id = preprocessor.gap_detector.detect_gaps_and_sequences(df)
         
         # Should create sequence with ID 1 (starting from 0 + 1)
         assert df_seq["sequence_id"].unique()[0] == 1
@@ -1060,7 +1061,7 @@ class TestGlucoseMLPreprocessorSteps:
             "Glucose Value (mg/dL)": [100.0] * 6
         })
         
-        df_seq1, stats1, last_seq_id1 = preprocessor.detect_gaps_and_sequences(df1, last_sequence_id=0)
+        df_seq1, stats1, last_seq_id1 = preprocessor.gap_detector.detect_gaps_and_sequences(df1, last_sequence_id=0)
         
         assert last_seq_id1 == 2  # Sequences 1 and 2
         
@@ -1073,7 +1074,7 @@ class TestGlucoseMLPreprocessorSteps:
             "Glucose Value (mg/dL)": [100.0] * 6
         })
         
-        df_seq2, stats2, last_seq_id2 = preprocessor.detect_gaps_and_sequences(df2, last_sequence_id=last_seq_id1)
+        df_seq2, stats2, last_seq_id2 = preprocessor.gap_detector.detect_gaps_and_sequences(df2, last_sequence_id=last_seq_id1)
         
         # Should create sequences 3 and 4
         seq_ids2 = sorted(df_seq2["sequence_id"].unique().to_list())
@@ -1106,7 +1107,7 @@ class TestGlucoseMLPreprocessorSteps:
             "Glucose Value (mg/dL)": [100.0] * len(all_timestamps)
         })
         
-        df_seq, stats, last_seq_id = preprocessor.detect_gaps_and_sequences(df, last_sequence_id=25)
+        df_seq, stats, last_seq_id = preprocessor.gap_detector.detect_gaps_and_sequences(df, last_sequence_id=25)
         
         # Should create sequence 26 (pre-calibration data)
         # Post-calibration data should be filtered out
@@ -1123,7 +1124,7 @@ class TestGlucoseMLPreprocessorSteps:
             "Glucose Value (mg/dL)": [100.0]
         })
         
-        df_seq, stats, last_seq_id = preprocessor.detect_gaps_and_sequences(df, last_sequence_id=99)
+        df_seq, stats, last_seq_id = preprocessor.gap_detector.detect_gaps_and_sequences(df, last_sequence_id=99)
         
         # Should create 1 sequence with ID 100
         assert df_seq["sequence_id"].unique()[0] == 100
@@ -1143,7 +1144,7 @@ class TestGlucoseMLPreprocessorSteps:
         
         # Note: We can't easily test empty user in same DataFrame, but we can test
         # that the method handles it correctly if user data is empty after filtering
-        df_seq, stats, last_seq_id = preprocessor.detect_gaps_and_sequences(df, last_sequence_id=0)
+        df_seq, stats, last_seq_id = preprocessor.gap_detector.detect_gaps_and_sequences(df, last_sequence_id=0)
         
         # Should create 1 sequence with ID 1
         assert df_seq["sequence_id"].unique()[0] == 1

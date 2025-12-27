@@ -32,7 +32,7 @@ from processing.steps.interpolation import ValueInterpolator
 from processing.steps.filtering import SequenceFilter
 from processing.steps.fixed_frequency import FixedFreqGenerator
 from processing.steps.ml_prep import MLDataPreparer
-from processing.stats_manager import StatsManager, print_statistics as sm_print_statistics
+from processing.stats_manager import StatsManager
 
 warnings.filterwarnings('ignore')
 
@@ -368,29 +368,6 @@ class GlucoseMLPreprocessor:
         self.stats_manager.original_record_count = len(df)
         return df
 
-    def detect_gaps_and_sequences(self, df: pl.DataFrame, last_sequence_id: int = 0, field_categories_dict: Optional[Dict[str, Any]] = None) -> Tuple[pl.DataFrame, Dict[str, Any], int]:
-        return self.gap_detector.detect_gaps_and_sequences(df, last_sequence_id, field_categories_dict)
-
-    def interpolate_missing_values(self, df: pl.DataFrame, field_categories_dict: Optional[Dict[str, List[str]]] = None) -> Tuple[pl.DataFrame, Dict[str, Any]]:
-        return self.interpolator.interpolate_missing_values(df, field_categories_dict)
-
-    def filter_sequences_by_length(self, df: pl.DataFrame) -> Tuple[pl.DataFrame, Dict[str, Any]]:
-        self.filter_step.min_sequence_len = self.min_sequence_len
-        return self.filter_step.filter_sequences_by_length(df)
-
-    def create_fixed_frequency_data(self, df: pl.DataFrame, field_categories_dict: Optional[Dict[str, List[str]]] = None) -> Tuple[pl.DataFrame, Dict[str, Any]]:
-        return self.fixed_freq_generator.create_fixed_frequency_data(df, field_categories_dict)
-
-    def filter_glucose_only(self, df: pl.DataFrame) -> Tuple[pl.DataFrame, Dict[str, Any]]:
-        self.filter_step.glucose_only = self.glucose_only
-        return self.filter_step.filter_glucose_only(df)
-
-    def prepare_ml_data(self, df: pl.DataFrame) -> pl.DataFrame:
-        return self.ml_preparer.prepare_ml_data(df, self._field_categories_dict)
-
-    def get_statistics(self, df: pl.DataFrame, gap_stats: Dict[str, Any], interp_stats: Dict[str, Any], removal_stats: Optional[Dict[str, Any]] = None, filter_stats: Optional[Dict[str, Any]] = None, replacement_stats: Optional[Dict[str, Any]] = None, glucose_filter_stats: Optional[Dict[str, Any]] = None, fixed_freq_stats: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        return self.stats_manager.get_statistics(df, gap_stats, interp_stats, filter_stats, glucose_filter_stats, fixed_freq_stats)
-
     def process(self, csv_folder: Path, output_file: Optional[Path] = None, last_sequence_id: int = 0) -> Tuple[pl.DataFrame, Dict[str, Any], int]:
         logger.info("Starting glucose data preprocessing for ML...")
         
@@ -417,27 +394,27 @@ class GlucoseMLPreprocessor:
         df = self.consolidate_glucose_data(csv_folder)
         
         logger.info("STEP 2: Detecting gaps and creating sequences...")
-        df, gap_stats, last_sequence_id = self.detect_gaps_and_sequences(df, last_sequence_id, field_categories_dict)
+        df, gap_stats, last_sequence_id = self.gap_detector.detect_gaps_and_sequences(df, last_sequence_id, field_categories_dict)
         
         logger.info("STEP 3: Interpolating missing values...")
-        df, interp_stats = self.interpolate_missing_values(df, field_categories_dict)
+        df, interp_stats = self.interpolator.interpolate_missing_values(df, field_categories_dict)
         
         logger.info("STEP 4: Filtering sequences by minimum length...")
-        df, filter_stats = self.filter_sequences_by_length(df)
+        df, filter_stats = self.filter_step.filter_sequences_by_length(df)
         
         if self.create_fixed_frequency:
             logger.info("STEP 5: Creating fixed-frequency data...")
-            df, fixed_freq_stats = self.create_fixed_frequency_data(df, field_categories_dict)
+            df, fixed_freq_stats = self.fixed_freq_generator.create_fixed_frequency_data(df, field_categories_dict)
         else:
             fixed_freq_stats = {}
         
         logger.info("STEP 6: Filtering to glucose-only data...")
-        df, glucose_filter_stats = self.filter_glucose_only(df)
+        df, glucose_filter_stats = self.filter_step.filter_glucose_only(df)
         
         logger.info("STEP 7: Preparing final ML dataset...")
-        ml_df = self.prepare_ml_data(df)
+        ml_df = self.ml_preparer.prepare_ml_data(df, self._field_categories_dict)
         
-        stats = self.get_statistics(ml_df, gap_stats, interp_stats, filter_stats, glucose_filter_stats, fixed_freq_stats)
+        stats = self.stats_manager.get_statistics(ml_df, gap_stats, interp_stats, filter_stats, glucose_filter_stats, fixed_freq_stats)
         
         if output_file:
             ml_df.write_csv(output_file)
@@ -589,39 +566,3 @@ class GlucoseMLPreprocessor:
         
         return combined_df, combined_stats, current_last_sequence_id
 
-    # --- Legacy methods for backward compatibility with tests ---
-
-    def parse_timestamp(self, timestamp_str: str) -> Optional[datetime]:
-        """Legacy method for timestamp parsing."""
-        if not timestamp_str or timestamp_str.strip() == "":
-            return None
-        timestamp_str = timestamp_str.strip()
-        formats = ["%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M:%S.%f"]
-        for fmt in formats:
-            try:
-                return datetime.strptime(timestamp_str, fmt)
-            except ValueError:
-                continue
-        return None
-
-    def _create_sequences_for_user(self, *args, **kwargs) -> Tuple[pl.DataFrame, Dict[str, Any], int]:
-        """Legacy private method delegation."""
-        return self.gap_detector._create_sequences_for_user(*args, **kwargs)
-
-    def _shift_events_rounding(self, *args, **kwargs) -> pl.DataFrame:
-        """Legacy private method delegation."""
-        return self.fixed_freq_generator._shift_events_rounding(*args, **kwargs)
-
-def print_statistics(stats: Dict[str, Any], preprocessor: 'GlucoseMLPreprocessor' = None) -> None:
-    params = None
-    if preprocessor:
-        params = {
-            'expected_interval_minutes': preprocessor.expected_interval_minutes,
-            'small_gap_max_minutes': preprocessor.small_gap_max_minutes,
-            'remove_calibration': preprocessor.remove_calibration,
-            'min_sequence_len': preprocessor.min_sequence_len,
-            'calibration_period_minutes': preprocessor.calibration_period_minutes,
-            'remove_after_calibration_hours': preprocessor.remove_after_calibration_hours,
-            'create_fixed_frequency': preprocessor.create_fixed_frequency
-        }
-    sm_print_statistics(stats, params)
