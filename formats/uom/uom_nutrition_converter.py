@@ -25,7 +25,7 @@ class UoMNutritionConverter(CSVFormatConverter):
         """
         super().__init__(output_fields)
         # Load database schema
-        self.db_schema = self._load_schema("uom_schema.json")
+        self.db_schema = self._load_schema("uom_schema.yaml")
         self.converter_schema = self.db_schema["converters"]["nutrition"]
 
     def can_handle(self, headers: List[str]) -> bool:

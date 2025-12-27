@@ -8,6 +8,7 @@ This module provides the abstract base class that all format converters must imp
 from abc import ABC, abstractmethod
 from typing import List, Dict, Optional, Set
 import json
+import yaml
 from pathlib import Path
 
 
@@ -140,17 +141,17 @@ class CSVFormatConverter(ABC):
     @classmethod
     def _load_schema(cls, schema_file: str) -> Dict:
         """
-        Load conversion schema from JSON file.
+        Load conversion schema from YAML file.
         
         Args:
-            schema_file: Name of the schema file (e.g., 'uom_schema.json')
+            schema_file: Name of the schema file (e.g., 'uom_schema.yaml')
             
         Returns:
             Dictionary containing conversion schema
         """
         schema_path = Path(__file__).parent / schema_file
         with open(schema_path, 'r', encoding='utf-8') as f:
-            return json.load(f)
+            return yaml.safe_load(f)
     
     def _get_standard_field_name(self, standard_name: str) -> str:
         """

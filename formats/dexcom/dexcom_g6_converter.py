@@ -25,7 +25,7 @@ class DexcomG6Converter(CSVFormatConverter):
         """
         super().__init__(output_fields)
         # Load database schema
-        self.db_schema = self._load_schema("dexcom_schema.json")
+        self.db_schema = self._load_schema("dexcom_schema.yaml")
         self.converter_schema = self.db_schema["converters"]["g6"]
 
     def can_handle(self, headers: List[str]) -> bool:

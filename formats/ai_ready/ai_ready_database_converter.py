@@ -23,7 +23,7 @@ from formats.database_converters import DatabaseConverter
 
 
 @dataclass(frozen=True)
-class _AIReadIZipLayout:
+class _AIReadyZipLayout:
     dataset_root: str
 
     def participants_tsv(self) -> str:
@@ -107,9 +107,9 @@ def _parse_timestamp_to_naive_utc(ts: str) -> Optional[datetime]:
     return dt
 
 
-class AIReadIDatabaseConverter(DatabaseConverter):
+class AIReadyDatabaseConverter(DatabaseConverter):
     """
-    Zip-backed converter for the AI-READI dataset.
+    Zip-backed converter for the AI-READY dataset.
 
     Produces a multi-user event stream with standard field names. This initial
     implementation returns an in-memory DataFrame; a streaming path is added
@@ -117,16 +117,16 @@ class AIReadIDatabaseConverter(DatabaseConverter):
     """
 
     def get_database_name(self) -> str:
-        return "AI-READI (zip) Database"
+        return "AI-READY (zip) Database"
 
     def consolidate_data(self, data_folder: str, output_file: Optional[str] = None) -> pl.DataFrame:
         zip_path = Path(data_folder)
         if not zip_path.exists():
-            raise FileNotFoundError(f"AI-READI zip not found: {data_folder}")
+            raise FileNotFoundError(f"AI-READY zip not found: {data_folder}")
         if zip_path.suffix.lower() != ".zip":
-            raise ValueError(f"AI-READI input must be a .zip file path, got: {data_folder}")
+            raise ValueError(f"AI-READY input must be a .zip file path, got: {data_folder}")
 
-        # NOTE: consolidate_data is kept for backwards compatibility, but AI-READI is expected
+        # NOTE: consolidate_data is kept for backwards compatibility, but AI-READY is expected
         # to be processed via a streaming path in the preprocessor. For safety, we still support
         # limiting users via config and resampling to the preprocessor interval if present.
         interval_minutes = int(self.config.get("expected_interval_minutes", 5))
@@ -136,7 +136,7 @@ class AIReadIDatabaseConverter(DatabaseConverter):
             frames.append(user_df)
 
         if not frames:
-            raise ValueError("No AI-READI records produced (check zip contents / selected users).")
+            raise ValueError("No AI-READY records produced (check zip contents / selected users).")
 
         df = pl.concat(frames).sort(["user_id", "timestamp"])
         if output_file:
@@ -145,14 +145,14 @@ class AIReadIDatabaseConverter(DatabaseConverter):
 
     def iter_user_event_frames(self, data_folder: Union[str, Path], *, interval_minutes: int) -> Iterable[pl.DataFrame]:
         """
-        Yield per-user, resampled event frames from the AI-READI zip.
+        Yield per-user, resampled event frames from the AI-READY zip.
 
         The output is a wide, time-binned DataFrame per user at `interval_minutes` granularity,
         with one row per time bucket and standard field names as columns.
         """
         zip_path = Path(data_folder)
         with zipfile.ZipFile(zip_path, "r") as zip_ref:
-            layout = _AIReadIZipLayout(dataset_root=_find_dataset_root(zip_ref))
+            layout = _AIReadyZipLayout(dataset_root=_find_dataset_root(zip_ref))
             participants = self._read_participants(zip_ref, layout)
 
             user_ids = sorted(participants.keys(), key=lambda x: int(x) if x.isdigit() else x)
@@ -168,17 +168,17 @@ class AIReadIDatabaseConverter(DatabaseConverter):
                         found = True
                         break
                 if found:
-                    logger.info(f"Skipping AI-READI users before {start_user_id} (found at index {start_index})")
+                    logger.info(f"Skipping AI-READY users before {start_user_id} (found at index {start_index})")
                     user_ids = user_ids[start_index:]
                 else:
-                    logger.info(f"Warning: start_with_user_id '{start_user_id}' not found in AI-READI database.")
+                    logger.info(f"Warning: start_with_user_id '{start_user_id}' not found in AI-READY database.")
 
             # Apply first_n_users filtering if specified
             first_n_users = self.config.get("first_n_users")
             if first_n_users and int(first_n_users) > 0:
                 user_ids = user_ids[: int(first_n_users)]
 
-            logger.info(f"Processing {len(user_ids)} AI-READI users...")
+            logger.info(f"Processing {len(user_ids)} AI-READY users...")
 
             for user_id in user_ids:
                 df = self._extract_user_frame(zip_ref, layout, user_id, participants[user_id], interval_minutes=interval_minutes)
@@ -186,7 +186,7 @@ class AIReadIDatabaseConverter(DatabaseConverter):
                     yield df
 
     def _read_participants(
-        self, zip_ref: zipfile.ZipFile, layout: _AIReadIZipLayout
+        self, zip_ref: zipfile.ZipFile, layout: _AIReadyZipLayout
     ) -> dict[str, dict[str, Any]]:
         """
         Read participants.tsv and return mapping user_id -> participant metadata.
@@ -218,7 +218,7 @@ class AIReadIDatabaseConverter(DatabaseConverter):
     def _extract_user_rows(
         self,
         zip_ref: zipfile.ZipFile,
-        layout: _AIReadIZipLayout,
+        layout: _AIReadyZipLayout,
         user_id: str,
         meta: dict[str, Any],
     ) -> list[dict[str, Any]]:
@@ -241,7 +241,7 @@ class AIReadIDatabaseConverter(DatabaseConverter):
     def _extract_user_frame(
         self,
         zip_ref: zipfile.ZipFile,
-        layout: _AIReadIZipLayout,
+        layout: _AIReadyZipLayout,
         user_id: str,
         meta: dict[str, Any],
         *,
@@ -334,7 +334,7 @@ class AIReadIDatabaseConverter(DatabaseConverter):
         df = self._outer_join_all(frames)
         df = df.with_columns(
             pl.lit(int(user_id) if user_id.isdigit() else user_id).alias("user_id"),
-            pl.lit("AI_READI").alias("event_type"),
+            pl.lit("AI_READY").alias("event_type"),
             pl.lit(meta.get("clinical_site", "")).alias("clinical_site"),
             pl.lit(meta.get("study_group", "")).alias("study_group"),
             pl.lit(meta.get("recommended_split", "")).alias("recommended_split"),
@@ -344,7 +344,7 @@ class AIReadIDatabaseConverter(DatabaseConverter):
         return df.sort("timestamp")
 
     def _extract_cgm_df(
-        self, zip_ref: zipfile.ZipFile, layout: _AIReadIZipLayout, user_id: str
+        self, zip_ref: zipfile.ZipFile, layout: _AIReadyZipLayout, user_id: str
     ) -> Optional[pl.DataFrame]:
         member = layout.dexcom_cgm_json(user_id)
         try:
@@ -380,7 +380,7 @@ class AIReadIDatabaseConverter(DatabaseConverter):
         return pl.DataFrame({"timestamp": ts_list, "glucose_value_mgdl": val_list})
 
     def _extract_sleep_df(
-        self, zip_ref: zipfile.ZipFile, layout: _AIReadIZipLayout, user_id: str
+        self, zip_ref: zipfile.ZipFile, layout: _AIReadyZipLayout, user_id: str
     ) -> Optional[pl.DataFrame]:
         member = layout.garmin_file("sleep", user_id, "sleep")
         try:
@@ -500,7 +500,7 @@ class AIReadIDatabaseConverter(DatabaseConverter):
         }
 
     def _extract_cgm(
-        self, zip_ref: zipfile.ZipFile, layout: _AIReadIZipLayout, user_id: str, meta: dict[str, Any]
+        self, zip_ref: zipfile.ZipFile, layout: _AIReadyZipLayout, user_id: str, meta: dict[str, Any]
     ) -> list[dict[str, Any]]:
         member = layout.dexcom_cgm_json(user_id)
         try:
@@ -527,7 +527,7 @@ class AIReadIDatabaseConverter(DatabaseConverter):
         return out
 
     def _extract_garmin_heart_rate(
-        self, zip_ref: zipfile.ZipFile, layout: _AIReadIZipLayout, user_id: str, meta: dict[str, Any]
+        self, zip_ref: zipfile.ZipFile, layout: _AIReadyZipLayout, user_id: str, meta: dict[str, Any]
     ) -> list[dict[str, Any]]:
         member = layout.garmin_file("heart_rate", user_id, "heartrate")
         return self._extract_simple_value_series(
@@ -543,7 +543,7 @@ class AIReadIDatabaseConverter(DatabaseConverter):
         )
 
     def _extract_garmin_stress(
-        self, zip_ref: zipfile.ZipFile, layout: _AIReadIZipLayout, user_id: str, meta: dict[str, Any]
+        self, zip_ref: zipfile.ZipFile, layout: _AIReadyZipLayout, user_id: str, meta: dict[str, Any]
     ) -> list[dict[str, Any]]:
         member = layout.garmin_file("stress", user_id, "stress")
         return self._extract_simple_value_series(
@@ -559,7 +559,7 @@ class AIReadIDatabaseConverter(DatabaseConverter):
         )
 
     def _extract_garmin_calories(
-        self, zip_ref: zipfile.ZipFile, layout: _AIReadIZipLayout, user_id: str, meta: dict[str, Any]
+        self, zip_ref: zipfile.ZipFile, layout: _AIReadyZipLayout, user_id: str, meta: dict[str, Any]
     ) -> list[dict[str, Any]]:
         member = layout.garmin_file("physical_activity_calorie", user_id, "calorie")
         return self._extract_simple_value_series(
@@ -576,7 +576,7 @@ class AIReadIDatabaseConverter(DatabaseConverter):
         )
 
     def _extract_garmin_steps(
-        self, zip_ref: zipfile.ZipFile, layout: _AIReadIZipLayout, user_id: str, meta: dict[str, Any]
+        self, zip_ref: zipfile.ZipFile, layout: _AIReadyZipLayout, user_id: str, meta: dict[str, Any]
     ) -> list[dict[str, Any]]:
         member = layout.garmin_file("physical_activity", user_id, "activity")
         # activity uses time_interval.start_date_time
@@ -594,7 +594,7 @@ class AIReadIDatabaseConverter(DatabaseConverter):
         )
 
     def _extract_garmin_sleep(
-        self, zip_ref: zipfile.ZipFile, layout: _AIReadIZipLayout, user_id: str, meta: dict[str, Any]
+        self, zip_ref: zipfile.ZipFile, layout: _AIReadyZipLayout, user_id: str, meta: dict[str, Any]
     ) -> list[dict[str, Any]]:
         member = layout.garmin_file("sleep", user_id, "sleep")
         try:
@@ -621,7 +621,7 @@ class AIReadIDatabaseConverter(DatabaseConverter):
         return out
 
     def _extract_garmin_respiratory_rate(
-        self, zip_ref: zipfile.ZipFile, layout: _AIReadIZipLayout, user_id: str, meta: dict[str, Any]
+        self, zip_ref: zipfile.ZipFile, layout: _AIReadyZipLayout, user_id: str, meta: dict[str, Any]
     ) -> list[dict[str, Any]]:
         member = layout.garmin_file("respiratory_rate", user_id, "respiratoryrate")
         return self._extract_simple_value_series(
@@ -637,7 +637,7 @@ class AIReadIDatabaseConverter(DatabaseConverter):
         )
 
     def _extract_garmin_oxygen_saturation(
-        self, zip_ref: zipfile.ZipFile, layout: _AIReadIZipLayout, user_id: str, meta: dict[str, Any]
+        self, zip_ref: zipfile.ZipFile, layout: _AIReadyZipLayout, user_id: str, meta: dict[str, Any]
     ) -> list[dict[str, Any]]:
         member = layout.garmin_file("oxygen_saturation", user_id, "oxygensaturation")
         return self._extract_simple_value_series(

@@ -25,7 +25,7 @@ class FreeStyleLibre3Converter(CSVFormatConverter):
         """
         super().__init__(output_fields)
         # Load database schema
-        self.db_schema = self._load_schema("freestyle_libre3_schema.json")
+        self.db_schema = self._load_schema("freestyle_libre3_schema.yaml")
         self.converter_schema = self.db_schema["converters"]["libre3"]
 
     def can_handle(self, headers: List[str]) -> bool:

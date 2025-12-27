@@ -9,7 +9,7 @@ remove_after_calibration_hours: 24
 restrict_output_to_config_fields: true
 
 database_configs:
-  ai_readi:
+  ai_ready:
     start_with_user_id: "1023"
 
 output_fields:

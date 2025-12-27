@@ -1,6 +1,6 @@
 """Configuration utilities for glucose data processing."""
 
-import json
+import yaml
 from pathlib import Path
 from typing import Dict, Any, Optional
 from processing.core.fields import StandardFieldNames
@@ -17,15 +17,16 @@ def extract_field_categories(database_type: str) -> Dict[str, Any]:
         and settings (e.g., 'remove_after_calibration')
     """
     # Map database type to schema file name (legacy aliases).
-    # Prefer convention: `<database_type>_schema.json` if present.
+    # Prefer convention: `<database_type>_schema.yaml` if present.
     schema_files = {
-        'uom': 'uom_schema.json',
-        'dexcom': 'dexcom_schema.json',
-        'libre3': 'freestyle_libre3_schema.json',
-        'freestyle_libre3': 'freestyle_libre3_schema.json',
+        'uom': 'uom_schema.yaml',
+        'dexcom': 'dexcom_schema.yaml',
+        'libre3': 'freestyle_libre3_schema.yaml',
+        'freestyle_libre3': 'freestyle_libre3_schema.yaml',
+        'ai_ready': 'ai_ready_schema.yaml',
     }
 
-    schema_file = schema_files.get(database_type, f"{database_type}_schema.json")
+    schema_file = schema_files.get(database_type, f"{database_type}_schema.yaml")
     
     # Load schema file
     # Note: Using Path(__file__).parent.parent.parent to get to the root from processing/core/
@@ -42,7 +43,7 @@ def extract_field_categories(database_type: str) -> Dict[str, Any]:
         }
     
     with open(schema_path, 'r', encoding='utf-8') as f:
-        schema = json.load(f)
+        schema = yaml.safe_load(f)
     
     # Get field_categories from schema
     field_categories = schema.get('field_categories', {})

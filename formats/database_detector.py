@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional
 import zipfile
 
 from formats.database_converters import DatabaseConverter
-from formats.ai_readi.ai_readi_database_converter import AIReadIDatabaseConverter
+from formats.ai_ready.ai_ready_database_converter import AIReadyDatabaseConverter
 from formats.dexcom.dexcom_database_converter import DexcomDatabaseConverter
 from formats.libre3.libre3_database_converter import Libre3DatabaseConverter
 from formats.uom.uom_database_converter import UoMDatabaseConverter
@@ -26,7 +26,7 @@ class DatabaseDetector:
             'dexcom': DexcomDatabaseConverter,
             'libre3': Libre3DatabaseConverter,
             'uom': UoMDatabaseConverter,
-            'ai_readi': AIReadIDatabaseConverter,
+            'ai_ready': AIReadyDatabaseConverter,
         }
     
     def detect_database_type(self, data_folder: str) -> str:
@@ -58,7 +58,7 @@ class DatabaseDetector:
                         if (not has_dexcom) and ("/dataset/wearable_blood_glucose/continuous_glucose_monitoring/dexcom_g6/" in name) and name.endswith("_DEX.json"):
                             has_dexcom = True
                         if has_participants and has_dexcom:
-                            return "ai_readi"
+                            return "ai_ready"
             except Exception:
                 return "unknown"
             return "unknown"
