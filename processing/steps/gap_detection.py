@@ -122,98 +122,43 @@ class GapDetector:
         if len(user_df) == 0:
             return user_df, stats, last_sequence_id
 
-        # Calculate time differences between consecutive timestamps
-        df = user_df.with_columns([
-            pl.col(ts_col).diff().dt.total_seconds().alias('time_diff_seconds')
-        ])
-        
-        # Identify calibration gaps
-        df = df.with_columns([
-            (pl.col('time_diff_seconds') > self.calibration_period_seconds).fill_null(False).alias('is_calibration_gap')
-        ])
-        
-        # Identify standard gaps
-        df = df.with_columns([
-            (pl.col('time_diff_seconds') > self.small_gap_max_seconds).fill_null(False).alias('is_gap')
-        ])
-        
-        if field_categories_dict is not None:
-            continuous_fields = field_categories_dict.get('continuous', [])
-            continuous_fields = [f for f in continuous_fields if f in df.columns]
+        def _apply_gap_detection(df_to_process: pl.DataFrame) -> pl.DataFrame:
+            """
+            Internal helper to detect gaps based on major time gaps or glucose gaps.
+            """
+            # Calculate time differences between consecutive records
+            res_df = df_to_process.with_columns([
+                pl.col(ts_col).diff().dt.total_seconds().alias('time_diff_seconds')
+            ])
             
-            continuous_fields_other = [f for f in continuous_fields if f != glucose_col]
+            # 1. Identify major gaps (calibration gaps)
+            res_df = res_df.with_columns([
+                (pl.col('time_diff_seconds') > self.calibration_period_seconds).fill_null(False).alias('is_calibration_gap')
+            ])
             
-            if continuous_fields_other:
-                continuous_fields_to_check = continuous_fields
-            else:
-                continuous_fields_to_check = []
-                if glucose_col in df.columns:
-                    non_null_rows = df.filter(pl.col(glucose_col).is_not_null()).sort(ts_col)
-                    if len(non_null_rows) > 1:
-                        non_null_with_diff = non_null_rows.with_columns(
-                            pl.col(ts_col).diff().dt.total_seconds().alias('field_time_diff')
-                        )
-                        gap_rows = non_null_with_diff.filter(
-                            pl.col('field_time_diff') > self.small_gap_max_seconds
-                        )
-                        if len(gap_rows) > 0:
-                            gap_timestamps = set(gap_rows[ts_col].to_list())
-                            if gap_timestamps:
-                                df = df.with_columns(
-                                    (
-                                        pl.col(glucose_col).is_not_null()
-                                        & pl.col(ts_col).is_in(list(gap_timestamps))
-                                    ).alias('is_gap_glucose')
-                                ).with_columns(
-                                    (pl.col('is_gap') | pl.col('is_gap_glucose'))
-                                    .fill_null(False)
-                                    .alias('is_gap')
-                                ).drop('is_gap_glucose')
+            # 2. Identify glucose gaps
+            # We split only if GLUCOSE has a gap > small_gap_max_seconds
+            is_gap_glucose = pl.lit(False)
+            if glucose_col in res_df.columns:
+                # Find gaps in glucose field specifically
+                non_null_glucose = res_df.filter(pl.col(glucose_col).is_not_null()).sort(ts_col)
+                if len(non_null_glucose) > 1:
+                    glucose_gap_ts = non_null_glucose.with_columns(
+                        pl.col(ts_col).diff().dt.total_seconds().alias('g_diff')
+                    ).filter(pl.col('g_diff') > self.small_gap_max_seconds)[ts_col].to_list()
+                    
+                    if glucose_gap_ts:
+                        is_gap_glucose = pl.col(ts_col).is_in(glucose_gap_ts)
             
-            if continuous_fields_to_check:
-                gap_columns: List[pl.Expr] = []
-                for field in continuous_fields_to_check:
-                    non_null_rows = df.filter(pl.col(field).is_not_null()).sort(ts_col)
-                    
-                    if len(non_null_rows) > 1:
-                        non_null_with_diff = non_null_rows.with_columns([
-                            pl.col(ts_col).diff().dt.total_seconds().alias('field_time_diff')
-                        ])
-                        gap_rows = non_null_with_diff.filter(
-                            pl.col('field_time_diff') > self.small_gap_max_seconds
-                        )
-                        
-                        if len(gap_rows) > 0:
-                            gap_timestamps = set(gap_rows[ts_col].to_list())
-                            field_gap = (
-                                pl.col(field).is_not_null() & 
-                                pl.col(ts_col).is_in(list(gap_timestamps))
-                            )
-                        else:
-                            field_gap = pl.lit(False)
-                    else:
-                        field_gap = pl.lit(False)
-                    
-                    safe_field_name = field.replace(" ", "_").replace("(", "").replace(")", "").replace("/", "_")
-                    gap_columns.append(field_gap.alias(f'is_gap_{safe_field_name}'))
-                
-                if gap_columns:
-                    df = df.with_columns(gap_columns)
-                    gap_exprs = [pl.col('is_gap')]
-                    for field in continuous_fields_to_check:
-                        safe_field_name = field.replace(" ", "_").replace("(", "").replace(")", "").replace("/", "_")
-                        gap_exprs.append(pl.col(f'is_gap_{safe_field_name}'))
-                    
-                    combined_gap = gap_exprs[0]
-                    for expr in gap_exprs[1:]:
-                        combined_gap = combined_gap | expr
-                    
-                    df = df.with_columns([
-                        combined_gap.fill_null(False).alias('is_gap')
-                    ])
-                    
-                    temp_gap_cols = [f'is_gap_{field.replace(" ", "_").replace("(", "").replace(")", "").replace("/", "_")}' for field in continuous_fields_to_check]
-                    df = df.drop([col for col in temp_gap_cols if col in df.columns])
+            # Combine: split ONLY if glucose gap > small_gap_max_seconds
+            # We ignore generic time gaps or gaps in other fields to avoid fragmentation.
+            res_df = res_df.with_columns([
+                is_gap_glucose.alias('is_gap')
+            ])
+            return res_df
+
+        # Initial gap detection
+        df = _apply_gap_detection(user_df)
         
         stats['calibration_periods_detected'] = int(df['is_calibration_gap'].sum())
         
@@ -242,88 +187,11 @@ class GapDetector:
             stats['total_records_marked_for_removal'] = int((~df['keep_record']).sum())
             df = df.filter(pl.col('keep_record')).drop('keep_record')
             
+            # Re-detect gaps after calibration removal
+            if len(df) > 0:
+                df = _apply_gap_detection(df)
+            
         if len(df) > 0:
-            df = df.with_columns([
-                pl.col(ts_col).diff().dt.total_seconds().alias('time_diff_seconds'),
-            ]).with_columns([
-                (pl.col('time_diff_seconds') > self.small_gap_max_seconds).fill_null(False).alias('is_gap'),
-            ])
-            
-            if field_categories_dict is not None:
-                continuous_fields = field_categories_dict.get('continuous', [])
-                continuous_fields = [f for f in continuous_fields if f in df.columns]
-                continuous_fields_other = [f for f in continuous_fields if f != glucose_col]
-                
-                if continuous_fields_other:
-                    continuous_fields_to_check = continuous_fields
-                else:
-                    continuous_fields_to_check = []
-                    if glucose_col in df.columns:
-                        non_null_rows = df.filter(pl.col(glucose_col).is_not_null()).sort(ts_col)
-                        if len(non_null_rows) > 1:
-                            non_null_with_diff = non_null_rows.with_columns(
-                                pl.col(ts_col).diff().dt.total_seconds().alias('field_time_diff')
-                            )
-                            gap_rows = non_null_with_diff.filter(
-                                pl.col('field_time_diff') > self.small_gap_max_seconds
-                            )
-                            if len(gap_rows) > 0:
-                                gap_timestamps = set(gap_rows[ts_col].to_list())
-                                if gap_timestamps:
-                                    df = df.with_columns(
-                                        (
-                                            pl.col(glucose_col).is_not_null()
-                                            & pl.col(ts_col).is_in(list(gap_timestamps))
-                                        ).alias('is_gap_glucose')
-                                    ).with_columns(
-                                        (pl.col('is_gap') | pl.col('is_gap_glucose'))
-                                        .fill_null(False)
-                                        .alias('is_gap')
-                                    ).drop('is_gap_glucose')
-                
-                if continuous_fields_to_check:
-                    gap_columns = []
-                    for field in continuous_fields_to_check:
-                        non_null_rows = df.filter(pl.col(field).is_not_null()).sort(ts_col)
-                        if len(non_null_rows) > 1:
-                            non_null_with_diff = non_null_rows.with_columns([
-                                pl.col(ts_col).diff().dt.total_seconds().alias('field_time_diff')
-                            ])
-                            gap_rows = non_null_with_diff.filter(
-                                pl.col('field_time_diff') > self.small_gap_max_seconds
-                            )
-                            if len(gap_rows) > 0:
-                                gap_timestamps = set(gap_rows[ts_col].to_list())
-                                field_gap = (
-                                    pl.col(field).is_not_null() & 
-                                    pl.col(ts_col).is_in(list(gap_timestamps))
-                                )
-                            else:
-                                field_gap = pl.lit(False)
-                        else:
-                            field_gap = pl.lit(False)
-                        
-                        safe_field_name = field.replace(" ", "_").replace("(", "").replace(")", "").replace("/", "_")
-                        gap_columns.append(field_gap.alias(f'is_gap_{safe_field_name}'))
-                    
-                    if gap_columns:
-                        df = df.with_columns(gap_columns)
-                        gap_exprs = [pl.col('is_gap')]
-                        for field in continuous_fields_to_check:
-                            safe_field_name = field.replace(" ", "_").replace("(", "").replace(")", "").replace("/", "_")
-                            gap_exprs.append(pl.col(f'is_gap_{safe_field_name}'))
-                        
-                        combined_gap = gap_exprs[0]
-                        for expr in gap_exprs[1:]:
-                            combined_gap = combined_gap | expr
-                        
-                        df = df.with_columns([
-                            combined_gap.fill_null(False).alias('is_gap')
-                        ])
-                        
-                        temp_gap_cols = [f'is_gap_{field.replace(" ", "_").replace("(", "").replace(")", "").replace("/", "_")}' for field in continuous_fields_to_check]
-                        df = df.drop([col for col in temp_gap_cols if col in df.columns])
-            
             df = df.with_columns([
                 pl.col('is_gap').cum_sum().alias('local_sequence_id')
             ])
@@ -336,4 +204,5 @@ class GapDetector:
             last_sequence_id = int(max_sequence_id) if max_sequence_id is not None else last_sequence_id
         
         return df, stats, last_sequence_id
+
 

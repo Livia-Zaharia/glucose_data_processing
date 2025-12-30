@@ -4,6 +4,7 @@ import polars as pl
 from typing import Dict, Any, List, Optional
 from loguru import logger
 from processing.core.fields import StandardFieldNames, INTERPOLATED_EVENT_TYPE
+from formats.base_converter import CSVFormatConverter
 
 class StatsManager:
     """
@@ -25,13 +26,26 @@ class StatsManager:
         """
         Generate comprehensive statistics.
         """
-        ts_col = StandardFieldNames.TIMESTAMP
-        seq_id_col = StandardFieldNames.SEQUENCE_ID
-        event_type_col = StandardFieldNames.EVENT_TYPE
-        glucose_col = StandardFieldNames.GLUCOSE_VALUE
-        fast_insulin_col = StandardFieldNames.FAST_ACTING_INSULIN
-        long_insulin_col = StandardFieldNames.LONG_ACTING_INSULIN
-        carb_col = StandardFieldNames.CARB_VALUE
+        # Mapping standard names to display names if available
+        field_map = CSVFormatConverter.get_field_to_display_name_map()
+        
+        def get_col(std_name: str) -> str:
+            # Check if standard name is in columns
+            if std_name in df.columns:
+                return std_name
+            # Check if display name is in columns
+            disp_name = field_map.get(std_name)
+            if disp_name and disp_name in df.columns:
+                return disp_name
+            return std_name
+
+        ts_col = get_col(StandardFieldNames.TIMESTAMP)
+        seq_id_col = get_col(StandardFieldNames.SEQUENCE_ID)
+        event_type_col = get_col(StandardFieldNames.EVENT_TYPE)
+        glucose_col = get_col(StandardFieldNames.GLUCOSE_VALUE)
+        fast_insulin_col = get_col(StandardFieldNames.FAST_ACTING_INSULIN)
+        long_insulin_col = get_col(StandardFieldNames.LONG_ACTING_INSULIN)
+        carb_col = get_col(StandardFieldNames.CARB_VALUE)
 
         date_range = {'start': 'N/A', 'end': 'N/A'}
         if ts_col in df.columns:
@@ -75,7 +89,8 @@ class StatsManager:
                 'sequence_lengths': sequence_lengths_stats,
                 'longest_sequence': sequence_lengths_stats['max'],
                 'shortest_sequence': sequence_lengths_stats['min'],
-                'sequences_by_length': sequences_by_length
+                'sequences_by_length': sequences_by_length,
+                'all_lengths': seq_lens.to_list() if not seq_lens.is_empty() else []
             },
             'gap_analysis': gap_stats,
             'interpolation_analysis': interp_stats,
@@ -209,7 +224,9 @@ class StatsManager:
                     )
             
             seq_analysis = stats.get('sequence_analysis', {})
-            if 'sequence_lengths' in stats.get('gap_analysis', {}):
+            if 'all_lengths' in seq_analysis:
+                all_sequence_lengths.extend(seq_analysis['all_lengths'])
+            elif 'sequence_lengths' in stats.get('gap_analysis', {}):
                 sequence_lengths_dict = stats['gap_analysis']['sequence_lengths']
                 all_sequence_lengths.extend(list(sequence_lengths_dict.values()))
             
@@ -279,6 +296,22 @@ class StatsManager:
                     agg_before['total_intervals'] += before_density.get('total_intervals', 0)
                     agg_after['total_points'] += after_density.get('total_points', 0)
                     agg_after['total_intervals'] += after_density.get('total_intervals', 0)
+            
+            # Aggregate data quality
+            quality = stats.get('data_quality', {})
+            if quality:
+                recs = overview.get('total_records', 0)
+                aggregated['data_quality']['glucose_data_completeness'] += quality.get('glucose_data_completeness', 0) * recs
+                aggregated['data_quality']['insulin_data_completeness'] += quality.get('insulin_data_completeness', 0) * recs
+                aggregated['data_quality']['carb_data_completeness'] += quality.get('carb_data_completeness', 0) * recs
+                aggregated['data_quality']['interpolated_records'] += quality.get('interpolated_records', 0)
+        
+        # Calculate final averages for completeness
+        total_agg_recs = aggregated['dataset_overview']['total_records']
+        if total_agg_recs > 0:
+            aggregated['data_quality']['glucose_data_completeness'] /= total_agg_recs
+            aggregated['data_quality']['insulin_data_completeness'] /= total_agg_recs
+            aggregated['data_quality']['carb_data_completeness'] /= total_agg_recs
         
         if 'fixed_frequency_analysis' in aggregated and 'data_density_before' in aggregated['fixed_frequency_analysis']:
             before_density = aggregated['fixed_frequency_analysis']['data_density_before']
@@ -331,23 +364,27 @@ def print_statistics(stats: Dict[str, Any], preprocessor_params: Optional[Dict[s
         for k, v in preprocessor_params.items():
             logger.info(f"   {k.replace('_', ' ').title()}: {v}")
     
-    overview = stats['dataset_overview']
+    overview = stats.get('dataset_overview', {})
     logger.info(f"\nDATASET OVERVIEW:")
-    logger.info(f"   Total Records: {overview['total_records']:,}")
-    logger.info(f"   Total Sequences: {overview['total_sequences']:,}")
-    logger.info(f"   Date Range: {overview['date_range']['start']} to {overview['date_range']['end']}")
+    logger.info(f"   Total Records: {overview.get('total_records', 0):,}")
+    logger.info(f"   Total Sequences: {overview.get('total_sequences', 0):,}")
     
-    original_records = overview.get('original_records', overview['total_records'])
-    final_records = overview['total_records']
+    date_range = overview.get('date_range', {})
+    logger.info(f"   Date Range: {date_range.get('start', 'N/A')} to {date_range.get('end', 'N/A')}")
+    
+    original_records = overview.get('original_records', overview.get('total_records', 0))
+    final_records = overview.get('total_records', 0)
     preservation_percentage = (final_records / original_records * 100) if original_records > 0 else 100
     logger.info(f"   Data Preservation: {preservation_percentage:.1f}% ({final_records:,}/{original_records:,} records)")
     
     seq_analysis = stats['sequence_analysis']
     logger.info(f"\nSEQUENCE ANALYSIS:")
-    logger.info(f"   Longest Sequence: {seq_analysis['longest_sequence']:,} records")
-    logger.info(f"   Shortest Sequence: {seq_analysis['shortest_sequence']:,} records")
-    logger.info(f"   Average Sequence Length: {seq_analysis['sequence_lengths']['mean']:.1f} records")
-    logger.info(f"   Median Sequence Length: {seq_analysis['sequence_lengths']['50%']:.1f} records")
+    logger.info(f"   Longest Sequence: {seq_analysis.get('longest_sequence', 0):,} records")
+    logger.info(f"   Shortest Sequence: {seq_analysis.get('shortest_sequence', 0):,} records")
+    
+    seq_lengths = seq_analysis.get('sequence_lengths', {})
+    logger.info(f"   Average Sequence Length: {seq_lengths.get('mean', 0):.1f} records")
+    logger.info(f"   Median Sequence Length: {seq_lengths.get('50%', 0):.1f} records")
     
     gap_analysis = stats.get('gap_analysis', {})
     if gap_analysis:
@@ -392,7 +429,7 @@ def print_statistics(stats: Dict[str, Any], preprocessor_params: Optional[Dict[s
             logger.info(f"      Before: {before_density.get('avg_points_per_interval', 0.0):.2f} points/interval")
             logger.info(f"      After: {after_density.get('avg_points_per_interval', 0.0):.2f} points/interval")
     
-    quality = stats['data_quality']
+    quality = stats.get('data_quality', {})
     logger.info(f"\nDATA QUALITY:")
     logger.info(f"   Glucose Data Completeness: {quality.get('glucose_data_completeness', 0):.1f}%")
     logger.info(f"   Interpolated Records: {quality.get('interpolated_records', 0):,}")

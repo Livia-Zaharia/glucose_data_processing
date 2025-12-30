@@ -315,7 +315,7 @@ def test_continuous_field_out_of_sync_with_glucose():
     
     df = pl.DataFrame({
         'timestamp': all_timestamps,
-        'Glucose Value (mg/dL)': glucose_values,
+        'glucose_value_mgdl': glucose_values,
         'Heart Rate': heart_rate_values,
         'sequence_id': [1] * len(all_timestamps),
         'Timestamp (YYYY-MM-DDThh:mm:ss)': [ts.strftime('%Y-%m-%dT%H:%M:%S') for ts in all_timestamps],
@@ -355,7 +355,7 @@ def test_continuous_field_out_of_sync_with_glucose():
     print(f"\nRows at 10:05: {len(row_10_05)}")
     if len(row_10_05) > 0:
         print(row_10_05)
-        glucose_10_05 = row_10_05['Glucose Value (mg/dL)'].to_list()
+        glucose_10_05 = row_10_05['glucose_value_mgdl'].to_list()
         heart_rate_10_05 = row_10_05['Heart Rate'].to_list()
         print(f"Glucose at 10:05: {glucose_10_05}")
         print(f"Heart Rate at 10:05: {heart_rate_10_05}")
@@ -365,7 +365,7 @@ def test_continuous_field_out_of_sync_with_glucose():
     print(f"\nRows at 10:10: {len(row_10_10)}")
     if len(row_10_10) > 0:
         print(row_10_10)
-        glucose_10_10 = row_10_10['Glucose Value (mg/dL)'].to_list()
+        glucose_10_10 = row_10_10['glucose_value_mgdl'].to_list()
         heart_rate_10_10 = row_10_10['Heart Rate'].to_list()
         print(f"Glucose at 10:10: {glucose_10_10}")
         print(f"Heart Rate at 10:10: {heart_rate_10_10}")
@@ -410,7 +410,7 @@ def test_continuous_field_out_of_sync_with_glucose():
     })
     
     field_categories_glucose_only = {
-        'continuous': ['Glucose Value (mg/dL)'],
+        'continuous': ['glucose_value_mgdl'],
         'occasional': [],
         'service': ['Event Type']
     }
@@ -552,24 +552,24 @@ def test_detect_gaps_with_continuous_fields():
     
     df = pl.DataFrame({
         'timestamp': timestamps,
-        'Glucose Value (mg/dL)': glucose_values,
-        'Heart Rate': heart_rate_values,
+        'glucose_value_mgdl': glucose_values,
+        'heart_rate': heart_rate_values,
         'sequence_id': [1] * len(timestamps),  # Will be reassigned
         'Timestamp (YYYY-MM-DDThh:mm:ss)': [ts.strftime('%Y-%m-%dT%H:%M:%S') for ts in timestamps],
         'Event Type': ['EGV'] * len(timestamps)
     })
-    
+
     field_categories = {
-        'continuous': ['Glucose Value (mg/dL)', 'Heart Rate'],
+        'continuous': ['glucose_value_mgdl', 'heart_rate'],
         'occasional': [],
         'service': ['Event Type']
     }
-    
+
     print(f"\n{'='*80}")
     print("COMPREHENSIVE TEST: Gap Detection with Out-of-Sync Continuous Fields")
     print(f"{'='*80}")
     print(f"\nInput DataFrame ({len(df)} rows):")
-    print(df.select(['timestamp', 'Glucose Value (mg/dL)', 'Heart Rate']))
+    print(df.select(['timestamp', 'glucose_value_mgdl', 'heart_rate']))
     
     # Test gap detection with continuous fields
     result, stats, _ = preprocessor.gap_detector.detect_gaps_and_sequences(df, last_sequence_id=0, field_categories_dict=field_categories)
@@ -584,48 +584,35 @@ def test_detect_gaps_with_continuous_fields():
     
     result_sorted = result.sort('timestamp')
     print(f"\nResult DataFrame sorted by timestamp:")
-    print(result_sorted.select(['timestamp', 'sequence_id', 'Glucose Value (mg/dL)', 'Heart Rate']))
+    print(result_sorted.select(['timestamp', 'sequence_id', 'glucose_value_mgdl', 'heart_rate']))
     
     # Expected gaps that should break sequences:
-    # 1. Heart Rate gap: 10:45 -> 11:20 (35 min) - LARGE, unique to Heart Rate
-    # 2. Glucose gap: 11:00 -> 11:25 (25 min) - LARGE, unique to Glucose  
-    # 3. Common gap: 12:00 -> 12:20 (20 min) - LARGE, common to both
+    # 1. Glucose gap: 11:00 -> 11:25 (25 min) - LARGE, unique to Glucose  
+    # 2. Common gap: 12:00 -> 12:20 (20 min) - LARGE, common to both
+    # NOTE: Heart Rate gap 10:45 -> 11:20 (35 min) should NOT break the sequence
     
     # Expected sequences:
-    # Sequence 1: 10:00:00 to 11:20:00 (or 11:25:00, depending on which gap is detected first)
-    # Sequence 2: 11:25:00 to 12:20:00 (or 12:00:00, depending on gap detection)
+    # Sequence 1: 10:00:00 to 11:20:00 (Heart Rate at 11:20 included in seq 1)
+    # Sequence 2: 11:25:00 to 12:00:00 
     # Sequence 3: 12:20:00 onwards
     
-    # Verify that sequences were created (should have at least 2 sequences due to large gaps)
+    # Verify that sequences were created (should have at least 2 sequences due to large glucose gaps)
     assert stats['total_sequences'] >= 2, (
-        f"Expected at least 2 sequences due to large gaps, got {stats['total_sequences']}\n"
+        f"Expected at least 2 sequences due to large glucose gaps, got {stats['total_sequences']}\n"
         f"Expected gaps:\n"
-        f"  - Heart Rate: 10:45->11:20 (35 min) - LARGE\n"
         f"  - Glucose: 11:00->11:25 (25 min) - LARGE\n"
         f"  - Common: 12:00->12:20 (20 min) - LARGE"
     )
     
-    # Verify that gaps were detected
-    assert stats['total_gaps'] >= 2, (
-        f"Expected at least 2 large gaps to be detected, got {stats['total_gaps']}\n"
-        f"Large gaps should be detected for:\n"
-        f"  - Heart Rate: 10:45->11:20 (35 min)\n"
-        f"  - Glucose: 11:00->11:25 (25 min)\n"
-        f"  - Common: 12:00->12:20 (20 min)"
-    )
+    # Verify that gaps were detected (only glucose gaps)
+    # 11:25 vs 11:00 (25 min) and 12:20 vs 12:00 (20 min)
+    assert stats['total_gaps'] >= 2
     
     # Verify sequence IDs change at gap boundaries
     seq_ids = result_sorted['sequence_id'].to_list()
     sequence_changes = [i for i in range(1, len(seq_ids)) if seq_ids[i] != seq_ids[i-1]]
     
-    assert len(sequence_changes) >= 2, (
-        f"Expected at least 2 sequence breaks, got {len(sequence_changes)}\n"
-        f"Sequence IDs: {seq_ids}\n"
-        f"Changes at indices: {sequence_changes}"
-    )
-    
     # Verify that sequence breaks occur at expected gap locations
-    # Check that 11:20:00 or 11:25:00 has a different sequence_id than 11:00:00
     idx_11_00 = None
     idx_11_20 = None
     idx_11_25 = None
@@ -644,30 +631,23 @@ def test_detect_gaps_with_continuous_fields():
         elif ts == base_time + timedelta(hours=2, minutes=20):  # 12:20:00
             idx_12_20 = i
     
-    # At least one of the large gaps should cause a sequence break
-    gaps_detected = []
+    # NEW LOGIC CHECK: Heart Rate gap at 11:20 should NOT cause a split from 11:00
     if idx_11_00 is not None and idx_11_20 is not None:
-        if seq_ids[idx_11_20] != seq_ids[idx_11_00]:
-            gaps_detected.append("Heart Rate gap at 11:20:00")
+        assert seq_ids[idx_11_20] == seq_ids[idx_11_00], \
+            f"Sequence SHOULD NOT split on Heart Rate gap at 11:20. " \
+            f"11:00 seq_id: {seq_ids[idx_11_00]}, 11:20 seq_id: {seq_ids[idx_11_20]}"
+
+    # Glucose gap at 11:25 SHOULD cause a split from 11:00
     if idx_11_00 is not None and idx_11_25 is not None:
-        if seq_ids[idx_11_25] != seq_ids[idx_11_00]:
-            gaps_detected.append("Glucose gap at 11:25:00")
+        assert seq_ids[idx_11_25] != seq_ids[idx_11_00], \
+            f"Sequence SHOULD split on Glucose gap at 11:25."
+
+    # Common gap at 12:20 SHOULD cause a split from 12:00
     if idx_12_00 is not None and idx_12_20 is not None:
-        if seq_ids[idx_12_20] != seq_ids[idx_12_00]:
-            gaps_detected.append("Common gap at 12:20:00")
-    
-    assert len(gaps_detected) >= 2, (
-        f"Expected at least 2 large gaps to cause sequence breaks, detected: {gaps_detected}\n"
-        f"Sequence IDs around gaps:\n"
-        f"  11:00:00 (idx {idx_11_00}): seq_id {seq_ids[idx_11_00] if idx_11_00 is not None else 'N/A'}\n"
-        f"  11:20:00 (idx {idx_11_20}): seq_id {seq_ids[idx_11_20] if idx_11_20 is not None else 'N/A'}\n"
-        f"  11:25:00 (idx {idx_11_25}): seq_id {seq_ids[idx_11_25] if idx_11_25 is not None else 'N/A'}\n"
-        f"  12:00:00 (idx {idx_12_00}): seq_id {seq_ids[idx_12_00] if idx_12_00 is not None else 'N/A'}\n"
-        f"  12:20:00 (idx {idx_12_20}): seq_id {seq_ids[idx_12_20] if idx_12_20 is not None else 'N/A'}"
-    )
+        assert seq_ids[idx_12_20] != seq_ids[idx_12_00], \
+            f"Sequence SHOULD split on common gap at 12:20."
     
     print(f"\n✓ Sequence breaks detected at row indices: {sequence_changes}")
-    print(f"✓ Large gaps detected: {gaps_detected}")
     print(f"✓ Total sequences: {stats['total_sequences']}")
     print(f"✓ Total gaps: {stats['total_gaps']}")
     print("\n✅ test_detect_gaps_with_continuous_fields passed")

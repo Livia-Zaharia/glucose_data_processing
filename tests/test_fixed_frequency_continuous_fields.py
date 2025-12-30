@@ -66,7 +66,7 @@ def test_multiple_continuous_fields_out_of_sync():
     
     Scenario:
     - Glucose has values at: 10:00, 10:10, 10:20
-    - Heart Rate has values at: 10:00, 10:05, 10:15, 10:20
+    - heart_rate has values at: 10:00, 10:05, 10:15, 10:20
     - After interpolation phase, all fields should have values at all timestamps
     - Fixed-frequency grid: 10:00, 10:05, 10:10, 10:15, 10:20
     
@@ -117,13 +117,13 @@ def test_multiple_continuous_fields_out_of_sync():
     assert df_fixed["glucose_value_mgdl"].null_count() == 0, \
         "Glucose should be interpolated at all fixed-frequency grid points"
     
-    # Check that Heart Rate column exists (THIS WILL FAIL - not implemented)
+    # Check that heart_rate column exists (THIS WILL FAIL - not implemented)
     assert "heart_rate" in df_fixed.columns, \
-        f"Heart Rate column should exist in fixed-frequency output. Available columns: {df_fixed.columns}"
+        f"heart_rate column should exist in fixed-frequency output. Available columns: {df_fixed.columns}"
     
-    # Check that Heart Rate is interpolated at all grid points (THIS WILL FAIL - not implemented)
+    # Check that heart_rate is interpolated at all grid points (THIS WILL FAIL - not implemented)
     assert df_fixed["heart_rate"].null_count() == 0, \
-        "Heart Rate should be interpolated at all fixed-frequency grid points"
+        "heart_rate should be interpolated at all fixed-frequency grid points"
     
     # Verify interpolation values are reasonable
     # At 10:05, glucose should be between 100 and 110
@@ -132,11 +132,11 @@ def test_multiple_continuous_fields_out_of_sync():
     assert 100.0 <= row_05["glucose_value_mgdl"][0] <= 110.0, \
         f"Glucose at 10:05 should be interpolated between 100 and 110, got {row_05['glucose_value_mgdl'][0]}"
     
-    # Heart Rate at 10:05 should be interpolated (THIS WILL FAIL)
+    # heart_rate at 10:05 should be interpolated (THIS WILL FAIL)
     assert row_05["heart_rate"][0] is not None, \
-        "Heart Rate at 10:05 should be interpolated"
+        "heart_rate at 10:05 should be interpolated"
     assert 72.0 <= row_05["heart_rate"][0] <= 78.0, \
-        f"Heart Rate at 10:05 should be interpolated between 72 and 78, got {row_05['heart_rate'][0]}"
+        f"heart_rate at 10:05 should be interpolated between 72 and 78, got {row_05['heart_rate'][0]}"
     
     print("✓ test_multiple_continuous_fields_out_of_sync passed")
 
@@ -148,7 +148,7 @@ def test_continuous_fields_with_missing_values_at_grid_points():
     Scenario:
     - Fixed grid: 10:00, 10:05, 10:10, 10:15, 10:20
     - Glucose has values at: 10:00, 10:10, 10:20 (missing at 10:05, 10:15)
-    - Heart Rate has values at: 10:00, 10:05, 10:15, 10:20 (missing at 10:10)
+    - heart_rate has values at: 10:00, 10:05, 10:15, 10:20 (missing at 10:10)
     
     Expected: Both fields should be interpolated at their missing grid points.
     """
@@ -167,7 +167,7 @@ def test_continuous_fields_with_missing_values_at_grid_points():
     
     # Glucose missing at 10:05 and 10:15
     glucose = [100.0, None, 110.0, None, 120.0]
-    # Heart Rate missing at 10:10
+    # heart_rate missing at 10:10
     heart_rate = [72.0, 75.0, None, 80.0, 82.0]
     
     df = create_test_dataframe(
@@ -188,13 +188,13 @@ def test_continuous_fields_with_missing_values_at_grid_points():
     assert df_fixed["glucose_value_mgdl"].null_count() == 0, \
         "Glucose should be interpolated at all grid points, including missing ones"
     
-    # Heart Rate column should exist (THIS WILL FAIL)
+    # heart_rate column should exist (THIS WILL FAIL)
     assert "heart_rate" in df_fixed.columns, \
-        f"Heart Rate column should exist. Available columns: {df_fixed.columns}"
+        f"heart_rate column should exist. Available columns: {df_fixed.columns}"
     
-    # Heart Rate should also be interpolated (THIS WILL FAIL)
+    # heart_rate should also be interpolated (THIS WILL FAIL)
     assert df_fixed["heart_rate"].null_count() == 0, \
-        "Heart Rate should be interpolated at all grid points, including missing ones"
+        "heart_rate should be interpolated at all grid points, including missing ones"
     
     # Verify interpolation at 10:05 (glucose was missing)
     row_05 = df_fixed.filter(pl.col('timestamp') == base_time + timedelta(minutes=5))
@@ -206,9 +206,9 @@ def test_continuous_fields_with_missing_values_at_grid_points():
     # Verify interpolation at 10:10 (heart rate was missing)
     row_10 = df_fixed.filter(pl.col('timestamp') == base_time + timedelta(minutes=10))
     assert row_10["heart_rate"][0] is not None, \
-        "Heart Rate at 10:10 should be interpolated"
+        "heart_rate at 10:10 should be interpolated"
     assert 75.0 <= row_10["heart_rate"][0] <= 80.0, \
-        f"Heart Rate at 10:10 should be between 75 and 80, got {row_10['heart_rate'][0]}"
+        f"heart_rate at 10:10 should be between 75 and 80, got {row_10['heart_rate'][0]}"
     
     print("✓ test_continuous_fields_with_missing_values_at_grid_points passed")
 
@@ -219,7 +219,7 @@ def test_three_continuous_fields_different_patterns():
     
     Scenario:
     - Glucose: values at all grid points
-    - Heart Rate: values at 10:00, 10:10, 10:20 (missing at 10:05, 10:15)
+    - heart_rate: values at 10:00, 10:10, 10:20 (missing at 10:05, 10:15)
     - Blood Pressure: values at 10:00, 10:05, 10:15, 10:20 (missing at 10:10)
     
     Expected: All three fields should be interpolated at all grid points.
@@ -259,11 +259,11 @@ def test_three_continuous_fields_different_patterns():
     assert df_fixed["glucose_value_mgdl"].null_count() == 0, \
         "Glucose should have values at all grid points"
     
-    # Check that Heart Rate column exists (THIS WILL FAIL)
+    # Check that heart_rate column exists (THIS WILL FAIL)
     assert "heart_rate" in df_fixed.columns, \
-        f"Heart Rate column should exist. Available columns: {df_fixed.columns}"
+        f"heart_rate column should exist. Available columns: {df_fixed.columns}"
     assert df_fixed["heart_rate"].null_count() == 0, \
-        "Heart Rate should be interpolated at all grid points"
+        "heart_rate should be interpolated at all grid points"
     
     # Check that Blood Pressure column exists (THIS WILL FAIL)
     assert "blood_pressure" in df_fixed.columns, \
@@ -274,9 +274,9 @@ def test_three_continuous_fields_different_patterns():
     # Verify specific interpolations
     row_05 = df_fixed.filter(pl.col('timestamp') == base_time + timedelta(minutes=5))
     assert row_05["heart_rate"][0] is not None, \
-        "Heart Rate at 10:05 should be interpolated"
+        "heart_rate at 10:05 should be interpolated"
     assert 72.0 <= row_05["heart_rate"][0] <= 78.0, \
-        f"Heart Rate at 10:05 should be between 72 and 78, got {row_05['heart_rate'][0]}"
+        f"heart_rate at 10:05 should be between 72 and 78, got {row_05['heart_rate'][0]}"
     
     row_10 = df_fixed.filter(pl.col('timestamp') == base_time + timedelta(minutes=10))
     assert row_10["blood_pressure"][0] is not None, \
@@ -294,7 +294,7 @@ def test_continuous_fields_with_irregular_timestamps():
     Scenario:
     - Input timestamps: 10:00:30, 10:05:45, 10:10:15, 10:15:30, 10:20:00
     - Fixed grid should be: 10:00, 10:05, 10:10, 10:15, 10:20 (aligned to round minutes)
-    - Glucose and Heart Rate have values at different input timestamps
+    - Glucose and heart_rate have values at different input timestamps
     
     Expected: Fixed grid created, all continuous fields interpolated at grid points.
     """
@@ -361,11 +361,11 @@ def test_continuous_fields_with_irregular_timestamps():
         assert row['glucose_value_mgdl'] is not None, \
             f"Glucose should be interpolated at {expected_ts}"
         
-        # Check Heart Rate column exists (THIS WILL FAIL)
+        # Check heart_rate column exists (THIS WILL FAIL)
         assert 'heart_rate' in df_fixed.columns, \
-            f"Heart Rate column should exist. Available columns: {df_fixed.columns}"
+            f"heart_rate column should exist. Available columns: {df_fixed.columns}"
         assert row['heart_rate'] is not None, \
-            f"Heart Rate should be interpolated at {expected_ts}"
+            f"heart_rate should be interpolated at {expected_ts}"
     
     print("✓ test_continuous_fields_with_irregular_timestamps passed")
 
@@ -409,7 +409,7 @@ def test_continuous_fields_only_glucose_in_categories():
     assert df_fixed['glucose_value_mgdl'].null_count() == 0, \
         "Glucose should be interpolated"
     
-    # Heart Rate should remain as-is (not interpolated since not in categories)
+    # heart_rate should remain as-is (not interpolated since not in categories)
     # This test verifies backward compatibility
     print("✓ test_continuous_fields_only_glucose_in_categories passed")
 
@@ -421,13 +421,13 @@ def test_occasional_fields_shifted_with_multiple_continuous_fields():
     
     Scenario:
     - Fixed grid: 10:00, 10:05, 10:10, 10:15, 10:20
-    - Glucose and Heart Rate are continuous fields (interpolated)
+    - Glucose and heart_rate are continuous fields (interpolated)
     - Insulin event at 10:01:30 (should shift to 10:00 - nearest)
     - Carb event at 10:06:45 (should shift to 10:05 - nearest)
     - Another insulin event at 10:13:20 (should shift to 10:15 - nearest)
     
     Expected: 
-    - Continuous fields (Glucose, Heart Rate) are interpolated at all grid points
+    - Continuous fields (Glucose, heart_rate) are interpolated at all grid points
     - Occasional fields (Insulin, Carbs) are shifted to nearest grid points
     """
     preprocessor = GlucoseMLPreprocessor(expected_interval_minutes=5, small_gap_max_minutes=15)
@@ -453,8 +453,8 @@ def test_occasional_fields_shifted_with_multiple_continuous_fields():
     
     df = pl.DataFrame({
         'timestamp': timestamps,
-        'Glucose Value (mg/dL)': glucose,
-        'Heart Rate': heart_rate,
+        'glucose_value_mgdl': glucose,
+        'heart_rate': heart_rate,
         'Fast-Acting Insulin Value (u)': insulin,
         'Carb Value (grams)': carbs,
         'sequence_id': [1] * len(timestamps),
@@ -463,7 +463,7 @@ def test_occasional_fields_shifted_with_multiple_continuous_fields():
     })
     
     field_categories = {
-        'continuous': ['Glucose Value (mg/dL)', 'Heart Rate'],
+        'continuous': ['glucose_value_mgdl', 'heart_rate'],
         'occasional': ['Fast-Acting Insulin Value (u)', 'Carb Value (grams)'],
         'service': ['Event Type']
     }
@@ -500,14 +500,14 @@ def test_occasional_fields_shifted_with_multiple_continuous_fields():
         f"Should have exactly 1 carb event (shifted from 1 original event). Found {len(carb_values)}"
     
     # Now check continuous fields (THIS WILL FAIL - not implemented)
-    assert df_fixed['Glucose Value (mg/dL)'].null_count() == 0, \
+    assert df_fixed['glucose_value_mgdl'].null_count() == 0, \
         "Glucose should be interpolated at all grid points"
     
-    # Check Heart Rate column exists and is interpolated (THIS WILL FAIL - not implemented)
-    assert 'Heart Rate' in df_fixed.columns, \
-        f"Heart Rate column should exist. Available columns: {df_fixed.columns}"
-    assert df_fixed['Heart Rate'].null_count() == 0, \
-        "Heart Rate should be interpolated at all grid points"
+    # Check heart_rate column exists and is interpolated (THIS WILL FAIL - not implemented)
+    assert 'heart_rate' in df_fixed.columns, \
+        f"heart_rate column should exist. Available columns: {df_fixed.columns}"
+    assert df_fixed['heart_rate'].null_count() == 0, \
+        "heart_rate should be interpolated at all grid points"
     
     print("✓ test_occasional_fields_shifted_with_multiple_continuous_fields passed")
 
@@ -521,7 +521,7 @@ def test_occasional_fields_collision_with_multiple_continuous_fields():
     - Fixed grid: 10:00, 10:05, 10:10
     - Insulin events at 10:01:30 (5u) and 10:02:45 (3u) - both shift to 10:00
     - Carb events at 10:06:15 (30g) and 10:07:30 (20g) - both shift to 10:05
-    - Glucose and Heart Rate are continuous fields
+    - Glucose and heart_rate are continuous fields
     
     Expected:
     - Continuous fields interpolated at all grid points
@@ -549,8 +549,8 @@ def test_occasional_fields_collision_with_multiple_continuous_fields():
     
     df = pl.DataFrame({
         'timestamp': timestamps,
-        'Glucose Value (mg/dL)': glucose,
-        'Heart Rate': heart_rate,
+        'glucose_value_mgdl': glucose,
+        'heart_rate': heart_rate,
         'Fast-Acting Insulin Value (u)': insulin,
         'Carb Value (grams)': carbs,
         'sequence_id': [1] * len(timestamps),
@@ -559,7 +559,7 @@ def test_occasional_fields_collision_with_multiple_continuous_fields():
     })
     
     field_categories = {
-        'continuous': ['Glucose Value (mg/dL)', 'Heart Rate'],
+        'continuous': ['glucose_value_mgdl', 'heart_rate'],
         'occasional': ['Fast-Acting Insulin Value (u)', 'Carb Value (grams)'],
         'service': ['Event Type']
     }
@@ -595,14 +595,14 @@ def test_occasional_fields_collision_with_multiple_continuous_fields():
     # Exact grid point assignment may vary based on distance calculations
     
     # Now check continuous fields (THIS WILL FAIL - not implemented)
-    assert df_fixed['Glucose Value (mg/dL)'].null_count() == 0, \
+    assert df_fixed['glucose_value_mgdl'].null_count() == 0, \
         "Glucose should be interpolated at all grid points"
     
-    # Check Heart Rate column exists (THIS WILL FAIL - not implemented)
-    assert 'Heart Rate' in df_fixed.columns, \
-        f"Heart Rate column should exist. Available columns: {df_fixed.columns}"
-    assert df_fixed['Heart Rate'].null_count() == 0, \
-        "Heart Rate should be interpolated at all grid points"
+    # Check heart_rate column exists (THIS WILL FAIL - not implemented)
+    assert 'heart_rate' in df_fixed.columns, \
+        f"heart_rate column should exist. Available columns: {df_fixed.columns}"
+    assert df_fixed['heart_rate'].null_count() == 0, \
+        "heart_rate should be interpolated at all grid points"
     
     print("✓ test_occasional_fields_collision_with_multiple_continuous_fields passed")
 
@@ -614,7 +614,7 @@ def test_mixed_continuous_and_occasional_fields_out_of_sync():
     
     Scenario:
     - Glucose has values at: 10:00, 10:10, 10:20
-    - Heart Rate has values at: 10:00, 10:05, 10:15, 10:20
+    - heart_rate has values at: 10:00, 10:05, 10:15, 10:20
     - Insulin event at 10:01:30 (should shift to 10:00)
     - Carb event at 10:06:45 (should shift to 10:05)
     
@@ -644,8 +644,8 @@ def test_mixed_continuous_and_occasional_fields_out_of_sync():
     
     df = pl.DataFrame({
         'timestamp': timestamps,
-        'Glucose Value (mg/dL)': glucose,
-        'Heart Rate': heart_rate,
+        'glucose_value_mgdl': glucose,
+        'heart_rate': heart_rate,
         'Fast-Acting Insulin Value (u)': insulin,
         'Carb Value (grams)': carbs,
         'sequence_id': [1] * len(timestamps),
@@ -654,7 +654,7 @@ def test_mixed_continuous_and_occasional_fields_out_of_sync():
     })
     
     field_categories = {
-        'continuous': ['Glucose Value (mg/dL)', 'Heart Rate'],
+        'continuous': ['glucose_value_mgdl', 'heart_rate'],
         'occasional': ['Fast-Acting Insulin Value (u)', 'Carb Value (grams)'],
         'service': ['Event Type']
     }
@@ -675,14 +675,14 @@ def test_mixed_continuous_and_occasional_fields_out_of_sync():
         f"Carb at 10:06:45 should shift to 10:05. Got {row_05['Carb Value (grams)'][0]}"
     
     # Now check continuous fields (THIS WILL FAIL - not implemented)
-    assert df_fixed['Glucose Value (mg/dL)'].null_count() == 0, \
+    assert df_fixed['glucose_value_mgdl'].null_count() == 0, \
         "Glucose should be interpolated at all grid points"
     
-    # Check Heart Rate column exists (THIS WILL FAIL - not implemented)
-    assert 'Heart Rate' in df_fixed.columns, \
-        f"Heart Rate column should exist. Available columns: {df_fixed.columns}"
-    assert df_fixed['Heart Rate'].null_count() == 0, \
-        "Heart Rate should be interpolated at all grid points"
+    # Check heart_rate column exists (THIS WILL FAIL - not implemented)
+    assert 'heart_rate' in df_fixed.columns, \
+        f"heart_rate column should exist. Available columns: {df_fixed.columns}"
+    assert df_fixed['heart_rate'].null_count() == 0, \
+        "heart_rate should be interpolated at all grid points"
     
     print("✓ test_mixed_continuous_and_occasional_fields_out_of_sync passed")
 

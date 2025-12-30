@@ -285,16 +285,20 @@ def main(
                 sm_print_statistics(statistics, params)
             else:
                 # Show summary statistics only
-                overview = statistics['dataset_overview']
-                seq_analysis = statistics['sequence_analysis']
+                overview = statistics.get('dataset_overview', {})
+                seq_analysis = statistics.get('sequence_analysis', {})
                 logger.info(f"\nSummary:")
-                logger.info(f"   Date range: {overview['date_range']['start']} to {overview['date_range']['end']}")
-                logger.info(f"   Longest sequence: {seq_analysis['longest_sequence']:,} records")
-                logger.info(f"   Average sequence: {seq_analysis['sequence_lengths']['mean']:.1f} records")
+                
+                date_range = overview.get('date_range', {})
+                logger.info(f"   Date range: {date_range.get('start', 'N/A')} to {date_range.get('end', 'N/A')}")
+                logger.info(f"   Longest sequence: {seq_analysis.get('longest_sequence', 0):,} records")
+                
+                seq_lengths = seq_analysis.get('sequence_lengths', {})
+                logger.info(f"   Average sequence: {seq_lengths.get('mean', 0.0):.1f} records")
                 
                 # Show data preservation percentage
-                original_recs = overview.get('original_records', overview['total_records'])
-                final_recs = overview['total_records']
+                original_recs = overview.get('original_records', overview.get('total_records', 0))
+                final_recs = overview.get('total_records', 0)
                 preservation_pct = (final_recs / original_recs * 100) if original_recs > 0 else 100
                 logger.info(f"   Data preserved: {preservation_pct:.1f}% ({final_recs:,}/{original_recs:,} records)")
                 

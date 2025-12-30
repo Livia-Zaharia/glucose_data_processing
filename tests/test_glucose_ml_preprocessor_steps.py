@@ -87,7 +87,7 @@ class TestGlucoseMLPreprocessorSteps:
         
         df = pl.DataFrame({
             "timestamp": timestamps,
-            "Glucose Value (mg/dL)": [100.0] * 20
+            "glucose_value_mgdl": [100.0] * 20
         })
         
         df_seq, stats, _ = preprocessor.gap_detector.detect_gaps_and_sequences(df)
@@ -106,7 +106,7 @@ class TestGlucoseMLPreprocessorSteps:
         
         df = pl.DataFrame({
             "timestamp": t1 + t2,
-            "Glucose Value (mg/dL)": [100.0] * 10
+            "glucose_value_mgdl": [100.0] * 10
         })
         
         df_seq, stats, _ = preprocessor.gap_detector.detect_gaps_and_sequences(df)
@@ -127,7 +127,7 @@ class TestGlucoseMLPreprocessorSteps:
         df = pl.DataFrame({
             "timestamp": t1 * 2,
             "user_id": ["1"] * 5 + ["2"] * 5,
-            "Glucose Value (mg/dL)": [100.0] * 10
+            "glucose_value_mgdl": [100.0] * 10
         })
         
         df_seq, stats, last_seq_id = preprocessor.gap_detector.detect_gaps_and_sequences(df)
@@ -191,7 +191,7 @@ class TestGlucoseMLPreprocessorSteps:
         
         df = pl.DataFrame({
             "timestamp": all_timestamps,
-            "Glucose Value (mg/dL)": [100.0] * len(all_timestamps)
+            "glucose_value_mgdl": [100.0] * len(all_timestamps)
         })
         
         # Expected counts
@@ -598,7 +598,7 @@ class TestGlucoseMLPreprocessorSteps:
         df = pl.DataFrame({
             "sequence_id": [0]*3 + [1]*10,  # Seq 0 len 3 (drop), Seq 1 len 10 (keep)
             "timestamp": [datetime(2023,1,1,10,0,0)]*13, # Dummy timestamps
-            "Glucose Value (mg/dL)": [100.0]*13
+            "glucose_value_mgdl": [100.0]*13
         })
         
         df_filtered, stats = preprocessor.filter_step.filter_sequences_by_length(df)
@@ -672,7 +672,7 @@ class TestGlucoseMLPreprocessorSteps:
                 datetime(2023, 1, 1, 10, 6, 0),   # Glucose reading
                 datetime(2023, 1, 1, 10, 8, 15),  # Insulin event (should go to 10:06:00 or 10:11:00)
             ],
-            "Glucose Value (mg/dL)": [100.0, None, 110.0, None],
+            "glucose_value_mgdl": [100.0, None, 110.0, None],
             "Carb Value (grams)": [None, 50.0, None, None],
             "Fast-Acting Insulin Value (u)": [None, None, None, 5.0],
         })
@@ -813,7 +813,7 @@ class TestGlucoseMLPreprocessorSteps:
         
         df = pl.DataFrame({
             "timestamp": timestamps,
-            "Glucose Value (mg/dL)": [100.0] * 10
+            "glucose_value_mgdl": [100.0] * 10
         })
         
         df_seq, stats, last_seq_id = preprocessor.gap_detector._create_sequences_for_user(df, last_sequence_id=0)
@@ -832,7 +832,7 @@ class TestGlucoseMLPreprocessorSteps:
         
         df = pl.DataFrame({
             "timestamp": timestamps,
-            "Glucose Value (mg/dL)": [100.0] * 10
+            "glucose_value_mgdl": [100.0] * 10
         })
         
         # Start from last_sequence_id = 5
@@ -853,7 +853,7 @@ class TestGlucoseMLPreprocessorSteps:
         
         df = pl.DataFrame({
             "timestamp": t1 + t2,
-            "Glucose Value (mg/dL)": [100.0] * 10
+            "glucose_value_mgdl": [100.0] * 10
         })
         
         # Start from last_sequence_id = 10
@@ -870,7 +870,7 @@ class TestGlucoseMLPreprocessorSteps:
         """Test _create_sequences_for_user() with empty DataFrame."""
         df = pl.DataFrame({
             "timestamp": [],
-            "Glucose Value (mg/dL)": []
+            "glucose_value_mgdl": []
         })
         
         df_seq, stats, last_seq_id = preprocessor.gap_detector._create_sequences_for_user(df, last_sequence_id=5)
@@ -883,7 +883,7 @@ class TestGlucoseMLPreprocessorSteps:
         """Test _create_sequences_for_user() with single row."""
         df = pl.DataFrame({
             "timestamp": [datetime(2023, 1, 1, 10, 0, 0)],
-            "Glucose Value (mg/dL)": [100.0]
+            "glucose_value_mgdl": [100.0]
         })
         
         df_seq, stats, last_seq_id = preprocessor.gap_detector._create_sequences_for_user(df, last_sequence_id=3)
@@ -901,7 +901,7 @@ class TestGlucoseMLPreprocessorSteps:
         
         df = pl.DataFrame({
             "timestamp": timestamps,
-            "Glucose Value (mg/dL)": [100.0] * 5
+            "glucose_value_mgdl": [100.0] * 5
         })
         
         # Start from very large last_sequence_id
@@ -919,7 +919,7 @@ class TestGlucoseMLPreprocessorSteps:
         
         df = pl.DataFrame({
             "timestamp": timestamps,
-            "Glucose Value (mg/dL)": [100.0] * 5
+            "glucose_value_mgdl": [100.0] * 5
         })
         
         # Pass user_id but sequence IDs should still start from last_sequence_id + 1
@@ -939,7 +939,7 @@ class TestGlucoseMLPreprocessorSteps:
         
         df = pl.DataFrame({
             "timestamp": timestamps,
-            "Glucose Value (mg/dL)": [100.0] * 10
+            "glucose_value_mgdl": [100.0] * 10
         })
         
         df_seq, stats, last_seq_id = preprocessor.gap_detector.detect_gaps_and_sequences(df, last_sequence_id=20)
@@ -961,7 +961,7 @@ class TestGlucoseMLPreprocessorSteps:
         
         df = pl.DataFrame({
             "timestamp": t1 + t2 + t3,
-            "Glucose Value (mg/dL)": [100.0] * 9
+            "glucose_value_mgdl": [100.0] * 9
         })
         
         df_seq, stats, last_seq_id = preprocessor.gap_detector.detect_gaps_and_sequences(df, last_sequence_id=15)
@@ -983,7 +983,7 @@ class TestGlucoseMLPreprocessorSteps:
         df = pl.DataFrame({
             "timestamp": t1 + t2,
             "user_id": ["1"] * 5 + ["2"] * 5,
-            "Glucose Value (mg/dL)": [100.0] * 10
+            "glucose_value_mgdl": [100.0] * 10
         })
         
         df_seq, stats, last_seq_id = preprocessor.gap_detector.detect_gaps_and_sequences(df, last_sequence_id=50)
@@ -1008,7 +1008,7 @@ class TestGlucoseMLPreprocessorSteps:
         df = pl.DataFrame({
             "timestamp": t1a + t1b + t2a + t2b,
             "user_id": ["1"] * 6 + ["2"] * 6,
-            "Glucose Value (mg/dL)": [100.0] * 12
+            "glucose_value_mgdl": [100.0] * 12
         })
         
         df_seq, stats, last_seq_id = preprocessor.gap_detector.detect_gaps_and_sequences(df, last_sequence_id=100)
@@ -1024,7 +1024,7 @@ class TestGlucoseMLPreprocessorSteps:
         """Test detect_gaps_and_sequences() with empty DataFrame."""
         df = pl.DataFrame({
             "timestamp": [],
-            "Glucose Value (mg/dL)": []
+            "glucose_value_mgdl": []
         })
         
         df_seq, stats, last_seq_id = preprocessor.gap_detector.detect_gaps_and_sequences(df, last_sequence_id=10)
@@ -1041,7 +1041,7 @@ class TestGlucoseMLPreprocessorSteps:
         
         df = pl.DataFrame({
             "timestamp": timestamps,
-            "Glucose Value (mg/dL)": [100.0] * 5
+            "glucose_value_mgdl": [100.0] * 5
         })
         
         df_seq, stats, last_seq_id = preprocessor.gap_detector.detect_gaps_and_sequences(df)
@@ -1058,7 +1058,7 @@ class TestGlucoseMLPreprocessorSteps:
         
         df1 = pl.DataFrame({
             "timestamp": t1 + t2,
-            "Glucose Value (mg/dL)": [100.0] * 6
+            "glucose_value_mgdl": [100.0] * 6
         })
         
         df_seq1, stats1, last_seq_id1 = preprocessor.gap_detector.detect_gaps_and_sequences(df1, last_sequence_id=0)
@@ -1071,7 +1071,7 @@ class TestGlucoseMLPreprocessorSteps:
         
         df2 = pl.DataFrame({
             "timestamp": t3 + t4,
-            "Glucose Value (mg/dL)": [100.0] * 6
+            "glucose_value_mgdl": [100.0] * 6
         })
         
         df_seq2, stats2, last_seq_id2 = preprocessor.gap_detector.detect_gaps_and_sequences(df2, last_sequence_id=last_seq_id1)
@@ -1104,7 +1104,7 @@ class TestGlucoseMLPreprocessorSteps:
         
         df = pl.DataFrame({
             "timestamp": all_timestamps,
-            "Glucose Value (mg/dL)": [100.0] * len(all_timestamps)
+            "glucose_value_mgdl": [100.0] * len(all_timestamps)
         })
         
         df_seq, stats, last_seq_id = preprocessor.gap_detector.detect_gaps_and_sequences(df, last_sequence_id=25)
@@ -1121,7 +1121,7 @@ class TestGlucoseMLPreprocessorSteps:
         """Test detect_gaps_and_sequences() with single data point."""
         df = pl.DataFrame({
             "timestamp": [datetime(2023, 1, 1, 10, 0, 0)],
-            "Glucose Value (mg/dL)": [100.0]
+            "glucose_value_mgdl": [100.0]
         })
         
         df_seq, stats, last_seq_id = preprocessor.gap_detector.detect_gaps_and_sequences(df, last_sequence_id=99)
@@ -1139,7 +1139,7 @@ class TestGlucoseMLPreprocessorSteps:
         df = pl.DataFrame({
             "timestamp": t1,
             "user_id": ["1"] * 5,
-            "Glucose Value (mg/dL)": [100.0] * 5
+            "glucose_value_mgdl": [100.0] * 5
         })
         
         # Note: We can't easily test empty user in same DataFrame, but we can test

@@ -256,6 +256,9 @@ class GlucoseMLPreprocessor:
         min_ts: Optional[str] = None
         max_ts: Optional[str] = None
         
+        # Stats accumulation
+        all_user_stats: List[Dict[str, Any]] = []
+        
         ts_col = StandardFieldNames.TIMESTAMP
         seq_id_col = StandardFieldNames.SEQUENCE_ID
 
@@ -273,14 +276,15 @@ class GlucoseMLPreprocessor:
                     frame = frame.with_columns([pl.lit(None).alias(c) for c in missing])
                 frame = frame.select([c for c in expected_cols if c in frame.columns])
                 total_records += len(frame)
-                if seq_id_col in frame.columns:
-                    total_sequences += int(frame[seq_id_col].n_unique())
                 self._write_csv_append(frame, output_file=output_file, include_header=not wrote_header)
                 wrote_header = True
 
         for user_df in iter_fn(data_folder, interval_minutes=self.expected_interval_minutes):
             if len(user_df) == 0:
                 continue
+            
+            # Use original count for preservation stats
+            self.stats_manager.original_record_count = len(user_df)
             original_records += len(user_df)
 
             try:
@@ -295,21 +299,30 @@ class GlucoseMLPreprocessor:
             except (KeyError, AttributeError, ValueError):
                 pass
 
-            df, _gap_stats, current_last_sequence_id = self.gap_detector.detect_gaps_and_sequences(
+            df, gap_stats, current_last_sequence_id = self.gap_detector.detect_gaps_and_sequences(
                 user_df, current_last_sequence_id, field_categories_dict
             )
-            df, _ = self.interpolator.interpolate_missing_values(df, field_categories_dict)
+            df, interp_stats = self.interpolator.interpolate_missing_values(df, field_categories_dict)
             
             # Update filter step with current facade state for tests
             self.filter_step.min_sequence_len = self.min_sequence_len
             self.filter_step.glucose_only = self.glucose_only
             
-            df, _ = self.filter_step.filter_sequences_by_length(df)
+            df, filter_stats = self.filter_step.filter_sequences_by_length(df)
             if self.create_fixed_frequency:
-                df, _ = self.fixed_freq_generator.create_fixed_frequency_data(df, field_categories_dict)
+                df, fixed_freq_stats = self.fixed_freq_generator.create_fixed_frequency_data(df, field_categories_dict)
+            else:
+                fixed_freq_stats = {}
             
-            df, _ = self.filter_step.filter_glucose_only(df)
+            df, glucose_filter_stats = self.filter_step.filter_glucose_only(df)
             ml_df = self.ml_preparer.prepare_ml_data(df, field_categories_dict)
+
+            # Collect stats for this user
+            user_stats = self.stats_manager.get_statistics(
+                ml_df, gap_stats, interp_stats, filter_stats, glucose_filter_stats, fixed_freq_stats
+            )
+            all_user_stats.append(user_stats)
+            total_sequences += user_stats['dataset_overview']['total_sequences']
 
             missing = [c for c in expected_cols if c not in ml_df.columns]
             if missing:
@@ -325,28 +338,18 @@ class GlucoseMLPreprocessor:
 
         flush()
 
-        stats = {
-            "dataset_overview": {
-                "total_records": total_records,
-                "total_sequences": total_sequences,
-                "date_range": {"start": min_ts or "N/A", "end": max_ts or "N/A"},
-                "original_records": original_records,
-            },
-            "sequence_analysis": {
-                "sequence_lengths": {"count": total_sequences, "mean": 0, "std": 0, "min": 0, "25%": 0, "50%": 0, "75%": 0, "max": 0},
-                "longest_sequence": 0,
-                "shortest_sequence": 0,
-                "sequences_by_length": {},
-            },
-            "gap_analysis": {},
-            "interpolation_analysis": {},
-            "calibration_removal_analysis": {},
-            "filtering_analysis": {},
-            "replacement_analysis": {},
-            "fixed_frequency_analysis": {},
-            "glucose_filtering_analysis": {},
-            "data_quality": {},
-        }
+        # Use StatsManager to aggregate all collected user statistics
+        if all_user_stats:
+            stats = self.stats_manager.aggregate_statistics(all_user_stats, ["Streaming Chunk"] * len(all_user_stats))
+            # Update with overall counts and dates
+            stats['dataset_overview']['total_records'] = total_records
+            stats['dataset_overview']['original_records'] = original_records
+            stats['dataset_overview']['date_range'] = {"start": min_ts or "N/A", "end": max_ts or "N/A"}
+        else:
+            stats = self.stats_manager.get_statistics(
+                pl.DataFrame({seq_id_col: pl.Series([], dtype=pl.Int64)}),
+                {}, {}, {}, {}, {}
+            )
 
         placeholder = pl.DataFrame({seq_id_col: pl.Series([], dtype=pl.Int64)})
         return placeholder, stats, current_last_sequence_id
@@ -368,6 +371,32 @@ class GlucoseMLPreprocessor:
         self._original_record_count = len(df)
         self.stats_manager.original_record_count = len(df)
         return df
+
+    def detect_gaps_and_sequences(self, df: pl.DataFrame, last_sequence_id: int = 0, field_categories_dict: Optional[Dict[str, Any]] = None) -> Tuple[pl.DataFrame, Dict[str, Any], int]:
+        """Wrapper for GapDetector.detect_gaps_and_sequences."""
+        return self.gap_detector.detect_gaps_and_sequences(df, last_sequence_id, field_categories_dict)
+
+    def interpolate_missing_values(self, df: pl.DataFrame, field_categories_dict: Optional[Dict[str, Any]] = None) -> Tuple[pl.DataFrame, Dict[str, Any]]:
+        """Wrapper for ValueInterpolator.interpolate_missing_values."""
+        return self.interpolator.interpolate_missing_values(df, field_categories_dict)
+
+    def filter_sequences_by_length(self, df: pl.DataFrame) -> Tuple[pl.DataFrame, Dict[str, Any]]:
+        """Wrapper for SequenceFilter.filter_sequences_by_length."""
+        return self.filter_step.filter_sequences_by_length(df)
+
+    def create_fixed_frequency_data(self, df: pl.DataFrame, field_categories_dict: Optional[Dict[str, Any]] = None) -> Tuple[pl.DataFrame, Dict[str, Any]]:
+        """Wrapper for FixedFreqGenerator.create_fixed_frequency_data."""
+        return self.fixed_freq_generator.create_fixed_frequency_data(df, field_categories_dict)
+
+    def filter_glucose_only(self, df: pl.DataFrame) -> Tuple[pl.DataFrame, Dict[str, Any]]:
+        """Wrapper for SequenceFilter.filter_glucose_only."""
+        return self.filter_step.filter_glucose_only(df)
+
+    def prepare_ml_data(self, df: pl.DataFrame, field_categories_dict: Optional[Dict[str, Any]] = None) -> pl.DataFrame:
+        """Wrapper for MLDataPreparer.prepare_ml_data."""
+        if field_categories_dict is None:
+            field_categories_dict = self._field_categories_dict
+        return self.ml_preparer.prepare_ml_data(df, field_categories_dict)
 
     def process(self, csv_folder: Path, output_file: Optional[Path] = None, last_sequence_id: int = 0) -> Tuple[pl.DataFrame, Dict[str, Any], int]:
         logger.info("Starting glucose data preprocessing for ML...")
@@ -454,8 +483,12 @@ class GlucoseMLPreprocessor:
             buffered_users = 0
             total_records = 0
             total_sequences = 0
+            original_records = 0
             min_ts: Optional[str] = None
             max_ts: Optional[str] = None
+            
+            # Stats accumulation
+            all_processing_stats: List[Dict[str, Any]] = []
 
             def flush() -> None:
                 nonlocal wrote_header, buffered, buffered_bytes, buffered_users, total_records, total_sequences
@@ -471,8 +504,6 @@ class GlucoseMLPreprocessor:
                         frame = frame.with_columns([pl.lit(None).alias(c) for c in missing])
                     frame = frame.select([c for c in expected_cols if c in frame.columns])
                     total_records += len(frame)
-                    if seq_id_col in frame.columns:
-                        total_sequences += int(frame[seq_id_col].n_unique())
                     self._write_csv_append(frame, output_file=output_file, include_header=not wrote_header)
                     wrote_header = True
 
@@ -482,6 +513,10 @@ class GlucoseMLPreprocessor:
                     for user_df in converter.iter_user_event_frames(csv_folder, interval_minutes=self.expected_interval_minutes):
                         if len(user_df) == 0:
                             continue
+                        
+                        self.stats_manager.original_record_count = len(user_df)
+                        original_records += len(user_df)
+                        
                         try:
                             umin = user_df[ts_col].min()
                             umax = user_df[ts_col].max()
@@ -493,17 +528,28 @@ class GlucoseMLPreprocessor:
                                 max_ts = s if (max_ts is None or s > max_ts) else max_ts
                         except (KeyError, AttributeError, ValueError):
                             pass
-                        df, _gap_stats, current_last_sequence_id = self.gap_detector.detect_gaps_and_sequences(
+                        df, gap_stats, current_last_sequence_id = self.gap_detector.detect_gaps_and_sequences(
                             user_df, current_last_sequence_id, field_categories_dict
                         )
-                        df, _ = self.interpolator.interpolate_missing_values(df, field_categories_dict)
+                        df, interp_stats = self.interpolator.interpolate_missing_values(df, field_categories_dict)
                         self.filter_step.min_sequence_len = self.min_sequence_len
-                        df, _ = self.filter_step.filter_sequences_by_length(df)
+                        df, filter_stats = self.filter_step.filter_sequences_by_length(df)
                         if self.create_fixed_frequency:
-                            df, _ = self.fixed_freq_generator.create_fixed_frequency_data(df, field_categories_dict)
+                            df, fixed_freq_stats = self.fixed_freq_generator.create_fixed_frequency_data(df, field_categories_dict)
+                        else:
+                            fixed_freq_stats = {}
+                        
                         self.filter_step.glucose_only = self.glucose_only
-                        df, _ = self.filter_step.filter_glucose_only(df)
+                        df, glucose_filter_stats = self.filter_step.filter_glucose_only(df)
                         ml_df = self.ml_preparer.prepare_ml_data(df, field_categories_dict)
+                        
+                        # Collect stats for this user
+                        user_stats = self.stats_manager.get_statistics(
+                            ml_df, gap_stats, interp_stats, filter_stats, glucose_filter_stats, fixed_freq_stats
+                        )
+                        all_processing_stats.append(user_stats)
+                        total_sequences += user_stats['dataset_overview']['total_sequences']
+
                         missing = [c for c in expected_cols if c not in ml_df.columns]
                         if missing:
                             ml_df = ml_df.with_columns([pl.lit(None).alias(c) for c in missing])
@@ -515,6 +561,10 @@ class GlucoseMLPreprocessor:
                             flush()
                 else:
                     ml_df, stats, current_last_sequence_id = self.process(csv_folder, output_file=None, last_sequence_id=current_last_sequence_id)
+                    all_processing_stats.append(stats)
+                    total_sequences += stats['dataset_overview']['total_sequences']
+                    original_records += stats['dataset_overview'].get('original_records', 0)
+                    
                     missing = [c for c in expected_cols if c not in ml_df.columns]
                     if missing:
                         ml_df = ml_df.with_columns([pl.lit(None).alias(c) for c in missing])
@@ -525,18 +575,20 @@ class GlucoseMLPreprocessor:
                     if buffered_bytes >= max_bytes or buffered_users >= max_users:
                         flush()
             flush()
-            aggregated_stats = {
-                "dataset_overview": {
-                    "total_records": total_records,
-                    "total_sequences": total_sequences,
-                    "date_range": {"start": min_ts or "N/A", "end": max_ts or "N/A"},
-                    "original_records": total_records,
-                },
-                "sequence_analysis": {"sequence_lengths": {"count": total_sequences}, "longest_sequence": 0, "shortest_sequence": 0},
-                "gap_analysis": {}, "interpolation_analysis": {}, "calibration_removal_analysis": {},
-                "filtering_analysis": {}, "replacement_analysis": {}, "fixed_frequency_analysis": {},
-                "glucose_filtering_analysis": {}, "data_quality": {},
-            }
+            
+            if all_processing_stats:
+                aggregated_stats = self.stats_manager.aggregate_statistics(
+                    all_processing_stats, ["Streaming Folder"] * len(all_processing_stats)
+                )
+                aggregated_stats['dataset_overview']['total_records'] = total_records
+                aggregated_stats['dataset_overview']['original_records'] = original_records
+                aggregated_stats['dataset_overview']['date_range'] = {"start": min_ts or "N/A", "end": max_ts or "N/A"}
+            else:
+                aggregated_stats = self.stats_manager.get_statistics(
+                    pl.DataFrame({seq_id_col: pl.Series([], dtype=pl.Int64)}),
+                    {}, {}, {}, {}, {}
+                )
+            
             placeholder = pl.DataFrame({seq_id_col: pl.Series([], dtype=pl.Int64)})
             return placeholder, aggregated_stats, current_last_sequence_id
 
