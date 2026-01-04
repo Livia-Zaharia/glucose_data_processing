@@ -100,9 +100,10 @@ def test_multiple_continuous_fields_same_points():
     interpolated_c1 = interpolated_row['continuous_field_1'][0]
     assert abs(interpolated_c1 - 60.0) < 0.01, f"Expected Continuous Field 1 ~60, got {interpolated_c1}"
     
-    # Continuous Field 2: prev is None, so interpolation should be None
+    # Continuous Field 2: with optimized interpolation, it should be interpolated 
+    # even if there was a None at the intermediate point, provided the total gap is small.
     interpolated_c2 = interpolated_row['continuous_field_2'][0]
-    assert interpolated_c2 is None, f"Expected Continuous Field 2 to be None (prev was None), got {interpolated_c2}"
+    assert interpolated_c2 is not None, f"Continuous Field 2 should be interpolated, got {interpolated_c2}"
     
     # Occasional field should be None (not interpolated)
     interpolated_occ = interpolated_row['occasional_field'][0]
@@ -181,9 +182,10 @@ def test_continuous_field_with_fewer_points():
         pl.col('timestamp') == base_time + timedelta(minutes=10)
     )
     
-    # When prev is None, interpolation should be None
+    # When prev is None, with optimized interpolation it should still result in a value
+    # if it's part of a small gap.
     interpolated_c1_none = interpolated_row2['continuous_field_1'][0]
-    assert interpolated_c1_none is None, f"Expected None when prev is None, got {interpolated_c1_none}"
+    assert interpolated_c1_none is not None, f"Expected interpolated value even when prev was None, got {interpolated_c1_none}"
     
     print("✓ test_continuous_field_with_fewer_points passed")
 

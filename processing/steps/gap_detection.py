@@ -140,15 +140,19 @@ class GapDetector:
             # We split only if GLUCOSE has a gap > small_gap_max_seconds
             is_gap_glucose = pl.lit(False)
             if glucose_col in res_df.columns:
-                # Find gaps in glucose field specifically
-                non_null_glucose = res_df.filter(pl.col(glucose_col).is_not_null()).sort(ts_col)
-                if len(non_null_glucose) > 1:
-                    glucose_gap_ts = non_null_glucose.with_columns(
-                        pl.col(ts_col).diff().dt.total_seconds().alias('g_diff')
-                    ).filter(pl.col('g_diff') > self.small_gap_max_seconds)[ts_col].to_list()
-                    
-                    if glucose_gap_ts:
-                        is_gap_glucose = pl.col(ts_col).is_in(glucose_gap_ts)
+                # Optimized vectorized glucose gap detection
+                # 1. Get timestamps of non-null glucose
+                ts_at_glucose = pl.when(pl.col(glucose_col).is_not_null()).then(pl.col(ts_col)).otherwise(None)
+                
+                # 2. Forward fill to get the timestamp of the last non-null glucose
+                # We shift by 1 to compare with the PREVIOUS non-null glucose
+                prev_glucose_ts = ts_at_glucose.shift(1).forward_fill()
+                
+                # 3. Mark the current row if it's non-null AND the gap to the last non-null is too large
+                is_gap_glucose = (
+                    pl.col(glucose_col).is_not_null() & 
+                    ((pl.col(ts_col) - prev_glucose_ts).dt.total_seconds() > self.small_gap_max_seconds)
+                ).fill_null(False)
             
             # Combine: split ONLY if glucose gap > small_gap_max_seconds
             # We ignore generic time gaps or gaps in other fields to avoid fragmentation.

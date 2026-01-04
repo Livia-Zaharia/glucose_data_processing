@@ -11,7 +11,7 @@ This script processes glucose monitoring data for ML training by:
 """
 
 import polars as pl
-from typing import Tuple, Dict, Any, List, Optional
+from typing import Tuple, Dict, Any, List, Optional, Iterable
 from datetime import datetime
 from pathlib import Path
 from loguru import logger
@@ -19,6 +19,8 @@ import warnings
 import yaml
 import sys
 import json
+import concurrent.futures
+import os
 
 # Import database detection and conversion classes
 from formats import DatabaseDetector
@@ -40,6 +42,71 @@ warnings.filterwarnings('ignore')
 DEFAULT_STREAMING_MAX_BUFFER_MB = 256
 DEFAULT_STREAMING_FLUSH_MAX_USERS = 10
 MIN_BUFFER_MB = 32
+
+def _init_worker_process(params: Dict[str, Any]) -> None:
+    """Initialize worker process: configure logging and shared state."""
+    verbose = params.get('verbose', False)
+    config = params.get('config')
+    
+    # Configure loguru to show only the message, matching the CLI behavior
+    logger.remove()
+    if verbose:
+        logger.add(sys.stdout, format="{message}")
+    
+    if config:
+        CSVFormatConverter.initialize_from_config(config)
+
+def _process_user_frame_task(
+    user_df: pl.DataFrame,
+    params: Dict[str, Any],
+    field_categories_dict: Optional[Dict[str, Any]],
+    expected_cols: List[str]
+) -> Tuple[pl.DataFrame, Dict[str, Any], int]:
+    """
+    Standalone task for processing a single user's data in a worker process.
+    """
+    # Initialize components
+    gap_detector = GapDetector(
+        small_gap_max_minutes=params['small_gap_max_minutes'],
+        calibration_period_minutes=params['calibration_period_minutes'],
+        remove_after_calibration_hours=params['remove_after_calibration_hours']
+    )
+    interpolator = ValueInterpolator(
+        expected_interval_minutes=params['expected_interval_minutes'],
+        small_gap_max_minutes=params['small_gap_max_minutes']
+    )
+    filter_step = SequenceFilter(
+        min_sequence_len=params['min_sequence_len'],
+        glucose_only=params['glucose_only']
+    )
+    fixed_freq_generator = FixedFreqGenerator(
+        expected_interval_minutes=params['expected_interval_minutes']
+    )
+    ml_preparer = MLDataPreparer(config=params.get('config', {}))
+    stats_manager = StatsManager()
+
+    # Process
+    # Start with sequence ID 0 for local count
+    df, gap_stats, user_max_id = gap_detector.detect_gaps_and_sequences(user_df, 0, field_categories_dict)
+    df, interp_stats = interpolator.interpolate_missing_values(df, field_categories_dict)
+    df, filter_stats = filter_step.filter_sequences_by_length(df)
+    
+    if params['create_fixed_frequency']:
+        df, fixed_freq_stats = fixed_freq_generator.create_fixed_frequency_data(df, field_categories_dict)
+    else:
+        fixed_freq_stats = {}
+    
+    df, glucose_filter_stats = filter_step.filter_glucose_only(df)
+    ml_df = ml_preparer.prepare_ml_data(df, field_categories_dict)
+    
+    # Collect stats
+    user_stats = stats_manager.get_statistics(
+        ml_df, gap_stats, interp_stats, filter_stats, glucose_filter_stats, fixed_freq_stats
+    )
+    
+    # We return the max sequence ID from gap detection to maintain parity with sequential processing
+    # where sequence IDs increment even for filtered out sequences.
+    return ml_df, user_stats, user_max_id
 
 class GlucoseMLPreprocessor:
     """
@@ -73,6 +140,7 @@ class GlucoseMLPreprocessor:
             low_glucose_value=cli_overrides.get('low_glucose_value', low_value),
             glucose_only=cli_overrides.get('glucose_only', config.get('glucose_only', False)),
             create_fixed_frequency=cli_overrides.get('create_fixed_frequency', config.get('create_fixed_frequency', True)),
+            verbose=cli_overrides.get('verbose', False),
             config=config,
             first_n_users=cli_overrides.get('first_n_users', config.get('first_n_users', None))
         )
@@ -90,6 +158,7 @@ class GlucoseMLPreprocessor:
         low_glucose_value: int = 39,
         glucose_only: bool = False,
         create_fixed_frequency: bool = True,
+        verbose: bool = False,
         config: Optional[Dict[str, Any]] = None,
         first_n_users: Optional[int] = None,
     ) -> None:
@@ -104,6 +173,7 @@ class GlucoseMLPreprocessor:
         self.low_glucose_value = low_glucose_value
         self.glucose_only = glucose_only
         self.create_fixed_frequency = create_fixed_frequency
+        self.verbose = verbose
         self.config = config if config is not None else {}
         if first_n_users is not None:
             self.config['first_n_users'] = first_n_users
@@ -258,12 +328,27 @@ class GlucoseMLPreprocessor:
         
         # Stats accumulation
         all_user_stats: List[Dict[str, Any]] = []
+        total_users_processed = 0
         
         ts_col = StandardFieldNames.TIMESTAMP
         seq_id_col = StandardFieldNames.SEQUENCE_ID
 
+        params = {
+            'expected_interval_minutes': self.expected_interval_minutes,
+            'small_gap_max_minutes': self.small_gap_max_minutes,
+            'remove_calibration': self.remove_calibration,
+            'min_sequence_len': self.min_sequence_len,
+            'calibration_period_minutes': self.calibration_period_minutes,
+            'remove_after_calibration_hours': self.remove_after_calibration_hours,
+            'glucose_only': self.glucose_only,
+            'create_fixed_frequency': self.create_fixed_frequency,
+            'output_fields': output_fields,
+            'config': self.config,
+            'verbose': self.verbose
+        }
+
         def flush() -> None:
-            nonlocal wrote_header, buffered, buffered_bytes, buffered_users, total_records, total_sequences
+            nonlocal wrote_header, buffered, buffered_bytes, buffered_users, total_records
             if not buffered:
                 return
             frames = buffered
@@ -271,70 +356,92 @@ class GlucoseMLPreprocessor:
             buffered_bytes = 0
             buffered_users = 0
             for frame in frames:
-                missing = [c for c in expected_cols if c not in frame.columns]
-                if missing:
-                    frame = frame.with_columns([pl.lit(None).alias(c) for c in missing])
-                frame = frame.select([c for c in expected_cols if c in frame.columns])
                 total_records += len(frame)
                 self._write_csv_append(frame, output_file=output_file, include_header=not wrote_header)
                 wrote_header = True
 
-        for user_df in iter_fn(data_folder, interval_minutes=self.expected_interval_minutes):
-            if len(user_df) == 0:
-                continue
+        def handle_result(result: Tuple[pl.DataFrame, Dict[str, Any], int]) -> None:
+            nonlocal current_last_sequence_id, total_sequences, original_records, min_ts, max_ts, buffered_bytes, buffered_users, total_users_processed
+            ml_df, user_stats, user_max_id = result
             
-            # Use original count for preservation stats
-            self.stats_manager.original_record_count = len(user_df)
-            original_records += len(user_df)
-
-            try:
-                umin = user_df[ts_col].min()
-                umax = user_df[ts_col].max()
-                if umin is not None:
-                    s = umin.strftime("%Y-%m-%dT%H:%M:%S")
-                    min_ts = s if (min_ts is None or s < min_ts) else min_ts
-                if umax is not None:
-                    s = umax.strftime("%Y-%m-%dT%H:%M:%S")
-                    max_ts = s if (max_ts is None or s > max_ts) else max_ts
-            except (KeyError, AttributeError, ValueError):
-                pass
-
-            df, gap_stats, current_last_sequence_id = self.gap_detector.detect_gaps_and_sequences(
-                user_df, current_last_sequence_id, field_categories_dict
-            )
-            df, interp_stats = self.interpolator.interpolate_missing_values(df, field_categories_dict)
+            total_users_processed += 1
+            # Log progress every 5 users
+            if total_users_processed % 5 == 0:
+                logger.info(f"   Processed {total_users_processed} users...")
             
-            # Update filter step with current facade state for tests
-            self.filter_step.min_sequence_len = self.min_sequence_len
-            self.filter_step.glucose_only = self.glucose_only
-            
-            df, filter_stats = self.filter_step.filter_sequences_by_length(df)
-            if self.create_fixed_frequency:
-                df, fixed_freq_stats = self.fixed_freq_generator.create_fixed_frequency_data(df, field_categories_dict)
-            else:
-                fixed_freq_stats = {}
-            
-            df, glucose_filter_stats = self.filter_step.filter_glucose_only(df)
-            ml_df = self.ml_preparer.prepare_ml_data(df, field_categories_dict)
-
-            # Collect stats for this user
-            user_stats = self.stats_manager.get_statistics(
-                ml_df, gap_stats, interp_stats, filter_stats, glucose_filter_stats, fixed_freq_stats
-            )
-            all_user_stats.append(user_stats)
-            total_sequences += user_stats['dataset_overview']['total_sequences']
-
+            # Align columns to expected_cols
             missing = [c for c in expected_cols if c not in ml_df.columns]
             if missing:
                 ml_df = ml_df.with_columns([pl.lit(None).alias(c) for c in missing])
-            ml_df = ml_df.select([c for c in expected_cols if c in ml_df.columns])
-
+            
+            # Ensure correct order and only expected columns
+            ml_df = ml_df.select(expected_cols)
+            
+            # Remap sequence IDs
+            # Use user_max_id for remapping logic even if ml_df is empty or sequences were filtered
+            if len(ml_df) > 0 and seq_id_col in ml_df.columns:
+                ml_df = ml_df.with_columns([
+                    pl.when(pl.col(seq_id_col) > 0)
+                    .then(pl.col(seq_id_col) + current_last_sequence_id)
+                    .otherwise(pl.col(seq_id_col))
+                    .alias(seq_id_col)
+                ])
+            
+            current_last_sequence_id += user_max_id
+            total_sequences += user_stats['dataset_overview']['total_sequences']
+            
+            all_user_stats.append(user_stats)
+            original_records += user_stats['dataset_overview'].get('original_records', 0)
+            
+            # Update date range
+            try:
+                umin = user_stats['dataset_overview']['date_range'].get('start')
+                umax = user_stats['dataset_overview']['date_range'].get('end')
+                if umin and umin != "N/A":
+                    min_ts = umin if (min_ts is None or umin < min_ts) else min_ts
+                if umax and umax != "N/A":
+                    max_ts = umax if (max_ts is None or umax > max_ts) else max_ts
+            except (KeyError, AttributeError):
+                pass
+            
             buffered.append(ml_df)
             buffered_bytes += self._df_estimated_size_bytes(ml_df)
             buffered_users += 1
-
+            
             if buffered_bytes >= max_bytes or buffered_users >= max_users:
                 flush()
+
+        # Use ProcessPoolExecutor for parallel processing of users
+        max_workers = os.cpu_count() or 1
+        with concurrent.futures.ProcessPoolExecutor(
+            max_workers=max_workers,
+            initializer=_init_worker_process,
+            initargs=(params,)
+        ) as executor:
+            # We use a sliding window of futures to avoid memory issues with thousands of users
+            max_active_tasks = max_workers * 2
+            futures = []
+            
+            for user_df in iter_fn(data_folder, interval_minutes=self.expected_interval_minutes):
+                if len(user_df) == 0:
+                    continue
+                
+                # Submit new task
+                futures.append(executor.submit(
+                    _process_user_frame_task, 
+                    user_df, 
+                    params, 
+                    field_categories_dict, 
+                    expected_cols
+                ))
+                
+                # If we reached the window size, wait for tasks in order to maintain sequence ID stability
+                if len(futures) >= max_active_tasks:
+                    handle_result(futures.pop(0).result())
+            
+            # Finalize remaining tasks
+            while futures:
+                handle_result(futures.pop(0).result())
 
         flush()
 

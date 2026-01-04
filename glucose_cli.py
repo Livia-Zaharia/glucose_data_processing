@@ -190,7 +190,8 @@ def main(
             'remove_after_calibration_hours': remove_after_calibration_hours,
             'glucose_only': glucose_only,
             'create_fixed_frequency': create_fixed_frequency,
-            'first_n_users': first_n_users if first_n_users and first_n_users > 0 else None
+            'first_n_users': first_n_users if first_n_users and first_n_users > 0 else None,
+            'verbose': verbose
         }
 
         # Create preprocessor

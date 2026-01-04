@@ -38,8 +38,10 @@ class SequenceFilter:
             logger.info("Warning: No sequences meet the minimum length requirement!")
             return df.clear(), filtering_stats
         
-        valid_sequence_ids = sequences_to_keep[seq_id_col].to_list()
-        filtered_df = df.filter(pl.col(seq_id_col).is_in(valid_sequence_ids))
+        # Optimized: Use window function for filtering instead of to_list() and is_in()
+        filtered_df = df.with_columns(
+            pl.col(seq_id_col).count().over(seq_id_col).alias("_seq_len")
+        ).filter(pl.col("_seq_len") >= self.min_sequence_len).drop("_seq_len")
         
         filtering_stats['filtered_records'] = len(filtered_df)
         filtering_stats['removed_records'] = len(df) - len(filtered_df)

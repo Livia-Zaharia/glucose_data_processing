@@ -77,85 +77,45 @@ class ValueInterpolator:
         per_field_interpolations = {field: 0 for field in fields_to_interpolate}
         
         # Step 1: For each continuous field, fill missing values at existing timestamps
+        # This fills nulls in continuous fields where other modalities might have data
         for field in fields_to_interpolate:
-            sequences = df[seq_id_col].unique().to_list()
+            # We use vectorized interpolation restricted by gap size
+            ts_at_non_null = pl.when(pl.col(field).is_not_null()).then(pl.col(ts_col)).otherwise(None)
             
-            for seq_id in sequences:
-                seq_mask = pl.col(seq_id_col) == seq_id
-                seq_df = df.filter(seq_mask).sort(ts_col)
-                
-                non_null_rows = seq_df.filter(pl.col(field).is_not_null())
-                
-                if len(non_null_rows) < 2:
-                    continue
-                
-                non_null_with_diff = non_null_rows.with_columns([
-                    (pl.col(ts_col).diff().dt.total_seconds() / 60.0)
-                    .alias('time_diff_minutes')
+            # Calculate gap size for each null point by looking at nearest non-null neighbors
+            # gap_size = (next_non_null_ts - prev_non_null_ts)
+            gap_size = (
+                ts_at_non_null.backward_fill().over(seq_id_col) - 
+                ts_at_non_null.forward_fill().over(seq_id_col)
+            ).dt.total_seconds()
+            
+            # Mask for small gaps where we want to interpolate
+            is_small_gap = (gap_size > 0) & (gap_size <= self.small_gap_max_seconds)
+            
+            # Linear interpolation
+            interpolated_values = pl.col(field).interpolate().over(seq_id_col)
+            
+            # Update only null values within small gaps
+            null_mask = pl.col(field).is_null()
+            df = df.with_columns([
+                pl.when(null_mask & is_small_gap)
+                .then(interpolated_values)
+                .otherwise(pl.col(field))
+                .alias(field)
+            ])
+            
+            # Update event type for interpolated values
+            if event_type_col in df.columns:
+                df = df.with_columns([
+                    pl.when(null_mask & is_small_gap & (pl.col(field).is_not_null()))
+                    .then(pl.lit(INTERPOLATED_EVENT_TYPE))
+                    .otherwise(pl.col(event_type_col))
+                    .alias(event_type_col)
                 ])
-                
-                small_gaps = non_null_with_diff.filter(
-                    (pl.col('time_diff_minutes') > self.expected_interval_minutes) &
-                    (pl.col('time_diff_minutes') <= self.small_gap_max_minutes)
-                )
-                
-                if small_gaps.height == 0:
-                    continue
-                
-                updates: List[Tuple[datetime, float]] = []
-                
-                for gap_idx in range(len(small_gaps)):
-                    gap_row = small_gaps[gap_idx]
-                    curr_timestamp = gap_row[ts_col][0]
-                    time_diff = gap_row['time_diff_minutes'][0]
-                    curr_value = gap_row[field][0]
-                    
-                    prev_non_null = non_null_rows.filter(pl.col(ts_col) < curr_timestamp).sort(ts_col, descending=True)
-                    if len(prev_non_null) == 0:
-                        continue
-                    prev_timestamp = prev_non_null[ts_col][0]
-                    prev_value = prev_non_null[field][0]
-                    
-                    if prev_value is None:
-                        continue
-                    
-                    row_before_gap = seq_df.filter(pl.col(ts_col) < curr_timestamp).sort(ts_col, descending=True)
-                    if len(row_before_gap) > 0:
-                        immediate_prev_value = row_before_gap[field][0]
-                        if immediate_prev_value is None:
-                            continue
-                    
-                    missing_points = int((time_diff / self.expected_interval_minutes) - 1)
-                    if missing_points <= 0:
-                        continue
-                    
-                    for j in range(1, missing_points + 1):
-                        interp_timestamp = prev_timestamp + timedelta(minutes=j * self.expected_interval_minutes)
-                        
-                        existing_rows = seq_df.filter(pl.col(ts_col) == interp_timestamp)
-                        if existing_rows.height > 0 and existing_rows[field][0] is None:
-                            alpha = (j * self.expected_interval_minutes) / time_diff
-                            interp_value = float(prev_value + alpha * (curr_value - prev_value))
-                            updates.append((interp_timestamp, interp_value))
-                
-                if updates:
-                    per_field_interpolations[field] += len(updates)
-                    
-                    update_expr = pl.col(field)
-                    for ts, val in updates:
-                        update_expr = pl.when(
-                            (pl.col(seq_id_col) == seq_id) & (pl.col(ts_col) == ts) & (pl.col(field).is_null())
-                        ).then(pl.lit(val)).otherwise(update_expr)
-                    
-                    df = df.with_columns([update_expr.alias(field)])
-                    
-                    if event_type_col in df.columns:
-                        event_update_expr = pl.col(event_type_col)
-                        for ts, _ in updates:
-                            event_update_expr = pl.when(
-                                (pl.col(seq_id_col) == seq_id) & (pl.col(ts_col) == ts) & (pl.col(event_type_col) != INTERPOLATED_EVENT_TYPE)
-                            ).then(pl.lit(INTERPOLATED_EVENT_TYPE)).otherwise(event_update_expr)
-                        df = df.with_columns([event_update_expr.alias(event_type_col)])
+            
+            # Update statistics
+            interpolated_count = df.select((null_mask & is_small_gap & (pl.col(field).is_not_null())).sum()).item()
+            per_field_interpolations[field] = int(interpolated_count) if interpolated_count is not None else 0
         
         for field in fields_to_interpolate:
             stats_key = field_stats_keys[field]
@@ -204,11 +164,9 @@ class ValueInterpolator:
             ]).filter(pl.col('missing_points') > 0)
             
             if gaps_to_process.height > 0:
+                # Optimized: Use pl.int_ranges instead of map_elements
                 gaps_with_j = gaps_to_process.with_columns([
-                    pl.col('missing_points').map_elements(
-                        lambda mp: list(range(1, int(mp) + 1)) if mp and mp > 0 else [],
-                        return_dtype=pl.List(pl.Int64)
-                    ).alias('j_values')
+                    pl.int_ranges(1, pl.col('missing_points') + 1).alias('j_values')
                 ])
                 
                 gaps_exploded = gaps_with_j.explode('j_values').with_columns([
