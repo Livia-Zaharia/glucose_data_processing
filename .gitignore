@@ -11,3 +11,6 @@ wheels/
 
 # Data files
 data/
+
+# Output files
+OUTPUT/

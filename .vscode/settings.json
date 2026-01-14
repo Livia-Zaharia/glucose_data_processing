@@ -6,6 +6,8 @@
     ],
     "python.testing.autoTestDiscoverOnSaveEnabled": true,
     "python.analysis.typeCheckingMode": "basic",
-    "python.analysis.autoImportCompletions": true
+    "python.analysis.autoImportCompletions": true,
+    "cursorpyright.analysis.autoImportCompletions": true,
+    "cursorpyright.analysis.typeCheckingMode": "basic"
 }
 

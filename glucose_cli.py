@@ -23,6 +23,47 @@ except ImportError:
 
 app = typer.Typer(help="Glucose Data Preprocessing CLI")
 
+def _generate_output_filename(input_folders: List[Path], user_output: Path) -> Path:
+    """
+    Generate output filename based on source folder names.
+    
+    If user provided a custom output path, use that name but place it in OUTPUT folder.
+    Otherwise, generate filename from source folder names.
+    """
+    output_dir = Path("OUTPUT")
+    output_dir.mkdir(exist_ok=True)
+    
+    # If user provided a custom output path, use that filename
+    if user_output != Path("glucose_ml_ready.csv"):
+        return output_dir / user_output.name
+    
+    # Generate filename from source folder names
+    source_names: List[str] = []
+    for folder in input_folders:
+        if folder.is_file() and folder.suffix.lower() == ".zip":
+            # For zip files, use the filename without extension
+            source_names.append(folder.stem)
+        else:
+            # For folders, use the folder name
+            source_names.append(folder.name)
+    
+    # Sanitize names (remove invalid characters for filenames)
+    sanitized_names = []
+    invalid_chars = '<>:"/\\|?*'
+    for name in source_names:
+        sanitized = ''.join(c if c not in invalid_chars else '_' for c in name)
+        sanitized_names.append(sanitized)
+    
+    # Create filename: combine source names with underscores
+    if len(sanitized_names) == 1:
+        filename = f"{sanitized_names[0]}_ml_ready.csv"
+    else:
+        # For multiple sources, combine them
+        combined = "_".join(sanitized_names)
+        filename = f"{combined}_ml_ready.csv"
+    
+    return output_dir / filename
+
 def _resolve_config_file(config_file: Optional[Path]) -> Optional[Path]:
     """
     Resolve the config file path to use.
@@ -53,7 +94,7 @@ def main(
     output_file: Optional[Path] = typer.Option(
         None,
         "--output", "-o",
-        help="Output file path for ML-ready data"
+        help="Output file name (will be saved in OUTPUT folder). If not provided, filename is generated from source folder names."
     ),
     interval_minutes: int = typer.Option(
         5,
@@ -152,6 +193,11 @@ def main(
         
         validated_folders.append(input_folder)
     
+    # Generate output filename and ensure OUTPUT folder exists
+    if output_file is None:
+        output_file = Path("glucose_ml_ready.csv")  # Default for filename generation
+    final_output_file = _generate_output_filename(validated_folders, output_file)
+    
     # Initialize preprocessor info
     if verbose:
         logger.info("Initializing glucose data preprocessor...")
@@ -161,7 +207,7 @@ def main(
             logger.info(f"   Input folders ({len(validated_folders)}):")
             for i, folder in enumerate(validated_folders, 1):
                 logger.info(f"      {i}. {folder}")
-        logger.info(f"   Output file: {output_file}")
+        logger.info(f"   Output file: {final_output_file}")
         logger.info(f"   Time interval: {interval_minutes} minutes")
         logger.info(f"   Gap max: {gap_max_minutes} minutes")
         logger.info(f"   Min sequence length: {min_sequence_len}")
