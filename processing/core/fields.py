@@ -20,6 +20,7 @@ class StandardFieldNames:
     CARB_VALUE = 'carb_grams'
     USER_ID = 'user_id'
     SEQUENCE_ID = 'sequence_id'
+    DATASET_NAME = 'dataset_name'
     
     def __init__(self) -> None:
         """Initialize standard field names."""

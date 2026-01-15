@@ -36,7 +36,8 @@ class CSVFormatConverter(ABC):
         "glucose_value_mgdl": "Glucose Value (mg/dL)",
         "fast_acting_insulin_u": "Fast-Acting Insulin Value (u)",
         "long_acting_insulin_u": "Long-Acting Insulin Value (u)",
-        "carb_grams": "Carb Value (grams)"
+        "carb_grams": "Carb Value (grams)",
+        "dataset_name": "Dataset Name"
     }
     
     # Class-level config-based field mappings (initialized from config)

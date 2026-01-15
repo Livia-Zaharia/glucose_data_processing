@@ -236,6 +236,7 @@ class GlucoseMLPreprocessor:
     def _compute_expected_output_columns(self, database_types: List[str]) -> List[str]:
         field_to_display = CSVFormatConverter.get_field_to_display_name_map()
         seq_id_col = StandardFieldNames.SEQUENCE_ID
+        dataset_name_col = StandardFieldNames.DATASET_NAME
 
         if bool(self.config.get("restrict_output_to_config_fields", False)):
             output_fields = CSVFormatConverter.get_output_fields()
@@ -243,6 +244,8 @@ class GlucoseMLPreprocessor:
             service_keep = {str(x) for x in service_allow} if isinstance(service_allow, list) else set()
 
             cols = [seq_id_col]
+            if len(database_types) > 1:
+                cols.append(field_to_display.get(dataset_name_col, dataset_name_col))
             for c in output_fields:
                 if c == seq_id_col:
                     continue
@@ -260,6 +263,8 @@ class GlucoseMLPreprocessor:
             return out
 
         cols: List[str] = [seq_id_col]
+        if len(database_types) > 1:
+            cols.append(field_to_display.get(dataset_name_col, dataset_name_col))
         for f in CSVFormatConverter.get_output_fields():
             if f == seq_id_col:
                 continue
@@ -576,6 +581,8 @@ class GlucoseMLPreprocessor:
         ts_col = StandardFieldNames.TIMESTAMP
         seq_id_col = StandardFieldNames.SEQUENCE_ID
         user_id_col = StandardFieldNames.USER_ID
+        dataset_name_col = StandardFieldNames.DATASET_NAME
+        dataset_name_display = CSVFormatConverter.get_display_name(dataset_name_col)
 
         if streaming_capable and output_file:
             expected_cols = self._compute_expected_output_columns(db_types)
@@ -650,6 +657,9 @@ class GlucoseMLPreprocessor:
                         df, glucose_filter_stats = self.filter_step.filter_glucose_only(df)
                         ml_df = self.ml_preparer.prepare_ml_data(df, field_categories_dict)
                         
+                        # Add dataset name in multi-database mode
+                        ml_df = ml_df.with_columns(pl.lit(csv_folder.name).alias(dataset_name_display))
+
                         # Collect stats for this user
                         user_stats = self.stats_manager.get_statistics(
                             ml_df, gap_stats, interp_stats, filter_stats, glucose_filter_stats, fixed_freq_stats
@@ -668,6 +678,10 @@ class GlucoseMLPreprocessor:
                             flush()
                 else:
                     ml_df, stats, current_last_sequence_id = self.process(csv_folder, output_file=None, last_sequence_id=current_last_sequence_id)
+                    
+                    # Add dataset name in multi-database mode
+                    ml_df = ml_df.with_columns(pl.lit(csv_folder.name).alias(dataset_name_display))
+
                     all_processing_stats.append(stats)
                     total_sequences += stats['dataset_overview']['total_sequences']
                     original_records += stats['dataset_overview'].get('original_records', 0)
@@ -708,6 +722,9 @@ class GlucoseMLPreprocessor:
             if user_id_col in ml_df.columns:
                 ml_df = ml_df.drop(user_id_col)
             
+            # Add dataset name in multi-database mode
+            ml_df = ml_df.with_columns(pl.lit(csv_folder.name).alias(dataset_name_display))
+
             max_seq_id = ml_df[seq_id_col].max() if len(ml_df) > 0 else current_last_sequence_id
             min_seq_id = ml_df[seq_id_col].min() if len(ml_df) > 0 else current_last_sequence_id
             stats['database_info'] = {
