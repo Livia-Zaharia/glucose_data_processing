@@ -1,4 +1,5 @@
-# Dexcom G6 Database Format
+# Dexcom G6 Dataset
+
 
 ## Database Structure
 

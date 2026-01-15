@@ -1,4 +1,4 @@
-# FreeStyle Libre 3 Database Format
+# FreeStyle Libre 3 Dataset
 
 ## Database Structure
 

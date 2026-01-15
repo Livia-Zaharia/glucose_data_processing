@@ -1,4 +1,10 @@
-# AI-READI Database Format
+# AI-READI Dataset
+
+## Source and Reference
+
+- **Main Dataset Page**: [FAIRhub - Flagship Dataset of Type 2 Diabetes from the AI-READI Project](https://fairhub.io/datasets/2)
+- **Data Repository**: [Zenodo (v1.0.0)](https://zenodo.org/records/14680135)
+- **Project Website**: [AI-READI](https://aireadi.org/)
 
 ## Database Structure
 

@@ -1,4 +1,8 @@
-# UC_HT Dataset Format
+# UC_HT Dataset
+
+## Source and Reference
+
+- **Data Repository**: [Repo and dataset](https://github.com/fisiologiacuantitativauc/UC_HT_T1DM)
 
 ## Database Structure
 

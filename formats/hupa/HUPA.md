@@ -1,4 +1,10 @@
-# HUPA Dataset Format
+# HUPA Dataset
+
+## Source and Reference
+
+- **Data Repository**: [Mendeley Data - HUPA-UCM diabetes dataset](https://data.mendeley.com/datasets/3hbcscwz44/1)
+- **Scientific Publication**: [HUPA-UCM diabetes dataset, Data in Brief, 2024](https://www.sciencedirect.com/science/article/pii/S2352340924005262)
+- **DOI**: 10.17632/3hbcscwz44.1
 
 ## Database Structure
 

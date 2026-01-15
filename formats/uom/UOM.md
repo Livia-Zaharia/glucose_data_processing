@@ -1,4 +1,11 @@
-# University of Manchester (UoM) Database Format
+# University of Manchester (UoM) Dataset
+
+## Source and Reference
+
+- **Data Repository**: [Zenodo - T1D-UOM – A Longitudinal Multimodal Dataset of Type 1 Diabetes](https://zenodo.org/records/15806142)
+- **Dataset Page**: [University of Manchester Research Explorer](https://research.manchester.ac.uk/en/datasets/t1d-uom-a-longitudinal-multimodal-dataset-of-type-1-diabetes)
+- **Scientific Publication**: [A Longitudinal Multimodal Dataset of Type 1 Diabetes, Scientific Data, 2025](https://research.manchester.ac.uk/en/publications/a-longitudinal-multimodal-dataset-of-type-1-diabetes/)
+- **DOI**: 10.5281/zenodo.15806142
 
 ## Database Structure
 
