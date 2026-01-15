@@ -11,6 +11,7 @@ dependencies = [
     "pyyaml>=6.0",
     "eliot",
     "loguru>=0.7.3",
+    "fastexcel>=0.18.0",
 ]
 
 [dependency-groups]

@@ -25,6 +25,7 @@ output_fields:
   - "heart_rate"
   - "step_count"
   - "basal_rate"
+  - "igar_g_min"
   - "user_id"
   - "interpolated"
 
@@ -41,6 +42,7 @@ field_to_display_name_map:
   heart_rate: "Heart Rate"
   step_count: "Step Count"
   basal_rate: "Basal Rate"
+  igar_g_min: "IGAR (g/min)"
   user_id: "user_id"
   interpolated: "interpolated-"
 
@@ -72,3 +74,8 @@ hupa:
   # Multi-user database - each user in a single CSV file
   # User ID extracted from filename like HUPA0001P.csv
   # Data types: glucose, calories, heart_rate, steps, basal_rate, bolus, carb_input
+
+uc_ht:
+  # UC_HT dataset specific settings
+  # Multi-user database - each user in a separate folder
+  # Data types: glucose, heart rate, steps, carbohidrates, insulin, IGAR

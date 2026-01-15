@@ -16,6 +16,7 @@ from formats.dexcom.dexcom_database_converter import DexcomDatabaseConverter
 from formats.libre3.libre3_database_converter import Libre3DatabaseConverter
 from formats.uom.uom_database_converter import UoMDatabaseConverter
 from formats.hupa.hupa_database_converter import HupaDatabaseConverter
+from formats.uc_ht.uc_ht_database_converter import UCHTDatabaseConverter
 
 
 class DatabaseDetector:
@@ -29,6 +30,7 @@ class DatabaseDetector:
             'uom': UoMDatabaseConverter,
             'ai_ready': AIReadyDatabaseConverter,
             'hupa': HupaDatabaseConverter,
+            'uc_ht': UCHTDatabaseConverter,
         }
     
     def detect_database_type(self, data_folder: str) -> str:
@@ -39,7 +41,7 @@ class DatabaseDetector:
             data_folder: Path to the data folder to analyze
             
         Returns:
-            Database type string ('dexcom', 'libre3', 'uom', or 'unknown')
+            Database type string ('dexcom', 'libre3', 'uom', 'uc_ht', or 'unknown')
         """
         data_path = Path(data_folder)
         
@@ -65,6 +67,18 @@ class DatabaseDetector:
                 return "unknown"
             return "unknown"
         
+        # UC_HT: folder-based with .xlsx files
+        xlsx_files = list(data_path.glob("**/*.xlsx"))
+        if xlsx_files:
+            # Check for UC_HT specific filenames
+            uc_ht_files = ['Glucose.xlsx', 'Heart Rate.xlsx', 'Steps.xlsx', 'Carbohidrates.xlsx', 'Insulin.xlsx']
+            count = 0
+            for xlsx in xlsx_files:
+                if xlsx.name in uc_ht_files:
+                    count += 1
+            if count >= 2: # At least two matching files suggests UC_HT
+                return 'uc_ht'
+
         # Get all CSV files
         csv_files = list(data_path.glob("**/*.csv"))
         

@@ -22,6 +22,7 @@ output_fields:
   - "stress_level"
   - "active_kcal"
   - "step_count"
+  - "igar_g_min"
   - "user_id"
   - "interpolated"
 
@@ -33,5 +34,6 @@ field_to_display_name_map:
   stress_level: "Stress Level"
   active_kcal: "Active Calories (kcal)"
   step_count: "Step Count"
+  igar_g_min: "IGAR (g/min)"
   user_id: "user_id"
   interpolated: "interpolated-"

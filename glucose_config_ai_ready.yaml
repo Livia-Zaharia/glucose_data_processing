@@ -44,6 +44,7 @@ output_fields:
   - "study_group"
   - "recommended_split"
   - "study_visit_date"
+  - "igar_g_min"
   - "interpolated"
 
 field_to_display_name_map:
@@ -63,6 +64,7 @@ field_to_display_name_map:
   study_group: "Study Group"
   recommended_split: "Recommended Split"
   study_visit_date: "Study Visit Date"
+  igar_g_min: "IGAR (g/min)"
   interpolated: "interpolated-"
 
 # Database-specific configurations
