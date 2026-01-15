@@ -281,11 +281,16 @@ class FixedFreqGenerator:
     ) -> pl.DataFrame:
         ts_col = StandardFieldNames.TIMESTAMP
         glucose_col = StandardFieldNames.GLUCOSE_VALUE
+        interp_col = StandardFieldNames.INTERPOLATED
 
         if not continuous_fields:
-            return fixed_timestamps
+            if interp_col in seq_data.columns:
+                return fixed_timestamps.join(seq_data.select([ts_col, interp_col]), on=ts_col, how='left').with_columns(pl.col(interp_col).fill_null(True))
+            return fixed_timestamps.with_columns(pl.lit(True).alias(interp_col))
         
         result_df = fixed_timestamps
+        # Initialize interpolated column as False, we will update it below
+        result_df = result_df.with_columns(pl.lit(False).alias(interp_col))
         
         for field in continuous_fields:
             if field not in seq_data.columns:
@@ -317,6 +322,25 @@ class FixedFreqGenerator:
             
             combined = forward.join(backward.select([ts_col, f'{safe_name}_prev', f'ts_{safe_name}_prev']), on=ts_col, how='left')
             
+            # If interp_col is in seq_data, we want to know if the original point was interpolated
+            if interp_col in seq_data.columns:
+                combined = combined.join(seq_data.select([ts_col, interp_col]), on=ts_col, how='left')
+                # If it's an exact match, we use the original interpolated status. 
+                # Otherwise (it's a new timestamp created by fixed frequency), it's True.
+                combined = combined.with_columns([
+                    pl.when(pl.col(f'ts_{safe_name}_prev') == pl.col(f'ts_{safe_name}_next'))
+                    .then(pl.col(interp_col).fill_null(False))
+                    .otherwise(pl.lit(True))
+                    .alias(interp_col)
+                ])
+            else:
+                combined = combined.with_columns([
+                    pl.when(pl.col(f'ts_{safe_name}_prev') == pl.col(f'ts_{safe_name}_next'))
+                    .then(pl.lit(False))
+                    .otherwise(pl.lit(True))
+                    .alias(interp_col)
+                ])
+
             combined = combined.with_columns([
                 pl.when(pl.col(f'ts_{safe_name}_prev') == pl.col(f'ts_{safe_name}_next')) # Exact match
                 .then(pl.col(f'{safe_name}_prev'))
@@ -333,16 +357,16 @@ class FixedFreqGenerator:
                 ).alias(field)
             ])
             
-            interpolated_field = combined.select([ts_col, field])
+            interpolated_field = combined.select([ts_col, field, interp_col])
             
             if field in result_df.columns:
-                result_df = result_df.drop(field).join(
+                result_df = result_df.drop([field, interp_col]).join(
                     interpolated_field,
                     on=ts_col,
                     how='left'
                 )
             else:
-                result_df = result_df.join(
+                result_df = result_df.drop(interp_col).join(
                     interpolated_field,
                     on=ts_col,
                     how='left'

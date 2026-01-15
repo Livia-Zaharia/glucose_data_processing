@@ -40,6 +40,11 @@ class MLDataPreparer:
                 cast_exprs.append(pl.col(col).cast(pl.Int64, strict=False).alias(col))
                 continue
             
+            current_type = df.schema.get(col)
+            if current_type == pl.Boolean or str(current_type).startswith("Boolean"):
+                cast_exprs.append(pl.col(col))
+                continue
+
             if col == ts_col:
                 if df.schema.get(ts_col) == pl.Datetime:
                     cast_exprs.append(pl.col(ts_col).dt.strftime('%Y-%m-%dT%H:%M:%S').alias(ts_col))

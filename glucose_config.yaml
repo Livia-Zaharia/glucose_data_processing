@@ -22,6 +22,7 @@ output_fields:
   - "fast_acting_insulin_u"
   - "long_acting_insulin_u"
   - "carb_grams"
+  - "interpolated"
 
 # Field to display name mapping (standard_name -> display_name)
 # Used to convert standard field names to display names in CSV output
@@ -33,6 +34,7 @@ field_to_display_name_map:
   fast_acting_insulin_u: "Fast-Acting Insulin Value (u)"
   long_acting_insulin_u: "Long-Acting Insulin Value (u)"
   carb_grams: "Carb Value (grams)"
+  interpolated: "interpolated-"
 
 # Database-specific configurations
 dexcom:

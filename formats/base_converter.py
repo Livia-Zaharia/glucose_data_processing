@@ -26,6 +26,7 @@ class CSVFormatConverter(ABC):
         'fast_acting_insulin_u',
         'long_acting_insulin_u',
         'carb_grams',
+        'interpolated',
     ]
     
     # Field to display name mapping (standard_name -> display_name)
@@ -37,7 +38,8 @@ class CSVFormatConverter(ABC):
         "fast_acting_insulin_u": "Fast-Acting Insulin Value (u)",
         "long_acting_insulin_u": "Long-Acting Insulin Value (u)",
         "carb_grams": "Carb Value (grams)",
-        "dataset_name": "Dataset Name"
+        "dataset_name": "Dataset Name",
+        "interpolated": "interpolated"
     }
     
     # Class-level config-based field mappings (initialized from config)

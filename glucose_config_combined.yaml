@@ -21,6 +21,7 @@ output_fields:
   - "active_kcal"
   - "step_count"
   - "user_id"
+  - "interpolated"
 
 field_to_display_name_map:
   timestamp: "Timestamp (YYYY-MM-DDThh:mm:ss)"
@@ -31,3 +32,4 @@ field_to_display_name_map:
   active_kcal: "Active Calories (kcal)"
   step_count: "Step Count"
   user_id: "user_id"
+  interpolated: "interpolated-"

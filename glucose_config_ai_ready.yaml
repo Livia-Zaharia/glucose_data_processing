@@ -44,6 +44,7 @@ output_fields:
   - "study_group"
   - "recommended_split"
   - "study_visit_date"
+  - "interpolated"
 
 field_to_display_name_map:
   timestamp: "Timestamp (YYYY-MM-DDThh:mm:ss)"
@@ -62,6 +63,7 @@ field_to_display_name_map:
   study_group: "Study Group"
   recommended_split: "Recommended Split"
   study_visit_date: "Study Visit Date"
+  interpolated: "interpolated-"
 
 # Database-specific configurations
 dexcom:
