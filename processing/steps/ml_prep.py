@@ -36,10 +36,14 @@ class MLDataPreparer:
         id_fields = {seq_id_col, user_id_col}
         
         for col in df.columns:
-            if col in id_fields:
+            if col == seq_id_col:
                 cast_exprs.append(pl.col(col).cast(pl.Int64, strict=False).alias(col))
                 continue
-            
+
+            if col == user_id_col:
+                cast_exprs.append(pl.col(col).cast(pl.Utf8, strict=False).alias(col))
+                continue
+
             current_type = df.schema.get(col)
             if current_type == pl.Boolean or str(current_type).startswith("Boolean"):
                 cast_exprs.append(pl.col(col))

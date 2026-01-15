@@ -15,6 +15,7 @@ from formats.ai_ready.ai_ready_database_converter import AIReadyDatabaseConverte
 from formats.dexcom.dexcom_database_converter import DexcomDatabaseConverter
 from formats.libre3.libre3_database_converter import Libre3DatabaseConverter
 from formats.uom.uom_database_converter import UoMDatabaseConverter
+from formats.hupa.hupa_database_converter import HupaDatabaseConverter
 
 
 class DatabaseDetector:
@@ -27,6 +28,7 @@ class DatabaseDetector:
             'libre3': Libre3DatabaseConverter,
             'uom': UoMDatabaseConverter,
             'ai_ready': AIReadyDatabaseConverter,
+            'hupa': HupaDatabaseConverter,
         }
     
     def detect_database_type(self, data_folder: str) -> str:
@@ -73,7 +75,8 @@ class DatabaseDetector:
         file_patterns = {
             'dexcom': 0,
             'libre3': 0,
-            'uom': 0
+            'uom': 0,
+            'hupa': 0
         }
         
         for csv_file in csv_files:
@@ -86,6 +89,8 @@ class DatabaseDetector:
                 file_patterns['libre3'] += 1
             elif filename.startswith('uom'):
                 file_patterns['uom'] += 1
+            elif filename.startswith('hupa'):
+                file_patterns['hupa'] += 1
             else:
                 # Check file content to determine format
                 try:
@@ -108,6 +113,11 @@ class DatabaseDetector:
                         for line in first_lines:
                             if any(header in line for header in ['bg_ts', 'basal_ts', 'bolus_ts', 'meal_ts']):
                                 file_patterns['uom'] += 1
+                                break
+                            
+                            # Check for HUPA format headers
+                            if any(header in line for header in ['time;glucose;calories', 'time;glucose;heart_rate']):
+                                file_patterns['hupa'] += 1
                                 break
                                 
                 except Exception:

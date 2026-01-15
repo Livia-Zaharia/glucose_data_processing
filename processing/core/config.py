@@ -24,6 +24,7 @@ def extract_field_categories(database_type: str) -> Dict[str, Any]:
         'libre3': 'freestyle_libre3_schema.yaml',
         'freestyle_libre3': 'freestyle_libre3_schema.yaml',
         'ai_ready': 'ai_ready_schema.yaml',
+        'hupa': 'hupa_schema.yaml',
     }
 
     schema_file = schema_files.get(database_type, f"{database_type}_schema.yaml")

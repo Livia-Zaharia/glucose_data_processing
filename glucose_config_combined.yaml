@@ -11,6 +11,8 @@ restrict_output_to_config_fields: true
 database_configs:
   ai_ready:
     start_with_user_id: "1023"
+  hupa:
+    # HUPA specific settings
 
 output_fields:
   - "timestamp"

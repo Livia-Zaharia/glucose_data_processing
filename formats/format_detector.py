@@ -19,6 +19,7 @@ from formats.uom.uom_glucose_converter import UoMGlucoseConverter
 from formats.uom.uom_nutrition_converter import UoMNutritionConverter
 from formats.uom.uom_sleep_converter import UoMSleepConverter
 from formats.uom.uom_sleeptime_converter import UoMSleeptimeConverter
+from formats.hupa.hupa_converter import HupaConverter
 
 
 class CSVFormatDetector:
@@ -45,7 +46,8 @@ class CSVFormatDetector:
             UoMNutritionConverter(self.output_fields),
             UoMActivityConverter(self.output_fields),
             UoMSleepConverter(self.output_fields),
-            UoMSleeptimeConverter(self.output_fields)
+            UoMSleeptimeConverter(self.output_fields),
+            HupaConverter(self.output_fields)
         ]
         return converters
     

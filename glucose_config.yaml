@@ -22,6 +22,10 @@ output_fields:
   - "fast_acting_insulin_u"
   - "long_acting_insulin_u"
   - "carb_grams"
+  - "heart_rate"
+  - "step_count"
+  - "basal_rate"
+  - "user_id"
   - "interpolated"
 
 # Field to display name mapping (standard_name -> display_name)
@@ -34,6 +38,10 @@ field_to_display_name_map:
   fast_acting_insulin_u: "Fast-Acting Insulin Value (u)"
   long_acting_insulin_u: "Long-Acting Insulin Value (u)"
   carb_grams: "Carb Value (grams)"
+  heart_rate: "Heart Rate"
+  step_count: "Step Count"
+  basal_rate: "Basal Rate"
+  user_id: "user_id"
   interpolated: "interpolated-"
 
 # Database-specific configurations
@@ -58,3 +66,9 @@ zendo:
   # Zendo database specific settings (similar to UoM)
   # Multi-user database with separate data types
   # User ID and data type extracted from folder structure
+
+hupa:
+  # HUPA dataset specific settings
+  # Multi-user database - each user in a single CSV file
+  # User ID extracted from filename like HUPA0001P.csv
+  # Data types: glucose, calories, heart_rate, steps, basal_rate, bolus, carb_input
