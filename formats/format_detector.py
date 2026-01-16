@@ -20,6 +20,7 @@ from formats.uom.uom_nutrition_converter import UoMNutritionConverter
 from formats.uom.uom_sleep_converter import UoMSleepConverter
 from formats.uom.uom_sleeptime_converter import UoMSleeptimeConverter
 from formats.hupa.hupa_converter import HupaConverter
+from formats.medtronic.medtronic_converter import MedtronicConverter
 
 
 class CSVFormatDetector:
@@ -47,7 +48,8 @@ class CSVFormatDetector:
             UoMActivityConverter(self.output_fields),
             UoMSleepConverter(self.output_fields),
             UoMSleeptimeConverter(self.output_fields),
-            HupaConverter(self.output_fields)
+            HupaConverter(self.output_fields),
+            MedtronicConverter(self.output_fields)
         ]
         return converters
     
@@ -69,7 +71,7 @@ class CSVFormatDetector:
                 
                 # Try to find headers by checking multiple lines
                 # Some formats have metadata lines before the actual headers
-                for line_num in range(min(3, len(lines))):  # Check first 3 lines
+                for line_num in range(min(15, len(lines))):  # Check first 15 lines (Medtronic has 7-8 lines of header)
                     line = lines[line_num].strip()
                     if not line:
                         continue

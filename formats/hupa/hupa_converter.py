@@ -12,6 +12,8 @@ from formats.base_converter import CSVFormatConverter
 
 class HupaConverter(CSVFormatConverter):
     """Converter for HUPA dataset format."""
+    
+    CSV_DELIMITER: str = ";"
 
     def __init__(self, output_fields: Optional[List[str]] = None):
         """

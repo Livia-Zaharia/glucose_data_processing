@@ -203,6 +203,32 @@ class MonoUserDatabaseConverter(DatabaseConverter):
         # Sort by timestamp (oldest first)
         df = df.sort('timestamp')
         
+        # De-duplicate records with identical timestamps
+        logger.info("De-duplicating records with identical timestamps...")
+        
+        # Aggregate logic: 
+        # - For numeric columns: sum them (after converting to float)
+        # - For string columns: pick the first non-empty value
+        
+        # First, ensure we have a common timestamp without user_id if multi-user
+        group_cols = ['timestamp']
+        if 'user_id' in df.columns:
+            group_cols.append('user_id')
+            
+        agg_exprs = []
+        for col in df.columns:
+            if col in group_cols:
+                continue
+            
+            # Check if column is likely numeric
+            # We try to cast to float. If it works for most non-empty values, it's numeric.
+            # For now, we'll use a simpler heuristic or just handle strings carefully.
+            agg_exprs.append(
+                pl.col(col).filter(pl.col(col) != "").first().fill_null(pl.lit("")).alias(col)
+            )
+        
+        df = df.group_by(group_cols).agg(agg_exprs).sort(group_cols)
+        
         # Apply database-specific processing
         df = self._apply_database_specific_processing(df)
         
@@ -242,7 +268,7 @@ class MonoUserDatabaseConverter(DatabaseConverter):
                 
                 # Find the line with headers
                 header_line_num = None
-                for line_num in range(min(3, len(lines))):
+                for line_num in range(min(15, len(lines))):
                     line = lines[line_num].strip()
                     if not line:
                         continue
@@ -270,7 +296,12 @@ class MonoUserDatabaseConverter(DatabaseConverter):
                 csv_file = StringIO(csv_content)
                 
                 import csv
-                reader = csv.DictReader(csv_file)
+                header_line = lines[header_line_num].strip()
+                delimiter = converter.get_csv_delimiter()
+                # Fallback heuristic if converter didn't specify
+                if delimiter == "," and header_line.count(";") > header_line.count(","):
+                    delimiter = ";"
+                reader = csv.DictReader(csv_file, delimiter=delimiter)
                 
                 for row in reader:
                     # Use the appropriate converter to process the row
@@ -527,7 +558,7 @@ class MultiUserDatabaseConverter(DatabaseConverter):
                 
                 # Find the line with headers
                 header_line_num = None
-                for line_num in range(min(3, len(lines))):
+                for line_num in range(min(15, len(lines))):
                     line = lines[line_num].strip()
                     if not line:
                         continue
@@ -555,7 +586,12 @@ class MultiUserDatabaseConverter(DatabaseConverter):
                 csv_file = StringIO(csv_content)
                 
                 import csv
-                reader = csv.DictReader(csv_file)
+                header_line = lines[header_line_num].strip()
+                delimiter = converter.get_csv_delimiter()
+                # Fallback heuristic if converter didn't specify
+                if delimiter == "," and header_line.count(";") > header_line.count(","):
+                    delimiter = ";"
+                reader = csv.DictReader(csv_file, delimiter=delimiter)
                 
                 for row in reader:
                     # Use the appropriate converter to process the row

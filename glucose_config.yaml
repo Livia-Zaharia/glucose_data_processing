@@ -79,3 +79,8 @@ uc_ht:
   # UC_HT dataset specific settings
   # Multi-user database - each user in a separate folder
   # Data types: glucose, heart rate, steps, carbohidrates, insulin, IGAR
+
+medtronic:
+  # Medtronic specific settings
+  # Mono-user database - all CSV files in a folder belong to one user
+  # Support for semicolon delimiter and comma decimal separator

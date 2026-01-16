@@ -195,17 +195,75 @@ class FixedFreqGenerator:
         last_timestamp = seq_data[ts_col].max()
         if first_timestamp is None or last_timestamp is None:
             return seq_data
-        
-        first_second = first_timestamp.second
-        if first_second >= 30:
-            adjustment_seconds = 60 - first_second
+
+        # Align the fixed-frequency grid to the dominant CGM seconds offset (important for Medtronic).
+        #
+        # Many datasets have glucose timestamps with a stable seconds offset (e.g. :16) while
+        # event rows (insulin/carb) can be logged at different seconds (e.g. :18).
+        # If we anchor the grid to the first row in the sequence, we can get a constant phase shift
+        # and the resampled/interpolated glucose values will look mismatched vs raw CGM.
+        #
+        # Strategy:
+        # - Prefer anchoring to timestamps where we have CGM glucose values (event_type == "CGM")
+        # - Fall back to any glucose values
+        # - Fall back to the sequence start
+        anchor_timestamp = first_timestamp
+        anchor_seconds = 0
+        try:
+            if glucose_col in seq_data.columns:
+                glucose_points = seq_data.select([ts_col, glucose_col] + ([event_type_col] if event_type_col in seq_data.columns else [])).with_columns(
+                    pl.col(glucose_col).cast(pl.Float64, strict=False).alias("_glucose_numeric")
+                ).filter(pl.col("_glucose_numeric").is_not_null())
+
+                if event_type_col in glucose_points.columns:
+                    cgm_points = glucose_points.filter(pl.col(event_type_col) == "CGM")
+                    if len(cgm_points) > 0:
+                        anchor_timestamp = cgm_points[ts_col].min()
+                        points_for_seconds = cgm_points
+                    elif len(glucose_points) > 0:
+                        anchor_timestamp = glucose_points[ts_col].min()
+                        points_for_seconds = glucose_points
+                elif len(glucose_points) > 0:
+                    anchor_timestamp = glucose_points[ts_col].min()
+                    points_for_seconds = glucose_points
+
+                # Preserve a non-zero seconds offset only when it's stable (dominant across points).
+                # Otherwise keep the classic "round minute" grid (seconds == 0), which tests assume.
+                if 'points_for_seconds' in locals() and len(points_for_seconds) > 0:
+                    sec_counts = (
+                        points_for_seconds
+                        .select(pl.col(ts_col).dt.second().alias("sec"))
+                        .group_by("sec")
+                        .len()
+                        .sort("len", descending=True)
+                    )
+                    if sec_counts.height > 0:
+                        top_sec, top_len = sec_counts.row(0)
+                        try:
+                            top_sec_int = int(top_sec)
+                            top_len_int = int(top_len)
+                        except Exception:
+                            top_sec_int = 0
+                            top_len_int = 0
+                        if top_sec_int != 0 and top_len_int / max(1, len(points_for_seconds)) >= 0.80:
+                            anchor_seconds = top_sec_int
+        except Exception:
+            anchor_timestamp = first_timestamp
+
+        if anchor_timestamp is None:
+            anchor_timestamp = first_timestamp
+
+        # Align start to a "round minute" boundary (seconds == 0) in the normalized space.
+        # If we detected a stable CGM seconds offset, we round relative to that offset so the grid
+        # lands on real CGM timestamps (e.g. hh:mm:53).
+        target_second = anchor_seconds
+        normalized = anchor_timestamp.replace(microsecond=0) - timedelta(seconds=target_second)
+        if normalized.second >= 30:
+            normalized = normalized + timedelta(seconds=(60 - normalized.second))
         else:
-            adjustment_seconds = -first_second
-        
-        aligned_start = first_timestamp + timedelta(seconds=adjustment_seconds)
-        
-        if adjustment_seconds != 0:
-            stats['time_adjustments'] += 1
+            normalized = normalized - timedelta(seconds=normalized.second)
+        normalized = normalized.replace(microsecond=0)
+        aligned_start = (normalized + timedelta(seconds=target_second)).replace(second=target_second, microsecond=0)
         
         total_duration = (last_timestamp - aligned_start).total_seconds()
         num_intervals = int(total_duration / (self.expected_interval_minutes * 60)) + 1

@@ -15,6 +15,9 @@ from pathlib import Path
 class CSVFormatConverter(ABC):
     """Abstract base class for CSV format converters."""
     
+    # Default CSV delimiter for this format (can be overridden by subclasses)
+    CSV_DELIMITER: str = ","
+    
     # Default output fields (STANDARD NAMES).
     # These are fallback defaults if config is not provided.
     # NOTE: We intentionally use standard names so the pipeline can support arbitrary fields
@@ -222,6 +225,16 @@ class CSVFormatConverter(ABC):
             else:
                 source_fields.add(key)
         return source_fields
+
+    def get_csv_delimiter(self) -> str:
+        """
+        Get the expected delimiter for this CSV format.
+
+        Returns:
+            Single-character delimiter (default ",")
+        """
+        delimiter = getattr(self, "CSV_DELIMITER", ",")
+        return delimiter if isinstance(delimiter, str) and len(delimiter) == 1 else ","
     
     @abstractmethod
     def can_handle(self, headers: List[str]) -> bool:

@@ -13,6 +13,8 @@ database_configs:
     start_with_user_id: "1023"
   hupa:
     # HUPA specific settings
+  medtronic:
+    # Medtronic specific settings
 
 output_fields:
   - "timestamp"
