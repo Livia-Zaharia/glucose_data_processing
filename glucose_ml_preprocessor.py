@@ -142,7 +142,8 @@ class GlucoseMLPreprocessor:
             create_fixed_frequency=cli_overrides.get('create_fixed_frequency', config.get('create_fixed_frequency', True)),
             verbose=cli_overrides.get('verbose', False),
             config=config,
-            first_n_users=cli_overrides.get('first_n_users', config.get('first_n_users', None))
+            first_n_users=cli_overrides.get('first_n_users', config.get('first_n_users', None)),
+            output_file=cli_overrides.get('output_file', config.get('output_file', None))
         )
     
     def __init__(
@@ -161,6 +162,7 @@ class GlucoseMLPreprocessor:
         verbose: bool = False,
         config: Optional[Dict[str, Any]] = None,
         first_n_users: Optional[int] = None,
+        output_file: Optional[str] = None,
     ) -> None:
         self.expected_interval_minutes = expected_interval_minutes
         self.small_gap_max_minutes = small_gap_max_minutes
@@ -175,6 +177,7 @@ class GlucoseMLPreprocessor:
         self.create_fixed_frequency = create_fixed_frequency
         self.verbose = verbose
         self.config = config if config is not None else {}
+        self.output_file = Path(output_file) if output_file else None
         if first_n_users is not None:
             self.config['first_n_users'] = first_n_users
         

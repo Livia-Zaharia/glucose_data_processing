@@ -50,8 +50,8 @@ def main(
         "--config", "-c",
         help="Path to YAML configuration file (command line args override config values)"
     ),
-    output_file: Path = typer.Option(
-        Path("glucose_ml_ready.csv"),
+    output_file: Optional[Path] = typer.Option(
+        None,
         "--output", "-o",
         help="Output file path for ML-ready data"
     ),
@@ -203,6 +203,19 @@ def main(
             # Use CLI arguments directly
             preprocessor = GlucoseMLPreprocessor(**cli_overrides)
         
+        # Resolve output file: CLI > Config > Default
+        final_output_file = output_file
+        if final_output_file is None:
+            final_output_file = preprocessor.output_file
+        if final_output_file is None:
+            final_output_file = Path("glucose_ml_ready.csv")
+            
+        # Ensure output directory exists
+        if final_output_file.parent and not final_output_file.parent.exists():
+            if verbose:
+                logger.info(f"Creating output directory: {final_output_file.parent}")
+            final_output_file.parent.mkdir(parents=True, exist_ok=True)
+
         # Parse cycle data if provided
         cycle_parser = None
         if cycle_data_file:
@@ -229,11 +242,11 @@ def main(
         # Process single or multiple databases
         if len(validated_folders) == 1:
             ml_data, statistics, _ = preprocessor.process(
-                validated_folders[0], output_file
+                validated_folders[0], final_output_file
             )
         else:
             ml_data, statistics, _ = preprocessor.process_multiple_databases(
-                validated_folders, output_file
+                validated_folders, final_output_file
             )
         
         # Merge cycle data if provided
@@ -243,10 +256,10 @@ def main(
             ml_data = preprocessor.merge_cycle_data(ml_data, cycle_parser)
             
             # Save the final data with cycle information
-            if output_file:
-                ml_data.write_csv(output_file)
+            if final_output_file:
+                ml_data.write_csv(final_output_file)
                 if verbose:
-                    logger.info(f"Final data with cycle information saved to: {output_file}")
+                    logger.info(f"Final data with cycle information saved to: {final_output_file}")
         
         # Show results
         logger.info(f"Processing completed successfully!")
@@ -259,7 +272,7 @@ def main(
         except (ValueError, TypeError, AttributeError):
             stats_records = 0
             stats_sequences = 0
-
+        
         df_records = len(ml_data) if hasattr(ml_data, "__len__") else 0
         df_sequences = 0
         if isinstance(ml_data, pl.DataFrame) and "sequence_id" in ml_data.columns:
@@ -269,7 +282,7 @@ def main(
         out_sequences = stats_sequences if (df_sequences == 0 and stats_sequences > 0) else df_sequences
 
         logger.info(f"Output: {out_records:,} records in {out_sequences:,} sequences")
-        logger.info(f"Saved to: {output_file}")
+        logger.info(f"Saved to: {final_output_file}")
         
         # Show statistics if requested
         if show_stats:
