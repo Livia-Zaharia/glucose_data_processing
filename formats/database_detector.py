@@ -18,6 +18,7 @@ from formats.uom.uom_database_converter import UoMDatabaseConverter
 from formats.hupa.hupa_database_converter import HupaDatabaseConverter
 from formats.uc_ht.uc_ht_database_converter import UCHTDatabaseConverter
 from formats.medtronic.medtronic_database_converter import MedtronicDatabaseConverter
+from formats.minidose1.minidose1_database_converter import Minidose1DatabaseConverter
 
 
 class DatabaseDetector:
@@ -33,6 +34,7 @@ class DatabaseDetector:
             'hupa': HupaDatabaseConverter,
             'uc_ht': UCHTDatabaseConverter,
             'medtronic': MedtronicDatabaseConverter,
+            'minidose1': Minidose1DatabaseConverter,
         }
     
     def detect_database_type(self, data_folder: str) -> str:
@@ -81,10 +83,12 @@ class DatabaseDetector:
             if count >= 2: # At least two matching files suggests UC_HT
                 return 'uc_ht'
 
-        # Get all CSV files
+        # Get all CSV and TXT files
         csv_files = list(data_path.glob("**/*.csv"))
+        txt_files = list(data_path.glob("**/*.txt"))
+        all_files = csv_files + txt_files
         
-        if not csv_files:
+        if not all_files:
             return 'unknown'
         
         # Analyze file patterns to determine database type
@@ -93,11 +97,12 @@ class DatabaseDetector:
             'libre3': 0,
             'uom': 0,
             'hupa': 0,
-            'medtronic': 0
+            'medtronic': 0,
+            'minidose1': 0
         }
         
-        for csv_file in csv_files:
-            filename = csv_file.stem.lower()
+        for data_file in all_files:
+            filename = data_file.stem.lower()
             
             # Check for Dexcom patterns (standard format files)
             if any(pattern in filename for pattern in ['dexcom', 'g6', 'cgm']):
@@ -110,10 +115,12 @@ class DatabaseDetector:
                 file_patterns['hupa'] += 1
             elif 'medtronic' in filename or 'zaharia' in filename:
                 file_patterns['medtronic'] += 1
+            elif filename.startswith('idata'):
+                file_patterns['minidose1'] += 1
             else:
                 # Check file content to determine format
                 try:
-                    with open(csv_file, 'r', encoding='utf-8-sig') as file:  # utf-8-sig handles BOM
+                    with open(data_file, 'r', encoding='utf-8-sig') as file:  # utf-8-sig handles BOM
                         first_lines = [file.readline().strip() for _ in range(10)] # Medtronic might have header lines
                         
                         # Check for Dexcom format headers
@@ -144,6 +151,12 @@ class DatabaseDetector:
                         for line in first_lines:
                             if 'Sensor Glucose (mg/dL)' in line and 'Event Marker' in line:
                                 file_patterns['medtronic'] += 1
+                                break
+                                
+                        # Check for MiniDose1 format headers
+                        for line in first_lines:
+                            if 'PtID|' in line and 'DeviceDtDaysFromEnroll|' in line:
+                                file_patterns['minidose1'] += 1
                                 break
                                 
                 except Exception:

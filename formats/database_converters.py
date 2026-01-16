@@ -140,17 +140,19 @@ class MonoUserDatabaseConverter(DatabaseConverter):
         
         all_data = []
         
-        # Get all CSV files (including in subdirectories, sorted for deterministic processing order)
-        csv_files = sorted(csv_path.glob("**/*.csv"))
+        # Get all CSV and TXT files (including in subdirectories, sorted for deterministic processing order)
+        csv_files = list(csv_path.glob("**/*.csv"))
+        txt_files = list(csv_path.glob("**/*.txt"))
+        all_files = sorted(csv_files + txt_files)
         
-        if not csv_files:
-            raise ValueError(f"No CSV files found in directory: {data_folder}")
+        if not all_files:
+            raise ValueError(f"No CSV or TXT files found in directory: {data_folder}")
         
-        logger.info(f"Found {len(csv_files)} CSV files to consolidate")
+        logger.info(f"Found {len(all_files)} files to consolidate")
         
-        for csv_file in csv_files:
-            logger.info(f"Processing: {csv_file.name}")
-            file_data = self._process_csv_file(csv_file)
+        for data_file in all_files:
+            logger.info(f"Processing: {data_file.name}")
+            file_data = self._process_csv_file(data_file)
             all_data.extend(file_data)
             logger.info(f"  OK: Extracted {len(file_data)} records")
         
@@ -268,15 +270,17 @@ class MonoUserDatabaseConverter(DatabaseConverter):
                 
                 # Find the line with headers
                 header_line_num = None
+                delimiter = converter.get_csv_delimiter()
+                
                 for line_num in range(min(15, len(lines))):
                     line = lines[line_num].strip()
                     if not line:
                         continue
                     
-                    # Parse CSV line properly to handle quoted headers
+                    # Parse CSV line properly using the converter's delimiter
                     import csv
                     from io import StringIO
-                    csv_reader = csv.reader(StringIO(line))
+                    csv_reader = csv.reader(StringIO(line), delimiter=delimiter)
                     headers = next(csv_reader)
                     
                     # Clean headers: remove quotes and strip whitespace
@@ -490,15 +494,17 @@ class MultiUserDatabaseConverter(DatabaseConverter):
         """
         users = {}
         
-        # Get all CSV files (sorted for deterministic processing order)
-        csv_files = sorted(data_path.glob("**/*.csv"))
+        # Get all CSV and TXT files (sorted for deterministic processing order)
+        csv_files = list(data_path.glob("**/*.csv"))
+        txt_files = list(data_path.glob("**/*.txt"))
+        all_files = sorted(csv_files + txt_files)
         
-        for csv_file in csv_files:
-            user_id = self._extract_user_id_from_filename(csv_file)
+        for data_file in all_files:
+            user_id = self._extract_user_id_from_filename(data_file)
             if user_id:
                 if user_id not in users:
                     users[user_id] = []
-                users[user_id].append(csv_file)
+                users[user_id].append(data_file)
         
         # Sort files within each user for deterministic processing
         for user_id in users:
@@ -558,15 +564,17 @@ class MultiUserDatabaseConverter(DatabaseConverter):
                 
                 # Find the line with headers
                 header_line_num = None
+                delimiter = converter.get_csv_delimiter()
+                
                 for line_num in range(min(15, len(lines))):
                     line = lines[line_num].strip()
                     if not line:
                         continue
                     
-                    # Parse CSV line properly to handle quoted headers
+                    # Parse CSV line properly using the converter's delimiter
                     import csv
                     from io import StringIO
-                    csv_reader = csv.reader(StringIO(line))
+                    csv_reader = csv.reader(StringIO(line), delimiter=delimiter)
                     headers = next(csv_reader)
                     
                     # Clean headers: remove quotes and strip whitespace

@@ -84,3 +84,8 @@ medtronic:
   # Medtronic specific settings
   # Mono-user database - all CSV files in a folder belong to one user
   # Support for semicolon delimiter and comma decimal separator
+
+minidose1:
+  # MiniDose1 Clinical Trial dataset specific settings
+  # Multi-user database - all users in shared pipe-separated files
+  # Relative timestamps converted to absolute using reference enrollment date

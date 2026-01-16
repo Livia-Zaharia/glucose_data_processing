@@ -54,4 +54,5 @@ converters:
 - `dexcom_schema.yaml`: Dexcom G6 system.
 - `freestyle_libre3_schema.yaml`: Abbott FreeStyle Libre 3.
 - `ai_ready_schema.yaml`: AI-READY (BIDS-like) zip dataset.
+- `minidose1_schema.yaml`: MiniDose1 clinical trial dataset.
 

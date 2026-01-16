@@ -21,6 +21,7 @@ from formats.uom.uom_sleep_converter import UoMSleepConverter
 from formats.uom.uom_sleeptime_converter import UoMSleeptimeConverter
 from formats.hupa.hupa_converter import HupaConverter
 from formats.medtronic.medtronic_converter import MedtronicConverter
+from formats.minidose1.minidose1_converter import Minidose1Converter
 
 
 class CSVFormatDetector:
@@ -49,7 +50,8 @@ class CSVFormatDetector:
             UoMSleepConverter(self.output_fields),
             UoMSleeptimeConverter(self.output_fields),
             HupaConverter(self.output_fields),
-            MedtronicConverter(self.output_fields)
+            MedtronicConverter(self.output_fields),
+            Minidose1Converter(self.output_fields)
         ]
         return converters
     
@@ -76,22 +78,33 @@ class CSVFormatDetector:
                     if not line:
                         continue
                     
-                    # Parse CSV line properly to handle quoted headers
+                    # Parse CSV line properly to handle different delimiters
                     import csv
                     from io import StringIO
-                    csv_reader = csv.reader(StringIO(line))
-                    headers = next(csv_reader)
                     
-                    # Clean headers: remove quotes and strip whitespace
-                    headers = [col.strip().strip('"') for col in headers]
+                    # Try common delimiters
+                    possible_delimiters = [',', ';', '|', '\t']
+                    best_headers = []
                     
-                    # Check each converter
-                    for converter in self._get_converters():
-                        if converter.can_handle(headers):
-                            # Set context for UoM converter if needed
-                            if hasattr(converter, 'set_context'):
-                                converter.set_context(file_path)
-                            return converter
+                    for delim in possible_delimiters:
+                        csv_reader = csv.reader(StringIO(line), delimiter=delim)
+                        try:
+                            headers = next(csv_reader)
+                            # Clean headers: remove quotes and strip whitespace
+                            headers = [col.strip().strip('"') for col in headers]
+                            
+                            if len(headers) > len(best_headers):
+                                best_headers = headers
+                                
+                            # Check each converter with these headers
+                            for converter in self._get_converters():
+                                if converter.can_handle(headers):
+                                    # Set context for converter if needed
+                                    if hasattr(converter, 'set_context'):
+                                        converter.set_context(file_path)
+                                    return converter
+                        except Exception:
+                            continue
                 
                 return None
                 

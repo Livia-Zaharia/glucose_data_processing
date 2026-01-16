@@ -15,6 +15,8 @@ database_configs:
     # HUPA specific settings
   medtronic:
     # Medtronic specific settings
+  minidose1:
+    # MiniDose1 Clinical Trial dataset specific settings
 
 output_fields:
   - "timestamp"
