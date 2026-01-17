@@ -19,6 +19,7 @@ from formats.hupa.hupa_database_converter import HupaDatabaseConverter
 from formats.uc_ht.uc_ht_database_converter import UCHTDatabaseConverter
 from formats.medtronic.medtronic_database_converter import MedtronicDatabaseConverter
 from formats.minidose1.minidose1_database_converter import Minidose1DatabaseConverter
+from formats.loop.loop_database_converter import LoopDatabaseConverter
 
 
 class DatabaseDetector:
@@ -35,6 +36,7 @@ class DatabaseDetector:
             'uc_ht': UCHTDatabaseConverter,
             'medtronic': MedtronicDatabaseConverter,
             'minidose1': Minidose1DatabaseConverter,
+            'loop': LoopDatabaseConverter,
         }
     
     def detect_database_type(self, data_folder: str) -> str:
@@ -98,7 +100,8 @@ class DatabaseDetector:
             'uom': 0,
             'hupa': 0,
             'medtronic': 0,
-            'minidose1': 0
+            'minidose1': 0,
+            'loop': 0
         }
         
         for data_file in all_files:
@@ -117,6 +120,8 @@ class DatabaseDetector:
                 file_patterns['medtronic'] += 1
             elif filename.startswith('idata'):
                 file_patterns['minidose1'] += 1
+            elif filename.startswith('loop'):
+                file_patterns['loop'] += 1
             else:
                 # Check file content to determine format
                 try:
@@ -157,6 +162,12 @@ class DatabaseDetector:
                         for line in first_lines:
                             if 'PtID|' in line and 'DeviceDtDaysFromEnroll|' in line:
                                 file_patterns['minidose1'] += 1
+                                break
+                                
+                        # Check for Loop format headers
+                        for line in first_lines:
+                            if 'PtID|' in line and 'UTCDtTm' in line and ('CGMVal' in line or 'Normal' in line or 'Rate' in line or 'CarbsNet' in line):
+                                file_patterns['loop'] += 1
                                 break
                                 
                 except Exception:

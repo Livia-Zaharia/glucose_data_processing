@@ -1,7 +1,7 @@
 [project]
-name = "glucos-dataset"
+name = "glucose-dataset"
 version = "0.1.0"
-description = "Add your description here"
+description = "A project to preprocess datasets for glucose ML training"
 requires-python = ">=3.12"
 dependencies = [
     "pandas>=2.3.2",
@@ -14,7 +14,25 @@ dependencies = [
     "fastexcel>=0.18.0",
 ]
 
+[project.scripts]
+glucose-process = "glucose_cli:app"
+glucose-compare = "compare_checkpoints:app"
+
 [dependency-groups]
 dev = [
+    "jupyterlab>=4.5.2",
     "pytest>=8.4.2",
 ]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+package = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["formats", "processing", "glucose_cli.py", "compare_checkpoints.py", "glucose_ml_preprocessor.py"]

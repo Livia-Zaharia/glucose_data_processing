@@ -1,15 +1,10 @@
 from __future__ import annotations
 
 from pathlib import Path
-import sys
 
 import polars as pl
 
-
-# Add project root to import path (matches existing test style in this repo).
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-import compare_checkpoints  # noqa: E402
+import compare_checkpoints
 
 
 def _write_text(path: Path, content: str) -> None:

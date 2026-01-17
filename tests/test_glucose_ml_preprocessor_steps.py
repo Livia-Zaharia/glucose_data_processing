@@ -1,4 +1,3 @@
-
 import pytest
 import polars as pl
 import numpy as np
@@ -7,10 +6,6 @@ import tempfile
 import os
 import shutil
 from pathlib import Path
-import sys
-
-# Add parent directory to path
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from glucose_ml_preprocessor import GlucoseMLPreprocessor
 from formats.base_converter import CSVFormatConverter

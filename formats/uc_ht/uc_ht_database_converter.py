@@ -6,10 +6,9 @@ This module provides the converter for the UC_HT dataset (multi-user, Excel-base
 """
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Iterable
+from typing import Dict, List, Optional, Iterable
 import polars as pl
 from loguru import logger
-from datetime import datetime
 
 from formats.database_converters import DatabaseConverter
 from formats.base_converter import CSVFormatConverter
@@ -148,8 +147,13 @@ class UCHTDatabaseConverter(DatabaseConverter):
                 # Parse timestamp if it's not already datetime
                 dtype = df_mod["timestamp"].dtype
                 if not isinstance(dtype, pl.Datetime):
+                    # Use native Polars expressions - faster than map_elements
                     df_mod = df_mod.with_columns(
-                        pl.col("timestamp").map_elements(self._parse_timestamp, return_dtype=pl.Datetime)
+                        pl.coalesce(
+                            pl.col("timestamp").str.to_datetime("%Y-%m-%d %H:%M:%S", strict=False),
+                            pl.col("timestamp").str.to_datetime("%Y-%m-%dT%H:%M:%S", strict=False),
+                            pl.col("timestamp").str.to_datetime("%Y-%m-%d %H:%M:%S%.f", strict=False),
+                        ).alias("timestamp")
                     )
                 
                 # Ensure microsecond precision to avoid join issues later
@@ -173,7 +177,7 @@ class UCHTDatabaseConverter(DatabaseConverter):
         user_df = frames[0]
         for next_df in frames[1:]:
             # Outer join on timestamp
-            user_df = user_df.join(next_df, on="timestamp", how="outer_coalesce")
+            user_df = user_df.join(next_df, on="timestamp", how="full", coalesce=True)
         
         # Add user_id and event_type
         user_df = user_df.with_columns([
@@ -182,17 +186,3 @@ class UCHTDatabaseConverter(DatabaseConverter):
         ])
         
         return user_df
-
-    def _parse_timestamp(self, ts: Any) -> Optional[datetime]:
-        """Parse timestamp from various formats."""
-        if ts is None:
-            return None
-        if isinstance(ts, datetime):
-            return ts
-        if isinstance(ts, str):
-            for fmt in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S.%f"]:
-                try:
-                    return datetime.strptime(ts, fmt)
-                except ValueError:
-                    continue
-        return None

@@ -122,25 +122,27 @@ This is typically only needed once after cloning the repository or when dependen
 
 ### Basic Usage
 
-```bash
-# Setup dependencies (first time only)
-uv sync
+After installation, you can use the following commands:
 
+```bash
 # Process a single dataset (output saved to OUTPUT folder automatically)
-uv run glucose_cli.py <path/to/your/data>
+glucose-process <path/to/your/data>
 
 # Process with custom output filename
-uv run glucose_cli.py <path/to/your/data> -o my_custom_output.csv
+glucose-process <path/to/your/data> -o my_custom_output.csv
 
 # Combine multiple databases
-uv run glucose_cli.py <path/to/dataset1> <path/to/dataset2>
+glucose-process <path/to/dataset1> <path/to/dataset2>
+
+# Compare two checkpoint files
+glucose-compare checkpoint1.csv checkpoint2.csv
 ```
+
+**Note**: You can also use `uv run glucose-process ...` if you prefer not to install the package globally.
 
 **Command explanations:**
 
-1. **`uv sync`**: Sets up the Python environment and installs all project dependencies. Run this once after cloning the repository or when `pyproject.toml` changes.
-
-2. **`uv run glucose_cli.py <input> [-o <output>]`**: Processes glucose monitoring data through the ML preprocessing pipeline. 
+1. **`glucose-process <input> [-o <output>]`**: Processes glucose monitoring data through the ML preprocessing pipeline. 
    - `<input>`: Path to your input data folder (CSV files) or ZIP file (for AI-READY format)
    - `-o <output>`: (Optional) Custom output filename. If not provided, filename is automatically generated from source folder names
    - **Output location**: All output files are automatically saved to the `OUTPUT/` folder in the project root
@@ -149,6 +151,8 @@ uv run glucose_cli.py <path/to/dataset1> <path/to/dataset2>
      - Multiple sources: `data/uom data/dexcom` → `OUTPUT/uom_dexcom_ml_ready.csv`
    - The command automatically detects the database format (UoM, Dexcom, AI-READY, Libre3) and applies the appropriate conversion
    - Multiple input paths can be provided to combine datasets from different sources
+
+2. **`glucose-compare <file1> <file2>`**: Compares two checkpoint CSV files and provides detailed statistics on schema, sequences, and values.
 
 ### Expected Output
 
@@ -161,7 +165,7 @@ Downloaded X packages in Yms
 Installed X packages in Yms
 ```
 
-**For `uv run glucose_cli.py <input>`:**
+**For `glucose-process <input>`:**
 ```
 Processing completed successfully!
 Output: X,XXX records in XX sequences

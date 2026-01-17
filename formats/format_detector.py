@@ -22,6 +22,7 @@ from formats.uom.uom_sleeptime_converter import UoMSleeptimeConverter
 from formats.hupa.hupa_converter import HupaConverter
 from formats.medtronic.medtronic_converter import MedtronicConverter
 from formats.minidose1.minidose1_converter import Minidose1Converter
+from formats.loop.loop_converter import LoopConverter
 
 
 class CSVFormatDetector:
@@ -51,7 +52,8 @@ class CSVFormatDetector:
             UoMSleeptimeConverter(self.output_fields),
             HupaConverter(self.output_fields),
             MedtronicConverter(self.output_fields),
-            Minidose1Converter(self.output_fields)
+            Minidose1Converter(self.output_fields),
+            LoopConverter(self.output_fields)
         ]
         return converters
     

@@ -72,3 +72,6 @@ dexcom:
   high_glucose_value: 401
   low_glucose_value: 39
   remove_calibration: false
+
+loop:
+  # Loop automated insulin delivery system dataset

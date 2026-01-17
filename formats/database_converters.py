@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import polars as pl
 from loguru import logger
-from datetime import datetime, timedelta
 from formats.base_converter import CSVFormatConverter
 from formats.format_detector import CSVFormatDetector
 
@@ -56,38 +55,36 @@ class DatabaseConverter(ABC):
         """
         pass
     
-    def _enforce_output_schema(self, df: pl.DataFrame) -> pl.DataFrame:
+    def _enforce_output_schema(self, df: pl.DataFrame | pl.LazyFrame) -> pl.DataFrame | pl.LazyFrame:
         """
         Enforce that all default output fields are present in the DataFrame.
         Adds missing columns with null/empty string values to ensure schema consistency.
         
         Args:
-            df: DataFrame to enforce schema on
+            df: DataFrame or LazyFrame to enforce schema on
             
         Returns:
-            DataFrame with all default output fields present
+            DataFrame or LazyFrame with all default output fields present
         """
         # Get output fields from CSVFormatConverter (standard names)
         output_fields = CSVFormatConverter.get_output_fields()
         
+        # For LazyFrame, use collect_schema() to avoid performance warning
+        is_lazy = isinstance(df, pl.LazyFrame)
+        existing_columns = df.collect_schema().names() if is_lazy else df.columns
+        
         # Add user_id for multi-user databases (it's added during processing)
-        # Check if user_id column exists - if so, include it in required fields
         required_fields = output_fields.copy()
-        if 'user_id' in df.columns:
-            # user_id is already present, keep it
-            pass
         
         # Add missing columns with empty-string placeholders.
-        # This preserves the historical pipeline behavior where "missing" in non-timestamp columns
-        # is represented as "" (not null), which prevents per-field gap logic from exploding
-        # sequences due to sparse event columns.
         for field in required_fields:
-            if field not in df.columns:
+            if field not in existing_columns:
                 df = df.with_columns(pl.lit("").alias(field))
         
+        # Update existing columns list after additions
+        existing_columns = df.collect_schema().names() if is_lazy else df.columns
+        
         # Ensure columns are in the correct order: timestamp first, then other fields
-        # Keep any extra columns (like user_id, timestamp internal column, etc.) at the end
-        existing_columns = df.columns
         ordered_columns = []
         
         # Add required fields in order
@@ -95,7 +92,7 @@ class DatabaseConverter(ABC):
             if field in existing_columns:
                 ordered_columns.append(field)
         
-        # Add any remaining columns (like user_id, timestamp internal column, etc.)
+        # Add any remaining columns
         for col in existing_columns:
             if col not in ordered_columns:
                 ordered_columns.append(col)
@@ -190,11 +187,16 @@ class MonoUserDatabaseConverter(DatabaseConverter):
         # Parse timestamps and sort
         logger.info("Parsing timestamps and sorting...")
         # timestamp column now uses standard name and may already be datetime or string
-        # Try to parse if it's a string
+        # Try to parse if it's a string using native Polars expressions (faster than map_elements)
         timestamp_col_type = df['timestamp'].dtype
         if timestamp_col_type in [pl.Utf8, pl.String]:
+            # Try multiple timestamp formats using coalesce - runs in Rust, much faster
             df = df.with_columns(
-                pl.col('timestamp').map_elements(self._parse_timestamp, return_dtype=pl.Datetime).alias('timestamp')
+                pl.coalesce(
+                    pl.col('timestamp').str.to_datetime("%Y-%m-%dT%H:%M:%S", strict=False),
+                    pl.col('timestamp').str.to_datetime("%Y-%m-%d %H:%M:%S", strict=False),
+                    pl.col('timestamp').str.to_datetime("%Y-%m-%d %H:%M:%S%.f", strict=False),
+                ).alias('timestamp')
             )
         
         # Remove rows where timestamp parsing failed
@@ -318,29 +320,6 @@ class MonoUserDatabaseConverter(DatabaseConverter):
         
         return data
     
-    def _parse_timestamp(self, timestamp_str: str) -> datetime:
-        """Parse timestamp string to datetime object for sorting."""
-        if not timestamp_str or timestamp_str.strip() == "":
-            return None
-        
-        # Handle the format "2019-10-28 0:52:15" or "2019-10-14T16:42:37"
-        timestamp_str = timestamp_str.strip()
-        
-        # Try different timestamp formats
-        formats = [
-            "%Y-%m-%dT%H:%M:%S",  # ISO format with T
-            "%Y-%m-%d %H:%M:%S",  # Space format
-            "%Y-%m-%d %H:%M:%S.%f",  # With microseconds
-        ]
-        
-        for fmt in formats:
-            try:
-                return datetime.strptime(timestamp_str, fmt)
-            except ValueError:
-                continue
-        
-        return None
-    
     def _apply_database_specific_processing(self, df: pl.DataFrame) -> pl.DataFrame:
         """
         Apply database-specific processing (to be overridden by subclasses).
@@ -451,11 +430,16 @@ class MultiUserDatabaseConverter(DatabaseConverter):
         # Parse timestamps and sort by user and timestamp
         logger.info("Parsing timestamps and sorting by user and time...")
         # timestamp column now uses standard name and may already be datetime or string
-        # Try to parse if it's a string
+        # Try to parse if it's a string using native Polars expressions (faster than map_elements)
         timestamp_col_type = df['timestamp'].dtype
         if timestamp_col_type in [pl.Utf8, pl.String]:
+            # Try multiple timestamp formats using coalesce - runs in Rust, much faster
             df = df.with_columns(
-                pl.col('timestamp').map_elements(self._parse_timestamp, return_dtype=pl.Datetime).alias('timestamp')
+                pl.coalesce(
+                    pl.col('timestamp').str.to_datetime("%Y-%m-%dT%H:%M:%S", strict=False),
+                    pl.col('timestamp').str.to_datetime("%Y-%m-%d %H:%M:%S", strict=False),
+                    pl.col('timestamp').str.to_datetime("%Y-%m-%d %H:%M:%S%.f", strict=False),
+                ).alias('timestamp')
             )
         
         # Remove rows where timestamp parsing failed
@@ -475,10 +459,10 @@ class MultiUserDatabaseConverter(DatabaseConverter):
         logger.info(f"Total records in output: {len(df):,}")
         
         # Show user statistics
-        user_counts = df.group_by('user_id').count().sort('user_id')
+        user_counts = df.group_by('user_id').len().sort('user_id')
         logger.info(f"Users processed: {len(user_counts)}")
         for row in user_counts.iter_rows(named=True):
-            logger.info(f"  User {row['user_id']}: {row['count']:,} records")
+            logger.info(f"  User {row['user_id']}: {row['len']:,} records")
 
         return df
     
@@ -613,28 +597,6 @@ class MultiUserDatabaseConverter(DatabaseConverter):
             logger.info(f"Error processing {file_path}: {e}")
         
         return data
-    
-    def _parse_timestamp(self, timestamp_str: str) -> datetime:
-        """Parse timestamp string to datetime object for sorting."""
-        if not timestamp_str or timestamp_str.strip() == "":
-            return None
-        
-        timestamp_str = timestamp_str.strip()
-        
-        # Try different timestamp formats
-        formats = [
-            "%Y-%m-%dT%H:%M:%S",  # ISO format with T
-            "%Y-%m-%d %H:%M:%S",  # Space format
-            "%Y-%m-%d %H:%M:%S.%f",  # With microseconds
-        ]
-        
-        for fmt in formats:
-            try:
-                return datetime.strptime(timestamp_str, fmt)
-            except ValueError:
-                continue
-        
-        return None
     
     def get_database_name(self) -> str:
         """Get the name of the database type."""

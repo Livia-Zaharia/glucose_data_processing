@@ -17,6 +17,8 @@ database_configs:
     # Medtronic specific settings
   minidose1:
     # MiniDose1 Clinical Trial dataset specific settings
+  loop:
+    # Loop automated insulin delivery system dataset
 
 output_fields:
   - "timestamp"
