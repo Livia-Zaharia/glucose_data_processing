@@ -208,7 +208,7 @@ def main(
         if final_output_file is None:
             final_output_file = preprocessor.output_file
         if final_output_file is None:
-            final_output_file = Path("glucose_ml_ready.csv")
+            final_output_file = Path("OUTPUT" , "processed_dataset.csv")
             
         # Ensure output directory exists
         if final_output_file.parent and not final_output_file.parent.exists():
