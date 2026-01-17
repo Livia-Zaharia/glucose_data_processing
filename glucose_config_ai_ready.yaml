@@ -14,6 +14,7 @@ glucose_only: false
 # Streaming buffer control (used when converters expose iter_user_event_frames)
 streaming_max_buffer_mb: 64
 streaming_flush_max_users: 5
+output_file: "OUTPUT/ai_ready_processed_dataset.csv"
 
 # Output filtering: keep only output_fields + selected service fields
 restrict_output_to_config_fields: true

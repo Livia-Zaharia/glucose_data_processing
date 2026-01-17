@@ -13,7 +13,7 @@ field_categories:
   clinical_site: service
   study_group: service
   recommended_split: service
-  age: occasional
+  age: service
   study_visit_date: service
   glucose_value_mgdl: continuous
   heart_rate: continuous
