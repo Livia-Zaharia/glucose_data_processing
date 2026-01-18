@@ -147,8 +147,8 @@ glucose-compare checkpoint1.csv checkpoint2.csv
    - `-o <output>`: (Optional) Custom output filename. If not provided, filename is automatically generated from source folder names
    - **Output location**: All output files are automatically saved to the `OUTPUT/` folder in the project root
    - **Automatic naming**: When `-o` is not specified, the output filename is generated from the source folder name(s). For example:
-     - Single source: `data/uom` → `OUTPUT/uom_ml_ready.csv`
-     - Multiple sources: `data/uom data/dexcom` → `OUTPUT/uom_dexcom_ml_ready.csv`
+     - Single source: `DATA/uom` → `OUTPUT/uom_ml_ready.csv`
+     - Multiple sources: `DATA/uom DATA/dexcom` → `OUTPUT/uom_dexcom_ml_ready.csv`
    - The command automatically detects the database format (UoM, Dexcom, AI-READY, Libre3) and applies the appropriate conversion
    - Multiple input paths can be provided to combine datasets from different sources
 

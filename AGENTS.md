@@ -33,5 +33,5 @@ The recommended way to start the application is:
 ## Testing & Docs
 
 - **Tests**: After major code updates always run tests in tests folder with pytest. If introducing new feature or business logic update look through tests and also update them to reflect changes.
-- **Regression tests**: Before code update make checkpoint result with CLI script for data/uom_small dataset. After code update make one more checkpoint and compare them with compare_checkpoints.py. Result checkpoints should match. Exception is only when there are changes in business logic that modify data or fields. In this case compare differences with expected outcomes. Save checkpoints in to checkpoints folder.
+- **Regression tests**: Before code update make checkpoint result with CLI script for DATA/uom_small dataset. After code update make one more checkpoint and compare them with compare_checkpoints.py. Result checkpoints should match. Exception is only when there are changes in business logic that modify data or fields. In this case compare differences with expected outcomes. Save checkpoints in to checkpoints folder.
 - **Docs**: Put all new markdown files (except README/AGENTS) in `docs/`.

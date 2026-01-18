@@ -175,5 +175,5 @@ field_to_display_name_map:
 
 Then run:
 ```bash
-uv run glucose_cli.py data/uom --config glucose_config.yaml
+uv run glucose_cli.py DATA/uom --config glucose_config.yaml
 ```

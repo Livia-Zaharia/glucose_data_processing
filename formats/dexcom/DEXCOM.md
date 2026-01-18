@@ -157,5 +157,5 @@ output_fields:
   - "glucose_value_mgdl"
 
 # Or use CLI flag:
-# uv run glucose_cli.py data/dexcom --glucose-only
+# uv run glucose_cli.py DATA/dexcom --glucose-only
 ```

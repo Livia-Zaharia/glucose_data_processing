@@ -54,5 +54,5 @@ output_fields:
 
 Then run:
 ```bash
-uv run glucose_cli.py data/minidose1 --config glucose_config.yaml
+uv run glucose_cli.py DATA/minidose1 --config glucose_config.yaml
 ```

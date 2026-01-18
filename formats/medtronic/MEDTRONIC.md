@@ -157,7 +157,7 @@ output_fields:
   - "glucose_value_mgdl"
 
 # Or use CLI flag:
-# uv run glucose_cli.py data/medtronic --glucose-only
+# uv run glucose_cli.py DATA/medtronic --glucose-only
 ```
 
 ## Example: Including Insulin and Carb Data

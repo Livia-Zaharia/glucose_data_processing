@@ -12,7 +12,7 @@ glucose-process [INPUT_FOLDERS]... [OPTIONS]
 
 ### Arguments
 
-- `INPUT_FOLDERS`: One or more paths to database folders (e.g., `data/uom_small`) or ZIP files (for AI-READY).
+- `INPUT_FOLDERS`: One or more paths to database folders (e.g., `DATA/uom_small`) or ZIP files (for AI-READY).
 
 ### Options
 
@@ -35,7 +35,7 @@ glucose-process [INPUT_FOLDERS]... [OPTIONS]
 The CLI supports combining different databases in a single run:
 
 ```bash
-glucose-process data/uom_small data/dexcom_user1 -o combined_data.csv
+glucose-process DATA/uom_small DATA/dexcom_user1 -o combined_data.csv
 ```
 
 The preprocessor automatically:

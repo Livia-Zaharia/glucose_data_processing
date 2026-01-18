@@ -150,7 +150,7 @@ output_fields:
   - "glucose_value_mgdl"
 
 # Or use CLI flag:
-# uv run glucose_cli.py data/libre3 --glucose-only
+# uv run glucose_cli.py DATA/libre3 --glucose-only
 ```
 
 ## Notes
