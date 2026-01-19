@@ -14,7 +14,7 @@ from formats.base_converter import CSVFormatConverter
 class UoMNutritionConverter(CSVFormatConverter):
     """Converter for University of Manchester nutrition data format."""
 
-    def __init__(self, output_fields: Optional[List[str]] = None):
+    def __init__(self, output_fields: Optional[List[str]] = None, database_type: str = "uom"):
         """
         Initialize the UoM nutrition converter.
 
@@ -22,10 +22,11 @@ class UoMNutritionConverter(CSVFormatConverter):
             output_fields: List of standard field names to include in output.
                           Uses standard field names (e.g., 'timestamp', 'carb_grams').
                           If None, uses default fields.
+            database_type: Database type identifier (default: "uom")
         """
-        super().__init__(output_fields)
+        super().__init__(output_fields, database_type)
         # Load database schema
-        self.db_schema = self._load_schema("uom_schema.yaml")
+        self.db_schema = self._load_schema(self.database_type)
         self.converter_schema = self.db_schema["converters"]["nutrition"]
 
     def can_handle(self, headers: List[str]) -> bool:

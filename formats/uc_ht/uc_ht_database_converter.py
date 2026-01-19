@@ -109,7 +109,7 @@ class UCHTDatabaseConverter(DatabaseConverter):
         frames = []
         
         # Load schema for field mappings
-        schema = CSVFormatConverter._load_schema("uc_ht_schema.yaml")
+        schema = CSVFormatConverter._load_schema("uc_ht")
         converters = schema.get("converters", {})
 
         for modality, filename in modality_files.items():

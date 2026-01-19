@@ -14,7 +14,7 @@ from formats.base_converter import CSVFormatConverter
 class UoMBasalConverter(CSVFormatConverter):
     """Converter for University of Manchester basal insulin data format."""
 
-    def __init__(self, output_fields: Optional[List[str]] = None):
+    def __init__(self, output_fields: Optional[List[str]] = None, database_type: str = "uom"):
         """
         Initialize the UoM basal converter.
 
@@ -22,10 +22,11 @@ class UoMBasalConverter(CSVFormatConverter):
             output_fields: List of standard field names to include in output.
                           Uses standard field names (e.g., 'timestamp', 'long_acting_insulin_u').
                           If None, uses default fields.
+            database_type: Database type identifier (default: "uom")
         """
-        super().__init__(output_fields)
+        super().__init__(output_fields, database_type)
         # Load database schema
-        self.db_schema = self._load_schema("uom_schema.yaml")
+        self.db_schema = self._load_schema(self.database_type)
         self.converter_schema = self.db_schema["converters"]["basal"]
 
     def can_handle(self, headers: List[str]) -> bool:

@@ -195,13 +195,14 @@ glucose-compare checkpoint1.csv checkpoint2.csv
 
 1. **`glucose-process <input> [-o <output>]`**: Processes glucose monitoring data through the ML preprocessing pipeline. 
    - `<input>`: Path to your input data folder (CSV files) or ZIP file (for AI-READY format)
-   - `-o <output>`: (Optional) Custom output filename. If not provided, filename is automatically generated from source folder names
-   - **Output location**: All output files are automatically saved to the `OUTPUT/` folder in the project root
-   - **Automatic naming**: When `-o` is not specified, the output filename is generated from the source folder name(s). For example:
-     - Single source: `DATA/uom` → `OUTPUT/uom_ml_ready.csv`
-     - Multiple sources: `DATA/uom DATA/dexcom` → `OUTPUT/uom_dexcom_ml_ready.csv`
-   - The command automatically detects the database format (UoM, Dexcom, AI-READY, Libre3) and applies the appropriate conversion
-   - Multiple input paths can be provided to combine datasets from different sources
+   - `-o <output>`: (Optional) Custom output filename. If not provided, filename is resolved based on config or database type.
+   - **Output location**: All output files are automatically saved to the `OUTPUT/` folder in the project root.
+   - **Automatic naming**: When `-o` is not specified, the output filename is resolved using the following priority:
+     1. Configuration file `output_file` setting (e.g., `OUTPUT/processed_dataset.csv`).
+     2. Database schema identifier (e.g., `OUTPUT/uom.csv`) if processing a single source.
+     3. Generic default: `OUTPUT/processed_dataset.csv`.
+   - The command automatically detects the database format (UoM, Dexcom, AI-READY, Libre3) and applies the appropriate conversion.
+   - Multiple input paths can be provided to combine datasets from different sources.
 
 2. **`glucose-compare <file1> <file2>`**: Compares two checkpoint CSV files and provides detailed statistics on schema, sequences, and values.
 
@@ -220,7 +221,7 @@ Installed X packages in Yms
 ```
 Processing completed successfully!
 Output: X,XXX records in XX sequences
-Saved to: OUTPUT/uom_ml_ready.csv
+Saved to: OUTPUT/uom.csv
 
 Summary:
    Date range: YYYY-MM-DD to YYYY-MM-DD
