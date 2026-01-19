@@ -19,7 +19,7 @@ glucose-process [INPUT_FOLDERS]... [OPTIONS]
 | Option | Shorthand | Description |
 |--------|-----------|-------------|
 | `--config` | `-c` | Path to a YAML configuration file. |
-| `--output` | `-o` | Filename for the final ML-ready CSV. |
+| `--output" | `-o` | Filename for the final ML-ready CSV. |
 | `--interval` | `-i` | Time discretization interval (minutes). |
 | `--gap-max` | `-g` | Max gap size to interpolate (minutes). |
 | `--min-length` | `-l` | Minimum sequence length to preserve. |
@@ -35,7 +35,7 @@ glucose-process [INPUT_FOLDERS]... [OPTIONS]
 The CLI supports combining different databases in a single run:
 
 ```bash
-glucose-process DATA/uom_small DATA/dexcom_user1 -o combined_data.csv
+glucose-process data/uom_small data/dexcom_user1 -o combined_data.csv
 ```
 
 The preprocessor automatically:

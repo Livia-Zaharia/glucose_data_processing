@@ -27,13 +27,13 @@ class UoMDatabaseConverter(MultiUserDatabaseConverter):
         filename = file_path.stem  # Get filename without extension
 
         # UoM format: UoMGlucose2301.csv -> participant ID: 2301
+        # Also handles UoM2301sleeptime.csv -> participant ID: 2301
         if filename.startswith("UoM"):
-            # Extract the ID part after the data type
-            parts = filename[3:]  # Remove 'UoM' prefix
-            # Find where the ID starts (after the data type name)
-            for i, char in enumerate(parts):
-                if char.isdigit():
-                    return parts[i:]
+            # Extract the ID part (digits)
+            import re
+            match = re.search(r"(\d+)", filename)
+            if match:
+                return match.group(1)
 
         return None
 

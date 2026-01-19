@@ -118,7 +118,54 @@ uv sync
 
 This is typically only needed once after cloning the repository or when dependencies change.
 
+## 📦 Installation
+
+This project uses [uv](https://github.com/astral-sh/uv), a fast Python package installer and resolver.
+
+### Installing uv
+
+**Windows (PowerShell):**
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
+**macOS and Linux:**
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+After installation, **restart your terminal** to make `uv` available in your PATH. The installer will automatically configure your PATH for you.
+
+**Verify installation:**
+```bash
+uv --version
+```
+
+You should see the version number (e.g., `uv 0.x.x`).
+
+For alternative installation methods (including package managers), see the [official uv documentation](https://github.com/astral-sh/uv#installation).
+
+### Setting up the project
+
+Once `uv` is installed, sync the project dependencies:
+
+```bash
+uv sync
+```
+
+**What this command does:**
+- Creates a virtual environment (if needed) for the project
+- Reads `pyproject.toml` to determine required dependencies
+- Downloads and installs all Python packages needed by the project
+- Makes the project ready to run without manual dependency management
+
+This is typically only needed once after cloning the repository or when dependencies change.
+
 ## 🚀 Quick Start
+
+### Basic Usage
+
+After installation, you can use the following commands:
 
 ### Basic Usage
 
@@ -127,7 +174,11 @@ After installation, you can use the following commands:
 ```bash
 # Process a single dataset (output saved to OUTPUT folder automatically)
 glucose-process <path/to/your/data>
+# Process a single dataset (output saved to OUTPUT folder automatically)
+glucose-process <path/to/your/data>
 
+# Process with custom output filename
+glucose-process <path/to/your/data> -o my_custom_output.csv
 # Process with custom output filename
 glucose-process <path/to/your/data> -o my_custom_output.csv
 

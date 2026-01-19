@@ -11,15 +11,6 @@ from typing import Any, Dict, List, Optional
 import zipfile
 
 from formats.database_converters import DatabaseConverter
-from formats.ai_ready.ai_ready_database_converter import AIReadyDatabaseConverter
-from formats.dexcom.dexcom_database_converter import DexcomDatabaseConverter
-from formats.libre3.libre3_database_converter import Libre3DatabaseConverter
-from formats.uom.uom_database_converter import UoMDatabaseConverter
-from formats.hupa.hupa_database_converter import HupaDatabaseConverter
-from formats.uc_ht.uc_ht_database_converter import UCHTDatabaseConverter
-from formats.medtronic.medtronic_database_converter import MedtronicDatabaseConverter
-from formats.minidose1.minidose1_database_converter import Minidose1DatabaseConverter
-from formats.loop.loop_database_converter import LoopDatabaseConverter
 
 
 class DatabaseDetector:
@@ -27,18 +18,40 @@ class DatabaseDetector:
     
     def __init__(self):
         """Initialize the database detector with available converters."""
-        self.database_converters = {
-            'dexcom': DexcomDatabaseConverter,
-            'libre3': Libre3DatabaseConverter,
-            'uom': UoMDatabaseConverter,
-            'ai_ready': AIReadyDatabaseConverter,
-            'hupa': HupaDatabaseConverter,
-            'uc_ht': UCHTDatabaseConverter,
-            'medtronic': MedtronicDatabaseConverter,
-            'minidose1': Minidose1DatabaseConverter,
-            'loop': LoopDatabaseConverter,
-        }
+        # Use lazy imports inside the methods that need them to avoid circular imports
+        self.database_converters = {}
     
+    def _get_converter_class(self, database_type: str):
+        """Lazy load converter classes to avoid circular imports."""
+        if database_type == 'dexcom':
+            from formats.dexcom.dexcom_database_converter import DexcomDatabaseConverter
+            return DexcomDatabaseConverter
+        elif database_type == 'libre3':
+            from formats.libre3.libre3_database_converter import Libre3DatabaseConverter
+            return Libre3DatabaseConverter
+        elif database_type == 'uom':
+            from formats.uom.uom_database_converter import UoMDatabaseConverter
+            return UoMDatabaseConverter
+        elif database_type == 'ai_ready':
+            from formats.ai_ready.ai_ready_database_converter import AIReadyDatabaseConverter
+            return AIReadyDatabaseConverter
+        elif database_type == 'hupa':
+            from formats.hupa.hupa_database_converter import HupaDatabaseConverter
+            return HupaDatabaseConverter
+        elif database_type == 'uc_ht':
+            from formats.uc_ht.uc_ht_database_converter import UCHTDatabaseConverter
+            return UCHTDatabaseConverter
+        elif database_type == 'medtronic':
+            from formats.medtronic.medtronic_database_converter import MedtronicDatabaseConverter
+            return MedtronicDatabaseConverter
+        elif database_type == 'minidose1':
+            from formats.minidose1.minidose1_database_converter import Minidose1DatabaseConverter
+            return Minidose1DatabaseConverter
+        elif database_type == 'loop':
+            from formats.loop.loop_database_converter import LoopDatabaseConverter
+            return LoopDatabaseConverter
+        return None
+
     def detect_database_type(self, data_folder: str) -> str:
         """
         Detect the database type from the folder structure and file patterns.
@@ -47,7 +60,7 @@ class DatabaseDetector:
             data_folder: Path to the data folder to analyze
             
         Returns:
-            Database type string ('dexcom', 'libre3', 'uom', 'uc_ht', 'medtronic', or 'unknown')
+            Database type string ('dexcom', 'libre3', 'uom', 'uc_ht', 'medtronic', 'hupa', 'loop', 'minidose1', or 'unknown')
         """
         data_path = Path(data_folder)
         
@@ -145,7 +158,7 @@ class DatabaseDetector:
                             if any(header in line for header in ['bg_ts', 'basal_ts', 'bolus_ts', 'meal_ts']):
                                 file_patterns['uom'] += 1
                                 break
-                            
+                                
                         # Check for HUPA format headers
                         for line in first_lines:
                             if any(header in line for header in ['time;glucose;calories', 'time;glucose;heart_rate']):
@@ -195,8 +208,9 @@ class DatabaseDetector:
         Returns:
             Database converter instance or None if type not supported
         """
-        if database_type in self.database_converters:
-            return self.database_converters[database_type](config, output_fields=output_fields, database_type=database_type)
+        converter_class = self._get_converter_class(database_type)
+        if converter_class:
+            return converter_class(config, output_fields=output_fields, database_type=database_type)
         else:
             return None
     
@@ -207,4 +221,4 @@ class DatabaseDetector:
         Returns:
             List of database type names supported by this detector
         """
-        return list(self.database_converters.keys())
+        return ['dexcom', 'libre3', 'uom', 'ai_ready', 'hupa', 'uc_ht', 'medtronic', 'minidose1', 'loop']

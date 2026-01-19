@@ -27,7 +27,6 @@ output_fields:
   - "basal_rate"
   - "igar_g_min"
   - "user_id"
-  - "interpolated"
 
 # Field to display name mapping (standard_name -> display_name)
 # Used to convert standard field names to display names in CSV output
@@ -44,7 +43,6 @@ field_to_display_name_map:
   basal_rate: "Basal Rate"
   igar_g_min: "IGAR (g/min)"
   user_id: "user_id"
-  interpolated: "interpolated-"
 
 # Database-specific configurations
 dexcom:

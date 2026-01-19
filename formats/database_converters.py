@@ -478,13 +478,19 @@ class MultiUserDatabaseConverter(DatabaseConverter):
         """
         users = {}
         
-        # Get all CSV and TXT files (sorted for deterministic processing order)
-        csv_files = list(data_path.glob("**/*.csv"))
-        txt_files = list(data_path.glob("**/*.txt"))
-        all_files = sorted(csv_files + txt_files)
+        # Get all CSV files (sorted for deterministic processing order)
+        csv_files = sorted(data_path.glob("**/*.csv"))
         
-        for data_file in all_files:
-            user_id = self._extract_user_id_from_filename(data_file)
+        # Deduplicate files by stem to avoid processing same data in different folders
+        seen_stems = set()
+        unique_files = []
+        for f in csv_files:
+            if f.stem not in seen_stems:
+                unique_files.append(f)
+                seen_stems.add(f.stem)
+        
+        for csv_file in unique_files:
+            user_id = self._extract_user_id_from_filename(csv_file)
             if user_id:
                 if user_id not in users:
                     users[user_id] = []

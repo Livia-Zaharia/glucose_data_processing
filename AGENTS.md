@@ -12,6 +12,8 @@ The recommended way to start the application is:
 
 - `glucose-process <input_folder>`
 - Or using uv: `uv run glucose-process <input_folder>`
+- `glucose-process <input_folder>`
+- Or using uv: `uv run glucose-process <input_folder>`
 
 ## Coding Standards
 
@@ -19,6 +21,9 @@ The recommended way to start the application is:
 - **Type hints**: Mandatory for all Python code.
 - **Pathlib**: Always use for all file paths.
 - **No relative imports**: Always use absolute imports.
+- **Polars**: Prefer over Pandas. Consider using polars expressions to speed up code where relevant. 
+- **Be memory efficient**: Use lazyframes (`scan_parquet`) and streaming (`sink_parquet`) for efficiency if applicable, use engine="streaming". Also, remember that you can load multiple files with one scan and can avoid python loops in many cases. Avoid redundant collect-s
+- **Memory efficient joins**:  if you make joins make sure largest dataframe goes first. Joins often materializes whole second lazyframe. Pre-filter dataframes before joining to avoid materialization.
 - **Polars**: Prefer over Pandas. Consider using polars expressions to speed up code where relevant. 
 - **Be memory efficient**: Use lazyframes (`scan_parquet`) and streaming (`sink_parquet`) for efficiency if applicable, use engine="streaming". Also, remember that you can load multiple files with one scan and can avoid python loops in many cases. Avoid redundant collect-s
 - **Memory efficient joins**:  if you make joins make sure largest dataframe goes first. Joins often materializes whole second lazyframe. Pre-filter dataframes before joining to avoid materialization.
