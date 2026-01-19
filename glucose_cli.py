@@ -53,7 +53,7 @@ def main(
     output_file: Optional[Path] = typer.Option(
         None,
         "--output", "-o",
-        help="Output file path for ML-ready data"
+        help="Output file name (will be saved in OUTPUT folder). If not provided, filename is generated from source folder names."
     ),
     interval_minutes: int = typer.Option(
         5,

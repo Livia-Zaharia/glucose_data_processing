@@ -440,10 +440,10 @@ class MultiUserDatabaseConverter(DatabaseConverter):
         logger.info(f"Total records in output: {len(df):,}")
         
         # Show user statistics
-        user_counts = df.group_by('user_id').count().sort('user_id')
+        user_counts = df.group_by('user_id').len().sort('user_id')
         logger.info(f"Users processed: {len(user_counts)}")
         for row in user_counts.iter_rows(named=True):
-            logger.info(f"  User {row['user_id']}: {row['count']:,} records")
+            logger.info(f"  User {row['user_id']}: {row['len']:,} records")
 
         return df
     
@@ -462,7 +462,15 @@ class MultiUserDatabaseConverter(DatabaseConverter):
         # Get all CSV files (sorted for deterministic processing order)
         csv_files = sorted(data_path.glob("**/*.csv"))
         
-        for csv_file in csv_files:
+        # Deduplicate files by stem to avoid processing same data in different folders
+        seen_stems = set()
+        unique_files = []
+        for f in csv_files:
+            if f.stem not in seen_stems:
+                unique_files.append(f)
+                seen_stems.add(f.stem)
+        
+        for csv_file in unique_files:
             user_id = self._extract_user_id_from_filename(csv_file)
             if user_id:
                 if user_id not in users:

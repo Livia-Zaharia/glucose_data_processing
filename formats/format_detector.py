@@ -19,6 +19,10 @@ from formats.uom.uom_glucose_converter import UoMGlucoseConverter
 from formats.uom.uom_nutrition_converter import UoMNutritionConverter
 from formats.uom.uom_sleep_converter import UoMSleepConverter
 from formats.uom.uom_sleeptime_converter import UoMSleeptimeConverter
+from formats.hupa.hupa_converter import HupaConverter
+from formats.loop.loop_converter import LoopConverter
+from formats.medtronic.medtronic_converter import MedtronicConverter
+from formats.minidose1.minidose1_converter import Minidose1Converter
 
 
 class CSVFormatDetector:
@@ -45,7 +49,11 @@ class CSVFormatDetector:
             UoMNutritionConverter(self.output_fields),
             UoMActivityConverter(self.output_fields),
             UoMSleepConverter(self.output_fields),
-            UoMSleeptimeConverter(self.output_fields)
+            UoMSleeptimeConverter(self.output_fields),
+            HupaConverter(self.output_fields),
+            LoopConverter(self.output_fields),
+            MedtronicConverter(self.output_fields),
+            Minidose1Converter(self.output_fields)
         ]
         return converters
     
@@ -67,7 +75,7 @@ class CSVFormatDetector:
                 
                 # Try to find headers by checking multiple lines
                 # Some formats have metadata lines before the actual headers
-                for line_num in range(min(3, len(lines))):  # Check first 3 lines
+                for line_num in range(min(10, len(lines))):  # Check first 10 lines (Medtronic has headers)
                     line = lines[line_num].strip()
                     if not line:
                         continue
@@ -75,19 +83,33 @@ class CSVFormatDetector:
                     # Parse CSV line properly to handle quoted headers
                     import csv
                     from io import StringIO
-                    csv_reader = csv.reader(StringIO(line))
-                    headers = next(csv_reader)
                     
-                    # Clean headers: remove quotes and strip whitespace
-                    headers = [col.strip().strip('"') for col in headers]
-                    
-                    # Check each converter
-                    for converter in self._get_converters():
-                        if converter.can_handle(headers):
-                            # Set context for UoM converter if needed
-                            if hasattr(converter, 'set_context'):
-                                converter.set_context(file_path)
-                            return converter
+                    # Try different delimiters
+                    for delimiter in [',', ';', '|', '\t']:
+                        try:
+                            csv_file = StringIO(line)
+                            csv_reader = csv.reader(csv_file, delimiter=delimiter)
+                            headers = next(csv_reader)
+                            
+                            # Clean headers: remove quotes and strip whitespace
+                            headers = [col.strip().strip('"') for col in headers]
+                            
+                            # Check each converter
+                            for converter in self._get_converters():
+                                # Set delimiter context if needed for the converter to check
+                                if hasattr(converter, 'CSV_DELIMITER') and converter.CSV_DELIMITER == delimiter:
+                                    if converter.can_handle(headers):
+                                        if hasattr(converter, 'set_context'):
+                                            converter.set_context(file_path)
+                                        return converter
+                                elif not hasattr(converter, 'CSV_DELIMITER') and delimiter == ',':
+                                    # Default to comma for converters that don't specify
+                                    if converter.can_handle(headers):
+                                        if hasattr(converter, 'set_context'):
+                                            converter.set_context(file_path)
+                                        return converter
+                        except Exception:
+                            continue
                 
                 return None
                 

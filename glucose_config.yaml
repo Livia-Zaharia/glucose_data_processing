@@ -22,6 +22,11 @@ output_fields:
   - "fast_acting_insulin_u"
   - "long_acting_insulin_u"
   - "carb_grams"
+  - "heart_rate"
+  - "step_count"
+  - "basal_rate"
+  - "igar_g_min"
+  - "user_id"
 
 # Field to display name mapping (standard_name -> display_name)
 # Used to convert standard field names to display names in CSV output
@@ -33,6 +38,11 @@ field_to_display_name_map:
   fast_acting_insulin_u: "Fast-Acting Insulin Value (u)"
   long_acting_insulin_u: "Long-Acting Insulin Value (u)"
   carb_grams: "Carb Value (grams)"
+  heart_rate: "Heart Rate"
+  step_count: "Step Count"
+  basal_rate: "Basal Rate"
+  igar_g_min: "IGAR (g/min)"
+  user_id: "user_id"
 
 # Database-specific configurations
 dexcom:
@@ -56,3 +66,29 @@ zendo:
   # Zendo database specific settings (similar to UoM)
   # Multi-user database with separate data types
   # User ID and data type extracted from folder structure
+
+hupa:
+  # HUPA dataset specific settings
+  # Multi-user database - each user in a single CSV file
+  # User ID extracted from filename like HUPA0001P.csv
+  # Data types: glucose, calories, heart_rate, steps, basal_rate, bolus, carb_input
+
+uc_ht:
+  # UC_HT dataset specific settings
+  # Multi-user database - each user in a separate folder
+  # Data types: glucose, heart rate, steps, carbohidrates, insulin, IGAR
+
+medtronic:
+  # Medtronic specific settings
+  # Mono-user database - all CSV files in a folder belong to one user
+  # Support for semicolon delimiter and comma decimal separator
+
+minidose1:
+  # MiniDose1 Clinical Trial dataset specific settings
+  # Multi-user database - all users in shared pipe-separated files
+  # Relative timestamps converted to absolute using reference enrollment date
+
+loop:
+  # Loop automated insulin delivery system dataset
+  # Multi-user database - all users in shared pipe-separated files
+  # Data types: CGM, basal, bolus, food
