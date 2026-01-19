@@ -10,7 +10,6 @@ create_fixed_frequency: true
 glucose_only: false
 calibration_period_minutes: 165 # 2h 45m
 remove_after_calibration_hours: 24
-output_file: "OUTPUT/processed_dataset.csv"
 
 # Field mappings configuration
 # Output fields (standard field names) that should appear in CSV output

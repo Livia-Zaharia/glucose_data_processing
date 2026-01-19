@@ -14,7 +14,7 @@ from formats.base_converter import CSVFormatConverter
 class DexcomG6Converter(CSVFormatConverter):
     """Converter for Dexcom G6 format (standard format)."""
 
-    def __init__(self, output_fields: Optional[List[str]] = None):
+    def __init__(self, output_fields: Optional[List[str]] = None, database_type: str = "dexcom"):
         """
         Initialize the Dexcom G6 converter.
 
@@ -22,10 +22,11 @@ class DexcomG6Converter(CSVFormatConverter):
             output_fields: List of standard field names to include in output.
                           Uses standard field names (e.g., 'timestamp', 'glucose_value_mgdl').
                           If None, uses default fields.
+            database_type: Database type identifier (default: "dexcom")
         """
-        super().__init__(output_fields)
+        super().__init__(output_fields, database_type)
         # Load database schema
-        self.db_schema = self._load_schema("dexcom_schema.yaml")
+        self.db_schema = self._load_schema(self.database_type)
         self.converter_schema = self.db_schema["converters"]["g6"]
 
     def can_handle(self, headers: List[str]) -> bool:

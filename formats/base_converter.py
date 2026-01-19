@@ -119,7 +119,7 @@ class CSVFormatConverter(ABC):
         field_map = cls.get_field_to_display_name_map()
         return field_map.get(standard_name, standard_name)
     
-    def __init__(self, output_fields: Optional[List[str]] = None):
+    def __init__(self, output_fields: Optional[List[str]] = None, database_type: Optional[str] = None):
         """
         Initialize the converter with optional output fields configuration.
         
@@ -128,7 +128,9 @@ class CSVFormatConverter(ABC):
                           Uses standard field names (e.g., 'timestamp', 'glucose_value_mgdl').
                           If None, uses get_default_output_fields() (which uses config if available).
                           Timestamp is always included.
+            database_type: Optional database type identifier.
         """
+        self.database_type = database_type
         if output_fields is None:
             # Get output fields from config or defaults (already standard names)
             self.output_fields_standard: Set[str] = set(self.get_output_fields())
@@ -140,17 +142,23 @@ class CSVFormatConverter(ABC):
         self.output_fields_standard.add('timestamp')
     
     @classmethod
-    def _load_schema(cls, schema_file: str) -> Dict:
+    def _load_schema(cls, database_type_or_file: str) -> Dict:
         """
         Load conversion schema from YAML file.
         
         Args:
-            schema_file: Name of the schema file (e.g., 'uom_schema.yaml')
+            database_type_or_file: Database type (e.g. 'uom') or schema filename (e.g., 'uom_schema.yaml')
             
         Returns:
             Dictionary containing conversion schema
         """
-        schema_path = Path(__file__).parent / schema_file
+        if database_type_or_file.endswith('.yaml'):
+            schema_file = database_type_or_file
+        else:
+            from processing.core.config import get_schema_file
+            schema_file = get_schema_file(database_type_or_file)
+            
+        schema_path = Path(__file__).parent.parent / "formats" / schema_file
         with open(schema_path, 'r', encoding='utf-8') as f:
             return yaml.safe_load(f)
     

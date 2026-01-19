@@ -20,12 +20,28 @@ The `GlucoseMLPreprocessor` is governed by a YAML configuration file (typically 
 
 ## Output Configuration
 
+### `output_file`
+The default path where the processed dataset will be saved. 
+- **Type**: string (path)
+- **Default**: `"OUTPUT/processed_dataset.csv"`
+
 ### `output_fields`
 A list of standardized field names to include in the final CSV. Fields excluded from this list will be dropped during the final preparation step.
 
 ### `field_to_display_name_map`
 Maps internal standardized names to user-friendly column headers in the output file.
 Example: `glucose_value_mgdl: "Glucose Value (mg/dL)"`
+
+## Result Naming Priority
+
+The final output filename is resolved using the following priority:
+
+1.  **Command Line**: Explicitly provided via `--output` or `-o`.
+2.  **Configuration**: Defined by the `output_file` field in the YAML config.
+3.  **Schema Default**: If neither of the above are set, and a **single** dataset is provided, the pipeline looks up the `database` field in the database's schema (e.g., `uom.csv`).
+4.  **Generic Fallback**: If multiple datasets are combined or no schema name is found, it defaults to `OUTPUT/processed_dataset.csv`.
+
+Note: Since the default `glucose_config.yaml` often contains an `output_file` entry, you may need to comment it out or remove it if you want to use the "Smart Default" schema-based naming.
 
 ## Database-Specific Overrides
 

@@ -14,15 +14,16 @@ class HupaConverter(CSVFormatConverter):
     
     CSV_DELIMITER: str = ";"
 
-    def __init__(self, output_fields: Optional[List[str]] = None):
+    def __init__(self, output_fields: Optional[List[str]] = None, database_type: str = "hupa"):
         """
         Initialize the Hupa converter.
 
         Args:
             output_fields: List of standard field names to include in output.
+            database_type: Database type identifier (default: "hupa")
         """
-        super().__init__(output_fields)
-        self.db_schema = self._load_schema("hupa_schema.yaml")
+        super().__init__(output_fields, database_type)
+        self.db_schema = self._load_schema(self.database_type)
         self.converter_schema = self.db_schema["converters"]["hupa"]
 
     def can_handle(self, headers: List[str]) -> bool:

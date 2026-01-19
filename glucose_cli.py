@@ -14,12 +14,8 @@ import polars as pl
 from loguru import logger
 from glucose_ml_preprocessor import GlucoseMLPreprocessor
 from processing.stats_manager import print_statistics as sm_print_statistics
-
-# Optional cycle data parser (research-phase convenience)
-try:
-    from cycle_data_parser import CycleDataParser
-except ImportError:
-    CycleDataParser = None
+from formats import DatabaseDetector
+from processing.core.config import get_schema_field
 
 app = typer.Typer(help="Glucose Data Preprocessing CLI")
 
@@ -110,11 +106,6 @@ def main(
         "--fixed-frequency/--no-fixed-frequency",
         help="Create fixed-frequency data with consistent intervals (default: enabled)"
     ),
-    cycle_data_file: Optional[Path] = typer.Option(
-        None,
-        "--cycle",
-        help="Path to cycle data CSV file with columns: date, flow_amount. Glucose data will be filtered to cycle data date range."
-    ),
     first_n_users: Optional[int] = typer.Option(
         None,
         "--first-n-users",
@@ -171,9 +162,17 @@ def main(
         logger.info(f"   Save intermediate files: {save_intermediate_files}")
         logger.info(f"   Glucose only mode: {glucose_only}")
         logger.info(f"   Fixed-frequency data: {create_fixed_frequency}")
-        if cycle_data_file:
-            logger.info(f"   Cycle data file: {cycle_data_file}")
     
+    # Detect database type early for single input to determine default output filename
+    database_type = None
+    if len(validated_folders) == 1:
+        try:
+            db_detector = DatabaseDetector()
+            database_type = db_detector.detect_database_type(validated_folders[0])
+        except Exception as e:
+            if verbose:
+                logger.warning(f"Could not detect database type early: {e}")
+
     try:
         resolved_config_file = _resolve_config_file(config_file)
         if verbose and resolved_config_file and not config_file:
@@ -203,12 +202,23 @@ def main(
             # Use CLI arguments directly
             preprocessor = GlucoseMLPreprocessor(**cli_overrides)
         
-        # Resolve output file: CLI > Config > Default
+        # Resolve output file priority:
+        # 1. CLI --output option
+        # 2. Config file 'output_file' setting (if provided and not the generic default)
+        # 3. Schema 'database' field (smart default for single input)
+        # 4. Fallback to config value or hardcoded default
         final_output_file = output_file
-        if final_output_file is None:
+        
+        if final_output_file is None and preprocessor.output_file:
             final_output_file = preprocessor.output_file
+
+        if final_output_file is None and len(validated_folders) == 1 and database_type:
+            db_name = get_schema_field(database_type, "database")
+            if db_name:
+                final_output_file = Path("OUTPUT", f"{db_name}.csv")
+            
         if final_output_file is None:
-            final_output_file = Path("OUTPUT" , "processed_dataset.csv")
+            final_output_file = Path("OUTPUT", "processed_dataset.csv")
             
         # Ensure output directory exists
         if final_output_file.parent and not final_output_file.parent.exists():
@@ -216,22 +226,6 @@ def main(
                 logger.info(f"Creating output directory: {final_output_file.parent}")
             final_output_file.parent.mkdir(parents=True, exist_ok=True)
 
-        # Parse cycle data if provided
-        cycle_parser = None
-        if cycle_data_file:
-            if CycleDataParser is None:
-                logger.error("Error: cycle_data_parser module not found. Cannot process --cycle.")
-                raise typer.Exit(1)
-            if not cycle_data_file.exists():
-                logger.error(f"Error: Cycle data file '{cycle_data_file}' does not exist")
-                raise typer.Exit(1)
-            
-            if verbose:
-                logger.info("Parsing cycle data...")
-            
-            cycle_parser = CycleDataParser()
-            cycle_parser.parse_cycle_file(cycle_data_file)
-        
         # Process data
         if verbose:
             if len(validated_folders) == 1:
@@ -242,24 +236,12 @@ def main(
         # Process single or multiple databases
         if len(validated_folders) == 1:
             ml_data, statistics, _ = preprocessor.process(
-                validated_folders[0], final_output_file
+                validated_folders[0], final_output_file, database_type=database_type
             )
         else:
             ml_data, statistics, _ = preprocessor.process_multiple_databases(
                 validated_folders, final_output_file
             )
-        
-        # Merge cycle data if provided
-        if cycle_parser:
-            if verbose:
-                logger.info("Integrating cycle data...")
-            ml_data = preprocessor.merge_cycle_data(ml_data, cycle_parser)
-            
-            # Save the final data with cycle information
-            if final_output_file:
-                ml_data.write_csv(final_output_file)
-                if verbose:
-                    logger.info(f"Final data with cycle information saved to: {final_output_file}")
         
         # Show results
         logger.info(f"Processing completed successfully!")

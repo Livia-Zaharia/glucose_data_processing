@@ -28,7 +28,7 @@ from formats.base_converter import CSVFormatConverter
 
 # Import modular processing components
 from processing.core.fields import StandardFieldNames, INTERPOLATED_EVENT_TYPE
-from processing.core.config import extract_field_categories
+from processing.core.config import extract_field_categories, get_schema_file
 from processing.steps.gap_detection import GapDetector
 from processing.steps.interpolation import ValueInterpolator
 from processing.steps.filtering import SequenceFilter
@@ -275,13 +275,7 @@ class GlucoseMLPreprocessor:
 
         extra: set[str] = set()
         for db in database_types:
-            schema_file = {
-                "uom": "uom_schema.yaml",
-                "dexcom": "dexcom_schema.yaml",
-                "libre3": "freestyle_libre3_schema.yaml",
-                "freestyle_libre3": "freestyle_libre3_schema.yaml",
-                "ai_ready": "ai_ready_schema.yaml",
-            }.get(db, f"{db}_schema.yaml")
+            schema_file = get_schema_file(db)
             schema_path = Path(__file__).parent / "formats" / schema_file
             if not schema_path.exists():
                 continue
@@ -513,14 +507,17 @@ class GlucoseMLPreprocessor:
             field_categories_dict = self._field_categories_dict
         return self.ml_preparer.prepare_ml_data(df, field_categories_dict)
 
-    def process(self, csv_folder: Path, output_file: Optional[Path] = None, last_sequence_id: int = 0) -> Tuple[pl.DataFrame, Dict[str, Any], int]:
+    def process(self, csv_folder: Path, output_file: Optional[Path] = None, last_sequence_id: int = 0, database_type: Optional[str] = None) -> Tuple[pl.DataFrame, Dict[str, Any], int]:
         logger.info("Starting glucose data preprocessing for ML...")
         
-        db_detector = DatabaseDetector()
-        database_type = db_detector.detect_database_type(csv_folder)
+        if database_type is None:
+            db_detector = DatabaseDetector()
+            database_type = db_detector.detect_database_type(csv_folder)
+            
         field_categories_dict = extract_field_categories(database_type) if database_type != 'unknown' else None
         self._field_categories_dict = field_categories_dict
         
+        db_detector = DatabaseDetector()
         database_converter = db_detector.get_database_converter(database_type, self.config or {})
         if (
             output_file

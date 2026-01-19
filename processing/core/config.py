@@ -5,19 +5,10 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 from processing.core.fields import StandardFieldNames
 
-def extract_field_categories(database_type: str) -> Dict[str, Any]:
+def get_schema_file(database_type: str) -> str:
     """
-    Extract field categories and settings from schema file.
-    
-    Args:
-        database_type: Database type (e.g., 'uom', 'dexcom', 'freestyle_libre3')
-        
-    Returns:
-        Dictionary with categories ('continuous', 'occasional', 'service') 
-        and settings (e.g., 'remove_after_calibration')
+    Get the schema filename for a given database type.
     """
-    # Map database type to schema file name (legacy aliases).
-    # Prefer convention: `<database_type>_schema.yaml` if present.
     schema_files = {
         'uom': 'uom_schema.yaml',
         'dexcom': 'dexcom_schema.yaml',
@@ -30,15 +21,59 @@ def extract_field_categories(database_type: str) -> Dict[str, Any]:
         'minidose1': 'minidose1_schema.yaml',
         'uc_ht': 'uc_ht_schema.yaml',
     }
+    return schema_files.get(database_type, f"{database_type}_schema.yaml")
 
-    schema_file = schema_files.get(database_type, f"{database_type}_schema.yaml")
+def load_schema(database_type: str) -> Optional[Dict[str, Any]]:
+    """
+    Find, verify existence, and load the schema file for a given database type.
     
-    # Load schema file
-    # Note: Using Path(__file__).parent.parent.parent to get to the root from processing/core/
+    Args:
+        database_type: Database type string
+        
+    Returns:
+        Dictionary containing schema content if found and valid, else None.
+    """
+    schema_file = get_schema_file(database_type)
     root_dir = Path(__file__).parent.parent.parent
     schema_path = root_dir / 'formats' / schema_file
     
     if not schema_path.exists():
+        return None
+        
+    with open(schema_path, 'r', encoding='utf-8') as f:
+        return yaml.safe_load(f)
+
+def get_schema_field(database_type: str, field_name: str) -> Any:
+    """
+    Get a specific field value from the schema file.
+    
+    Args:
+        database_type: Database type string
+        field_name: Name of the field to retrieve from the schema
+        
+    Returns:
+        The value of the field if present, else None.
+    """
+    schema = load_schema(database_type)
+    if schema is None:
+        return None
+        
+    return schema.get(field_name)
+
+def extract_field_categories(database_type: str) -> Dict[str, Any]:
+    """
+    Extract field categories and settings from schema file.
+    
+    Args:
+        database_type: Database type (e.g., 'uom', 'dexcom', 'freestyle_libre3')
+        
+    Returns:
+        Dictionary with categories ('continuous', 'occasional', 'service') 
+        and settings (e.g., 'remove_after_calibration')
+    """
+    schema = load_schema(database_type)
+    
+    if schema is None:
         # Return default with only glucose as continuous
         return {
             'continuous': [StandardFieldNames.GLUCOSE_VALUE],
@@ -46,9 +81,6 @@ def extract_field_categories(database_type: str) -> Dict[str, Any]:
             'service': [],
             'remove_after_calibration': True
         }
-    
-    with open(schema_path, 'r', encoding='utf-8') as f:
-        schema = yaml.safe_load(f)
     
     # Get field_categories from schema
     field_categories = schema.get('field_categories', {})
