@@ -147,6 +147,11 @@ def main(
         "--fixed-frequency/--no-fixed-frequency",
         help="Create fixed-frequency data with consistent intervals (default: enabled)"
     ),
+    last_step: int = typer.Option(
+        0,
+        "--last-step",
+        help="Last processing step to execute (1-7). 0 means all steps. (default: 0)"
+    ),
     first_n_users: Optional[int] = typer.Option(
         None,
         "--first-n-users",
@@ -208,6 +213,7 @@ def main(
         logger.info(f"   Save intermediate files: {save_intermediate_files}")
         logger.info(f"   Glucose only mode: {glucose_only}")
         logger.info(f"   Fixed-frequency data: {create_fixed_frequency}")
+        logger.info(f"   Last step: {last_step if last_step > 0 else 'All'}")
     
     # Detect database type early for single input to determine default output filename
     database_type = None
@@ -235,6 +241,7 @@ def main(
             'remove_after_calibration_hours': remove_after_calibration_hours,
             'glucose_only': glucose_only,
             'create_fixed_frequency': create_fixed_frequency,
+            'last_step': last_step,
             'first_n_users': first_n_users if first_n_users and first_n_users > 0 else None,
             'verbose': verbose
         }
