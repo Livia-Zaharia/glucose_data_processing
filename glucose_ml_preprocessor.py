@@ -56,6 +56,55 @@ def _init_worker_process(params: Dict[str, Any]) -> None:
     if config:
         CSVFormatConverter.initialize_from_config(config)
 
+def _run_processing_pipeline(
+    df: pl.DataFrame,
+    last_sequence_id: int,
+    field_categories_dict: Optional[Dict[str, Any]],
+    gap_detector: GapDetector,
+    interpolator: ValueInterpolator,
+    filter_step: SequenceFilter,
+    fixed_freq_generator: FixedFreqGenerator,
+    ml_preparer: MLDataPreparer,
+    stats_manager: StatsManager,
+    create_fixed_frequency: bool,
+    log_steps: bool = False
+) -> Tuple[pl.DataFrame, Dict[str, Any], int]:
+    """
+    Common processing pipeline used by both sequential and parallel processing modes.
+    """
+    if log_steps:
+        logger.info("STEP 2: Detecting gaps and creating sequences...")
+    df, gap_stats, last_sequence_id = gap_detector.detect_gaps_and_sequences(df, last_sequence_id, field_categories_dict)
+    
+    if log_steps:
+        logger.info("STEP 3: Interpolating missing values...")
+    df, interp_stats = interpolator.interpolate_missing_values(df, field_categories_dict)
+    
+    if log_steps:
+        logger.info("STEP 4: Filtering sequences by minimum length...")
+    df, filter_stats = filter_step.filter_sequences_by_length(df)
+    
+    if create_fixed_frequency:
+        if log_steps:
+            logger.info("STEP 5: Creating fixed-frequency data...")
+        df, fixed_freq_stats = fixed_freq_generator.create_fixed_frequency_data(df, field_categories_dict)
+    else:
+        fixed_freq_stats = {}
+    
+    if log_steps:
+        logger.info("STEP 6: Filtering to glucose-only data...")
+    df, glucose_filter_stats = filter_step.filter_glucose_only(df)
+    
+    if log_steps:
+        logger.info("STEP 7: Preparing final ML dataset...")
+    ml_df = ml_preparer.prepare_ml_data(df, field_categories_dict)
+    
+    stats = stats_manager.get_statistics(
+        ml_df, gap_stats, interp_stats, filter_stats, glucose_filter_stats, fixed_freq_stats
+    )
+    
+    return ml_df, stats, last_sequence_id
+
 def _process_user_frame_task(
     user_df: pl.DataFrame,
     params: Dict[str, Any],
@@ -85,23 +134,12 @@ def _process_user_frame_task(
     ml_preparer = MLDataPreparer(config=params.get('config', {}))
     stats_manager = StatsManager()
 
-    # Process
+    # Process using the common pipeline
     # Start with sequence ID 0 for local count
-    df, gap_stats, user_max_id = gap_detector.detect_gaps_and_sequences(user_df, 0, field_categories_dict)
-    df, interp_stats = interpolator.interpolate_missing_values(df, field_categories_dict)
-    df, filter_stats = filter_step.filter_sequences_by_length(df)
-    
-    if params['create_fixed_frequency']:
-        df, fixed_freq_stats = fixed_freq_generator.create_fixed_frequency_data(df, field_categories_dict)
-    else:
-        fixed_freq_stats = {}
-    
-    df, glucose_filter_stats = filter_step.filter_glucose_only(df)
-    ml_df = ml_preparer.prepare_ml_data(df, field_categories_dict)
-    
-    # Collect stats
-    user_stats = stats_manager.get_statistics(
-        ml_df, gap_stats, interp_stats, filter_stats, glucose_filter_stats, fixed_freq_stats
+    ml_df, user_stats, user_max_id = _run_processing_pipeline(
+        user_df, 0, field_categories_dict,
+        gap_detector, interpolator, filter_step, fixed_freq_generator, ml_preparer, stats_manager,
+        params['create_fixed_frequency']
     )
     
     # We return the max sequence ID from gap detection to maintain parity with sequential processing
@@ -535,28 +573,13 @@ class GlucoseMLPreprocessor:
         logger.info("STEP 1: Consolidating CSV files (mandatory step)...")
         df = self.consolidate_glucose_data(csv_folder)
         
-        logger.info("STEP 2: Detecting gaps and creating sequences...")
-        df, gap_stats, last_sequence_id = self.gap_detector.detect_gaps_and_sequences(df, last_sequence_id, field_categories_dict)
-        
-        logger.info("STEP 3: Interpolating missing values...")
-        df, interp_stats = self.interpolator.interpolate_missing_values(df, field_categories_dict)
-        
-        logger.info("STEP 4: Filtering sequences by minimum length...")
-        df, filter_stats = self.filter_step.filter_sequences_by_length(df)
-        
-        if self.create_fixed_frequency:
-            logger.info("STEP 5: Creating fixed-frequency data...")
-            df, fixed_freq_stats = self.fixed_freq_generator.create_fixed_frequency_data(df, field_categories_dict)
-        else:
-            fixed_freq_stats = {}
-        
-        logger.info("STEP 6: Filtering to glucose-only data...")
-        df, glucose_filter_stats = self.filter_step.filter_glucose_only(df)
-        
-        logger.info("STEP 7: Preparing final ML dataset...")
-        ml_df = self.ml_preparer.prepare_ml_data(df, self._field_categories_dict)
-        
-        stats = self.stats_manager.get_statistics(ml_df, gap_stats, interp_stats, filter_stats, glucose_filter_stats, fixed_freq_stats)
+        # Use common processing pipeline for steps 2-7
+        ml_df, stats, last_sequence_id = _run_processing_pipeline(
+            df, last_sequence_id, field_categories_dict,
+            self.gap_detector, self.interpolator, self.filter_step, self.fixed_freq_generator, self.ml_preparer, self.stats_manager,
+            self.create_fixed_frequency,
+            log_steps=True
+        )
         
         if output_file:
             ml_df.write_csv(output_file)
@@ -642,28 +665,18 @@ class GlucoseMLPreprocessor:
                                 max_ts = s if (max_ts is None or s > max_ts) else max_ts
                         except (KeyError, AttributeError, ValueError):
                             pass
-                        df, gap_stats, current_last_sequence_id = self.gap_detector.detect_gaps_and_sequences(
-                            user_df, current_last_sequence_id, field_categories_dict
+
+                        # Use common processing pipeline
+                        ml_df, user_stats, current_last_sequence_id = _run_processing_pipeline(
+                            user_df, current_last_sequence_id, field_categories_dict,
+                            self.gap_detector, self.interpolator, self.filter_step, self.fixed_freq_generator, self.ml_preparer, self.stats_manager,
+                            self.create_fixed_frequency
                         )
-                        df, interp_stats = self.interpolator.interpolate_missing_values(df, field_categories_dict)
-                        self.filter_step.min_sequence_len = self.min_sequence_len
-                        df, filter_stats = self.filter_step.filter_sequences_by_length(df)
-                        if self.create_fixed_frequency:
-                            df, fixed_freq_stats = self.fixed_freq_generator.create_fixed_frequency_data(df, field_categories_dict)
-                        else:
-                            fixed_freq_stats = {}
-                        
-                        self.filter_step.glucose_only = self.glucose_only
-                        df, glucose_filter_stats = self.filter_step.filter_glucose_only(df)
-                        ml_df = self.ml_preparer.prepare_ml_data(df, field_categories_dict)
                         
                         # Add dataset name in multi-database mode
                         ml_df = ml_df.with_columns(pl.lit(csv_folder.name).alias(dataset_name_display))
 
-                        # Collect stats for this user
-                        user_stats = self.stats_manager.get_statistics(
-                            ml_df, gap_stats, interp_stats, filter_stats, glucose_filter_stats, fixed_freq_stats
-                        )
+                        # Accumulate total sequences and stats
                         all_processing_stats.append(user_stats)
                         total_sequences += user_stats['dataset_overview']['total_sequences']
 
