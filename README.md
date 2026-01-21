@@ -70,53 +70,48 @@ The preprocessor executes the following steps in sequence:
 
 ## 📊 Supported Datasets
 
-- **UoM (University of Manchester)**: Multi-modality T1D dataset.
-- **AI-READY**: Comprehensive health dataset in zip format.
-- **Dexcom G6**: Standardized export format from Dexcom receivers.
-- **FreeStyle Libre 3**: Abbott's CGM data format.
+The project supports multiple CGM data formats. See [docs/datasets.csv](docs/datasets.csv) for a comprehensive list of 50+ public glucose datasets with download links.
 
-## 📦 Installation
+### Datasets with Format Converters
 
-This project uses [uv](https://github.com/astral-sh/uv), a fast Python package installer and resolver.
+| Format | Dataset | Description |
+|--------|---------|-------------|
+| `uom` | [T1D-UOM](https://zenodo.org/records/15806142) | University of Manchester multi-modality T1D dataset |
+| `hupa` | [HUPA](https://data.mendeley.com/datasets/3hbcscwz44/1) | CGM with heart rate, steps, meals, insulin |
+| `uc_ht` | [UCHTT1DM](https://github.com/fisiologiacuantitativauc/UC_HT_T1DM) | Type 1 + healthy controls with CGM, HR, steps |
+| `loop` | [Loop System](https://public.jaeb.org) | DIY Loop insulin delivery observational study |
+| `minidose1` | [Mini-dose Glucagon](https://public.jaeb.org) | Mini-dose glucagon for hypoglycemia prevention |
+| `ai_ready` | [AI-READI](https://aireadi.org/) | Comprehensive health dataset (manual access) |
+| `dexcom` | Dexcom G6 | Standardized export format from Dexcom receivers |
+| `libre3` | FreeStyle Libre 3 | Abbott's CGM data format |
+| `medtronic` | Medtronic | Medtronic pump/CGM export format |
 
-### Installing uv
+### Downloading Datasets
 
-**Windows (PowerShell):**
-```powershell
-powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-```
-
-**macOS and Linux:**
-```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-```
-
-After installation, **restart your terminal** to make `uv` available in your PATH. The installer will automatically configure your PATH for you.
-
-**Verify installation:**
-```bash
-uv --version
-```
-
-You should see the version number (e.g., `uv 0.x.x`).
-
-For alternative installation methods (including package managers), see the [official uv documentation](https://github.com/astral-sh/uv#installation).
-
-### Setting up the project
-
-Once `uv` is installed, sync the project dependencies:
+Use the built-in download tool to fetch publicly available datasets:
 
 ```bash
-uv sync
+# List all available datasets for download
+uv run python download.py list
+
+# Download a specific dataset by name
+uv run python download.py by-name "HUPA"
+
+# Download a specific dataset by ID
+uv run python download.py by-id 14
+
+# Download all programmatically accessible datasets
+uv run python download.py all
+
+# Force redownload even if exists
+uv run python download.py by-name "T1D-UOM" --force
 ```
 
-**What this command does:**
-- Creates a virtual environment (if needed) for the project
-- Reads `pyproject.toml` to determine required dependencies
-- Downloads and installs all Python packages needed by the project
-- Makes the project ready to run without manual dependency management
+Downloaded datasets are saved to the `DATA/` folder with folder names matching their format converters (e.g., `DATA/hupa/`, `DATA/uom/`).
 
-This is typically only needed once after cloning the repository or when dependencies change.
+**Note**: Some datasets require credentials:
+- **PhysioNet** datasets (CGMacros, BIG IDEAs): Set `PHYSIONET_USERNAME` and `PHYSIONET_PASSWORD` in `.env`
+- **Manual access** datasets (AI-READI, some JAEB DirecNet studies): Require registration on their respective portals
 
 ## 📦 Installation
 
@@ -167,18 +162,10 @@ This is typically only needed once after cloning the repository or when dependen
 
 After installation, you can use the following commands:
 
-### Basic Usage
-
-After installation, you can use the following commands:
-
 ```bash
 # Process a single dataset (output saved to OUTPUT folder automatically)
 glucose-process <path/to/your/data>
-# Process a single dataset (output saved to OUTPUT folder automatically)
-glucose-process <path/to/your/data>
 
-# Process with custom output filename
-glucose-process <path/to/your/data> -o my_custom_output.csv
 # Process with custom output filename
 glucose-process <path/to/your/data> -o my_custom_output.csv
 

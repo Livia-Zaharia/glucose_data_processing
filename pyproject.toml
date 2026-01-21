@@ -12,11 +12,16 @@ dependencies = [
     "eliot",
     "loguru>=0.7.3",
     "fastexcel>=0.18.0",
+    "fsspec",
+    "aiohttp",
+    "s3fs",
+    "requests",
 ]
 
 [project.scripts]
 glucose-process = "glucose_cli:app"
 glucose-compare = "compare_checkpoints:app"
+glucose-download = "download:app"
 
 [dependency-groups]
 dev = [
@@ -35,4 +40,4 @@ build-backend = "hatchling.build"
 package = true
 
 [tool.hatch.build.targets.wheel]
-packages = ["formats", "processing", "glucose_cli.py", "compare_checkpoints.py", "glucose_ml_preprocessor.py"]
+packages = ["formats", "processing", "glucose_cli.py", "compare_checkpoints.py", "glucose_ml_preprocessor.py", "download.py"]
