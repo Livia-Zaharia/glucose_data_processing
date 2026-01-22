@@ -190,15 +190,6 @@ class FixedFreqGenerator:
         glucose_col = StandardFieldNames.GLUCOSE_VALUE
         event_type_col = StandardFieldNames.EVENT_TYPE
         user_id_col = StandardFieldNames.USER_ID
-        interp_col = StandardFieldNames.INTERPOLATED
-
-        # Ensure interp_col is boolean if it exists
-        if interp_col in seq_data.columns:
-            if seq_data.schema[interp_col] == pl.Utf8 or seq_data.schema[interp_col] == pl.String:
-                seq_data = seq_data.with_columns(
-                    pl.col(interp_col).map_elements(lambda x: str(x).lower() == 'true', return_dtype=pl.Boolean)
-                )
-
         first_timestamp = seq_data[ts_col].min()
         last_timestamp = seq_data[ts_col].max()
         if first_timestamp is None or last_timestamp is None:
@@ -347,23 +338,10 @@ class FixedFreqGenerator:
     ) -> pl.DataFrame:
         ts_col = StandardFieldNames.TIMESTAMP
         glucose_col = StandardFieldNames.GLUCOSE_VALUE
-        interp_col = StandardFieldNames.INTERPOLATED
-
         if not continuous_fields:
-            if interp_col in seq_data.columns:
-                # Use unique timestamps to avoid record explosion in multi-modality data
-                interp_status = seq_data.group_by(ts_col).agg(pl.col(interp_col).any().alias("_orig_interp"))
-                return (
-                    fixed_timestamps
-                    .join(interp_status, on=ts_col, how='left')
-                    .with_columns(pl.col("_orig_interp").fill_null(True).alias(interp_col))
-                    .drop("_orig_interp")
-                )
-            return fixed_timestamps.with_columns(pl.lit(True).alias(interp_col))
+            return fixed_timestamps
         
         result_df = fixed_timestamps
-        # Initialize interpolated column as False, we will update it below
-        result_df = result_df.with_columns(pl.lit(False).alias(interp_col))
         
         for field in continuous_fields:
             if field not in seq_data.columns:
@@ -395,29 +373,6 @@ class FixedFreqGenerator:
             
             combined = forward.join(backward.select([ts_col, f'{safe_name}_prev', f'ts_{safe_name}_prev']), on=ts_col, how='left')
             
-            # If interp_col is in seq_data, we want to know if the original point was interpolated
-            if interp_col in seq_data.columns:
-                # Use unique timestamps to avoid record explosion in multi-modality data
-                interp_status = seq_data.group_by(ts_col).agg(pl.col(interp_col).any().alias("_orig_interp"))
-                # Join and resolve the interpolated status
-                combined = combined.join(interp_status, on=ts_col, how='left')
-                
-                # If it's an exact match, we use the original interpolated status. 
-                # Otherwise (it's a new timestamp created by fixed frequency), it's True.
-                combined = combined.with_columns([
-                    pl.when(pl.col(f'ts_{safe_name}_prev') == pl.col(f'ts_{safe_name}_next'))
-                    .then(pl.col("_orig_interp").fill_null(False))
-                    .otherwise(pl.lit(True))
-                    .alias("_field_interp")
-                ]).drop("_orig_interp")
-            else:
-                combined = combined.with_columns([
-                    pl.when(pl.col(f'ts_{safe_name}_prev') == pl.col(f'ts_{safe_name}_next'))
-                    .then(pl.lit(False))
-                    .otherwise(pl.lit(True))
-                    .alias("_field_interp")
-                ])
-
             combined = combined.with_columns([
                 pl.when(pl.col(f'ts_{safe_name}_prev') == pl.col(f'ts_{safe_name}_next')) # Exact match
                 .then(pl.col(f'{safe_name}_prev'))
@@ -434,14 +389,12 @@ class FixedFreqGenerator:
                 ).alias(field)
             ])
             
-            # Merge field and its interpolation status into result_df
+            # Merge field into result_df
             result_df = result_df.join(
-                combined.select([ts_col, field, "_field_interp"]),
+                combined.select([ts_col, field]),
                 on=ts_col,
                 how='left'
-            ).with_columns([
-                (pl.col(interp_col) | pl.col("_field_interp").fill_null(False)).alias(interp_col)
-            ]).drop("_field_interp")
+            )
             
             if field == glucose_col:
                 interpolated_count = combined.filter(
@@ -544,9 +497,6 @@ class FixedFreqGenerator:
                 continue
             if c in numeric_cols:
                 stabilize_exprs.append(pl.col(c).cast(pl.Float64, strict=False).alias(c))
-            elif c == StandardFieldNames.INTERPOLATED:
-                # Keep interpolated as boolean
-                stabilize_exprs.append(pl.col(c).cast(pl.Boolean, strict=False).alias(c))
             else:
                 stabilize_exprs.append(pl.col(c).cast(pl.Utf8, strict=False).alias(c))
         

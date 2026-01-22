@@ -36,11 +36,6 @@ class GapDetector:
         ts_col = StandardFieldNames.TIMESTAMP
         user_id_col = StandardFieldNames.USER_ID
         seq_id_col = StandardFieldNames.SEQUENCE_ID
-        interp_col = StandardFieldNames.INTERPOLATED
-
-        if interp_col not in df.columns:
-            df = df.with_columns(pl.lit(False).alias(interp_col))
-
         calibration_stats = {
             'calibration_periods_detected': 0,
             'sequences_marked_for_removal': 0,

@@ -30,7 +30,6 @@ output_fields:
   - "step_count"
   - "igar_g_min"
   - "user_id"
-  - "interpolated"
 
 field_to_display_name_map:
   timestamp: "Timestamp (YYYY-MM-DDThh:mm:ss)"
@@ -42,4 +41,3 @@ field_to_display_name_map:
   step_count: "Step Count"
   igar_g_min: "IGAR (g/min)"
   user_id: "user_id"
-  interpolated: "interpolated-"

@@ -21,8 +21,7 @@ class StandardFieldNames:
     USER_ID = 'user_id'
     SEQUENCE_ID = 'sequence_id'
     DATASET_NAME = 'dataset_name'
-    INTERPOLATED = 'interpolated'
-    
+        
     def __init__(self) -> None:
         """Initialize standard field names."""
         # Get known standard fields from CSVFormatConverter

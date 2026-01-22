@@ -29,11 +29,6 @@ class ValueInterpolator:
         seq_id_col = StandardFieldNames.SEQUENCE_ID
         event_type_col = StandardFieldNames.EVENT_TYPE
         user_id_col = StandardFieldNames.USER_ID
-        interp_col = StandardFieldNames.INTERPOLATED
-
-        if interp_col not in df.columns:
-            df = df.with_columns(pl.lit(False).alias(interp_col))
-
         if field_categories_dict is None:
             field_categories_dict = {
                 'continuous': [glucose_col],
@@ -106,11 +101,6 @@ class ValueInterpolator:
                 .then(interpolated_values)
                 .otherwise(pl.col(field))
                 .alias(field),
-                # Mark as interpolated if we filled a null
-                pl.when(null_mask & is_small_gap & (interpolated_values.is_not_null()))
-                .then(pl.lit(True))
-                .otherwise(pl.col(interp_col))
-                .alias(interp_col)
             ])
             
             # Update event type for interpolated values
@@ -243,8 +233,6 @@ class ValueInterpolator:
                 if event_type_col in df.columns:
                     final_cols.append(pl.lit(INTERPOLATED_EVENT_TYPE).alias(event_type_col))
                 
-                final_cols.append(pl.lit(True).alias(interp_col))
-
                 if 'prev_user_id' in gaps_calculated.columns:
                     final_cols.append(
                         pl.when(pl.col('prev_user_id').is_not_null())
@@ -254,7 +242,7 @@ class ValueInterpolator:
                     )
                 
                 original_schema = df.schema
-                existing_col_names = [ts_col, seq_id_col, interp_col] + fields_to_interpolate
+                existing_col_names = [ts_col, seq_id_col] + fields_to_interpolate
                 if event_type_col in df.columns:
                     existing_col_names.append(event_type_col)
                 if 'prev_user_id' in gaps_calculated.columns:
