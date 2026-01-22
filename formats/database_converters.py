@@ -494,7 +494,7 @@ class MultiUserDatabaseConverter(DatabaseConverter):
             if user_id:
                 if user_id not in users:
                     users[user_id] = []
-                users[user_id].append(data_file)
+                users[user_id].append(csv_file)
         
         # Sort files within each user for deterministic processing
         for user_id in users:

@@ -46,7 +46,7 @@ class StatsManager:
         fast_insulin_col = get_col(StandardFieldNames.FAST_ACTING_INSULIN)
         long_insulin_col = get_col(StandardFieldNames.LONG_ACTING_INSULIN)
         carb_col = get_col(StandardFieldNames.CARB_VALUE)
-        interp_col = get_col(StandardFieldNames.INTERPOLATED)
+        
 
         date_range = {'start': 'N/A', 'end': 'N/A'}
         if ts_col in df.columns:
@@ -119,7 +119,7 @@ class StatsManager:
             'fast_acting_insulin_data_completeness': (1 - df[fast_insulin_col].null_count() / len(df)) * 100 if fast_insulin_col in df.columns and len(df) > 0 else 0,
             'long_acting_insulin_data_completeness': (1 - df[long_insulin_col].null_count() / len(df)) * 100 if long_insulin_col in df.columns and len(df) > 0 else 0,
             'carb_data_completeness': (1 - df[carb_col].null_count() / len(df)) * 100 if carb_col in df.columns and len(df) > 0 else 0,
-            'interpolated_records': df.filter(pl.col(interp_col).cast(pl.Utf8).str.to_lowercase() == "true").height if interp_col in df.columns else (df.filter(pl.col(event_type_col) == INTERPOLATED_EVENT_TYPE).height if event_type_col in df.columns else 0)
+            'interpolated_records': df.filter(pl.col(event_type_col) == INTERPOLATED_EVENT_TYPE).height if event_type_col in df.columns else 0
         }
         
         return stats

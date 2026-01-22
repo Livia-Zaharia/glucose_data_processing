@@ -15,11 +15,10 @@ from loguru import logger
 from glucose_ml_preprocessor import GlucoseMLPreprocessor
 from processing.stats_manager import print_statistics as sm_print_statistics
 from formats import DatabaseDetector
-from processing.core.config import get_schema_field
 
 app = typer.Typer(help="Glucose Data Preprocessing CLI")
 
-def _generate_output_filename(input_folders: List[Path], user_output: Path) -> Path:
+def _generate_output_filename(input_folders: List[Path], user_output: Optional[Path]) -> Path:
     """
     Generate output filename based on source folder names.
     
@@ -30,7 +29,7 @@ def _generate_output_filename(input_folders: List[Path], user_output: Path) -> P
     output_dir.mkdir(exist_ok=True)
     
     # If user provided a custom output path, use that filename
-    if user_output != Path("glucose_ml_ready.csv"):
+    if user_output is not None:
         return output_dir / user_output.name
     
     # Generate filename from source folder names
@@ -189,11 +188,6 @@ def main(
         
         validated_folders.append(input_folder)
     
-    # Generate output filename and ensure OUTPUT folder exists
-    if output_file is None:
-        output_file = Path("glucose_ml_ready.csv")  # Default for filename generation
-    final_output_file = _generate_output_filename(validated_folders, output_file)
-    
     # Initialize preprocessor info
     if verbose:
         logger.info("Initializing glucose data preprocessor...")
@@ -215,16 +209,6 @@ def main(
         logger.info(f"   Fixed-frequency data: {create_fixed_frequency}")
         logger.info(f"   Last step: {last_step if last_step > 0 else 'All'}")
     
-    # Detect database type early for single input to determine default output filename
-    database_type = None
-    if len(validated_folders) == 1:
-        try:
-            db_detector = DatabaseDetector()
-            database_type = db_detector.detect_database_type(validated_folders[0])
-        except Exception as e:
-            if verbose:
-                logger.warning(f"Could not detect database type early: {e}")
-
     try:
         resolved_config_file = _resolve_config_file(config_file)
         if verbose and resolved_config_file and not config_file:
@@ -256,22 +240,11 @@ def main(
             preprocessor = GlucoseMLPreprocessor(**cli_overrides)
         
         # Resolve output file priority:
-        # 1. CLI --output option
-        # 2. Config file 'output_file' setting (if provided and not the generic default)
-        # 3. Schema 'database' field (smart default for single input)
-        # 4. Fallback to config value or hardcoded default
-        final_output_file = output_file
-        
-        if final_output_file is None and preprocessor.output_file:
-            final_output_file = preprocessor.output_file
-
-        if final_output_file is None and len(validated_folders) == 1 and database_type:
-            db_name = get_schema_field(database_type, "database")
-            if db_name:
-                final_output_file = Path("OUTPUT", f"{db_name}.csv")
-            
-        if final_output_file is None:
-            final_output_file = Path("OUTPUT", "processed_dataset.csv")
+        # 1. CLI --output option (filename only, placed in OUTPUT)
+        # 2. Config file 'output_file' setting (filename only, placed in OUTPUT)
+        # 3. Otherwise generate from dataset folder names (placed in OUTPUT)
+        user_output = output_file or preprocessor.output_file
+        final_output_file = _generate_output_filename(validated_folders, user_output)
             
         # Ensure output directory exists
         if final_output_file.parent and not final_output_file.parent.exists():
@@ -286,6 +259,16 @@ def main(
             else:
                 logger.info(f"Starting multi-database processing pipeline for {len(validated_folders)} databases...")
         
+        # Detect database type for single input
+        database_type = None
+        if len(validated_folders) == 1:
+            try:
+                db_detector = DatabaseDetector()
+                database_type = db_detector.detect_database_type(validated_folders[0])
+            except Exception as e:
+                if verbose:
+                    logger.warning(f"Could not detect database type: {e}")
+
         # Process single or multiple databases
         if len(validated_folders) == 1:
             ml_data, statistics, _ = preprocessor.process(
